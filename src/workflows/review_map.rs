@@ -252,6 +252,7 @@ fn static_stage_guides(project: ProjectId, stage_name: &str) -> Vec<String> {
     let analysis_def = match project {
         ProjectId::Linux => linux_patch_review::analysis_stage_by_name(stage_name),
         ProjectId::Sashiko => sashiko_patch_review::analysis_stage_by_name(stage_name),
+        ProjectId::Xen => super::xen_patch_review::analysis_stage_by_name(stage_name),
     };
     if let Some(def) = analysis_def {
         for g in def.guides {
@@ -274,6 +275,7 @@ fn static_stage_guides(project: ProjectId, stage_name: &str) -> Vec<String> {
             push_unique(&mut guides, "severity.md");
         }
         "report" => match project {
+            ProjectId::Xen => push_unique(&mut guides, "review-core.md"),
             ProjectId::Linux => push_unique(&mut guides, "inline-template.md"),
             ProjectId::Sashiko => push_unique(&mut guides, "github-summary-template.md"),
         },
@@ -288,6 +290,7 @@ fn build_prompts_manifest(
     stage_runs: &[StageRunRecord],
 ) -> Value {
     let base: Vec<String> = match project {
+        ProjectId::Xen => vec!["review-core.md".to_string(), "severity.md".to_string()],
         ProjectId::Linux => vec![
             "false-positive-guide.md".to_string(),
             "severity.md".to_string(),

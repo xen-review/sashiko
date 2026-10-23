@@ -120,6 +120,7 @@ impl BaselineResolution {
 
 #[derive(Debug)]
 pub struct BaselineRegistry {
+    project: crate::project::ProjectId,
     entries: Vec<MaintainersEntry>,
     remote_map: HashMap<String, String>, // URL -> Local Remote Name
     pub custom_remotes: Option<Vec<CustomRemoteSettings>>,
@@ -128,6 +129,30 @@ pub struct BaselineRegistry {
 }
 
 impl BaselineRegistry {
+    pub fn for_project(
+        repo_path: &Path,
+        custom_remotes: Option<Vec<CustomRemoteSettings>>,
+        project: crate::project::ProjectId,
+    ) -> Result<Self> {
+        let mut registry = Self::new(repo_path, custom_remotes)?;
+        registry.project = project;
+        if project == crate::project::ProjectId::Xen {
+            registry.entries.clear();
+            registry.mainline_remote = registry
+                .remote_map
+                .iter()
+                .find(|(url, name)| name.as_str() == "origin" && url.ends_with(".git"))
+                .or_else(|| {
+                    registry
+                        .remote_map
+                        .iter()
+                        .find(|(_, name)| name.as_str() == "origin")
+                })
+                .map(|(url, name)| (url.clone(), name.clone()));
+        }
+        Ok(registry)
+    }
+
     pub fn new(
         repo_path: &Path,
         custom_remotes: Option<Vec<CustomRemoteSettings>>,
@@ -190,6 +215,7 @@ impl BaselineRegistry {
         };
 
         Ok(Self {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes,
@@ -379,7 +405,9 @@ impl BaselineRegistry {
         }
 
         // 1.5 Version Tag from Subject
-        candidates.extend(subject_version_candidates(subject));
+        if self.project != crate::project::ProjectId::Xen {
+            candidates.extend(subject_version_candidates(subject));
+        }
 
         // 2. Subsystem Heuristic
         let heuristic_candidates = self.resolve_subsystem_heuristic(files, subject);
@@ -437,7 +465,9 @@ impl BaselineRegistry {
         }
 
         // 4. Linux Next
-        candidates.push(self.resolve_url(LINUX_NEXT_URL, None));
+        if self.project != crate::project::ProjectId::Xen {
+            candidates.push(self.resolve_url(LINUX_NEXT_URL, None));
+        }
 
         // 5. Mainline
         // Use the identified mainline remote (Linus tree or origin) as a
@@ -448,9 +478,14 @@ impl BaselineRegistry {
             candidates.push(BaselineResolution::RemoteTarget {
                 url: url.clone(),
                 name: name.clone(),
-                branch: Some("master".to_string()),
+                branch: (self.project != crate::project::ProjectId::Xen)
+                    .then(|| "master".to_string()),
             });
         } else {
+            candidates.push(BaselineResolution::LocalRef("HEAD".to_string()));
+        }
+
+        if self.project == crate::project::ProjectId::Xen {
             candidates.push(BaselineResolution::LocalRef("HEAD".to_string()));
         }
 
@@ -855,6 +890,55 @@ mod tests {
         assert!(extract_base_commit(&format!("prefix base-commit: {sha1}\n")).is_none());
     }
 
+    #[tokio::test]
+    async fn test_xen_baselines_never_include_linux_trees_or_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let init = crate::git_cmd::in_dir(temp.path())
+            .args(["init"])
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let remote = crate::git_cmd::in_dir(temp.path())
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/xen-review/xen.git",
+            ])
+            .output()
+            .unwrap();
+        assert!(remote.status.success());
+        let registry =
+            BaselineRegistry::for_project(temp.path(), None, crate::project::ProjectId::Xen)
+                .unwrap();
+        let candidates = registry
+            .resolve_candidates(&[], "[PATCH 6.6] xen: change", None)
+            .await;
+        assert_eq!(
+            candidates,
+            vec![
+                BaselineResolution::RemoteTarget {
+                    url: "https://github.com/xen-review/xen.git".to_string(),
+                    name: "origin".to_string(),
+                    branch: None,
+                },
+                BaselineResolution::LocalRef("HEAD".to_string())
+            ]
+        );
+        let sha = "1234567890abcdef1234567890abcdef12345678";
+        let explicit = registry
+            .resolve_candidates(
+                &[],
+                "[PATCH] xen: change",
+                Some(&format!("base-commit: {sha}")),
+            )
+            .await;
+        assert_eq!(
+            explicit[0],
+            BaselineResolution::Commit(CommitId::parse(sha).unwrap())
+        );
+    }
+
     fn create_registry() -> BaselineRegistry {
         let entries = vec![MaintainersEntry {
             subsystem: "NETWORKING".to_string(),
@@ -864,6 +948,7 @@ mod tests {
         let mut remote_map = HashMap::new();
         remote_map.insert("git://net-next.git".to_string(), "net-next".to_string());
         BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes: None,
@@ -1095,6 +1180,7 @@ mod tests {
             "origin".to_string(),
         );
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries: Vec::new(),
             remote_map,
             custom_remotes: None,
@@ -1130,6 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn test_head_fallback_without_mainline_remote() {
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries: Vec::new(),
             remote_map: HashMap::new(),
             custom_remotes: None,
@@ -1179,6 +1266,7 @@ F: patterns/
         );
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes: None,
@@ -1238,6 +1326,7 @@ F: patterns/
         }];
 
         BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map: HashMap::new(),
             custom_remotes: None,
@@ -1305,6 +1394,7 @@ F: patterns/
         );
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes: None,
@@ -1354,6 +1444,7 @@ F: patterns/
         ];
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map: HashMap::new(),
             custom_remotes: None,
@@ -1417,6 +1508,7 @@ F: patterns/
         );
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes: None,
@@ -1463,6 +1555,7 @@ F: patterns/
         remote_map.insert("git://net-next.git".to_string(), "net-next".to_string());
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries,
             remote_map,
             custom_remotes: None,
@@ -1518,6 +1611,7 @@ F: patterns/
         remote_map.insert(dummy_url.clone(), "dummy-repo".to_string());
 
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries: Vec::new(),
             remote_map,
             custom_remotes: Some(vec![CustomRemoteSettings {
@@ -1587,6 +1681,7 @@ F: patterns/
 
         let url = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git";
         let registry = BaselineRegistry {
+            project: crate::project::ProjectId::Linux,
             entries: Vec::new(),
             remote_map: HashMap::new(),
             custom_remotes: None,

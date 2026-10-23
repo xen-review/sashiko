@@ -1241,6 +1241,12 @@ impl Settings {
     /// and an empty one reaching a connection attempt or a git command produces
     /// an error far from its cause.
     pub fn validate_for_daemon(&self) -> Result<(), String> {
+        if self.project.kind == Some(ProjectId::Xen) && self.linux_bug.enabled {
+            return Err(
+                "[linux_bug] enabled must be false for Xen: Linux bug discovery is not supported"
+                    .to_string(),
+            );
+        }
         if self.database.url.trim().is_empty() {
             return Err(
                 "[database] url must be set: the daemon keeps every patchset, review and \

@@ -20,12 +20,14 @@ pub mod linux_bug;
 pub mod linux_patch_review;
 pub mod review_map;
 pub mod sashiko_patch_review;
+pub mod xen_patch_review;
 
 /// Returns the short UI label for a review stage belonging to `project`.
 pub fn stage_short_label(project: ProjectId, stage: &str) -> Option<&'static str> {
     match project {
         ProjectId::Linux => linux_patch_review::stage_short_label(stage),
         ProjectId::Sashiko => sashiko_patch_review::stage_short_label(stage),
+        ProjectId::Xen => xen_patch_review::stage_short_label(stage),
     }
 }
 
@@ -33,6 +35,7 @@ pub fn stage_short_label(project: ProjectId, stage: &str) -> Option<&'static str
 /// when dynamic planning has not yet narrowed the fan-out.
 pub fn default_stage_count(project: ProjectId) -> usize {
     match project {
+        ProjectId::Xen => xen_patch_review::ANALYSIS_STAGES.len() + 2,
         ProjectId::Linux => {
             linux_patch_review::ANALYSIS_STAGES.len()
                 + linux_patch_review::CONSOLIDATION_STAGES.len()
@@ -59,6 +62,17 @@ pub fn is_counted_stage(project: ProjectId, name: &str) -> bool {
 /// followed by consolidation stages).
 pub fn planned_stages_from(project: ProjectId, stage_names: &[&'static str]) -> Vec<String> {
     match project {
+        ProjectId::Xen => {
+            let mut planned: Vec<String> = stage_names
+                .iter()
+                .filter(|name| xen_patch_review::analysis_stage_by_name(name).is_some())
+                .map(|name| name.to_string())
+                .collect();
+            if !planned.is_empty() {
+                planned.extend(["verification".to_string(), "report".to_string()]);
+            }
+            planned
+        }
         ProjectId::Linux => {
             let mut planned: Vec<String> = stage_names
                 .iter()

@@ -65,6 +65,28 @@ sashiko
 
 Once the daemon is running, it prints the local URL (default `http://localhost:8080`) where you can access the Web UI to browse patchsets, review statuses, inline findings, and bug tracking.
 
+### Xen Reviews
+
+Select `kind = "xen"` in `[project]` (or pass `--project xen`) for native
+Xen hypervisor and toolstack reviews. Use a dedicated Xen checkout, database
+and worktree directory, not the Linux reference tree. Xen baseline selection
+uses explicit base commits, configured custom remotes and the origin's default
+branch, with the local checkout as a last fallback if remote HEAD cannot be
+resolved; it does not fetch linux-next. Configure a Xen upstream custom remote
+when origin is a fork that may lag upstream.
+
+Set `review.email_policy_path` to an absolute path to
+`projects/xen/mailing_lists.toml` from this checkout. This policy tracks
+`xen-devel@lists.xenproject.org` and mutes outbound delivery. Set
+`linux_bug.enabled = false`; pre-existing Linux bug discovery is unsupported
+for Xen. Codex subscription authentication can be used with
+`ai.provider = "codex-cli"` and a model available to the account.
+
+Start with `sashiko --track` to follow new submissions. Omit `--download`
+unless you explicitly want an archive backfill. Bind `server.host` to
+`127.0.0.1` for a private instance and leave SMTP unconfigured until public
+posting has been explicitly approved.
+
 ## Interacting with the Daemon (`sashiko-cli`)
 
 Use `sashiko-cli` to submit patches or query review status on a running daemon:

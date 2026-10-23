@@ -217,6 +217,10 @@ impl Worker {
         patchset: Value,
         progress: Option<&(dyn Fn(WorkerProgressEvent) + Send + Sync)>,
     ) -> Result<WorkerResult> {
+        if self.project == ProjectId::Xen {
+            crate::workflows::xen_patch_review::validate_stage_selection(self.stages.as_deref())
+                .map_err(anyhow::Error::msg)?;
+        }
         let mut target_commit_diff = String::new();
         let mut target_commit_diff_only = String::new();
 
@@ -337,7 +341,7 @@ impl Worker {
                 &patchset,
                 &target_commit_sha,
             ),
-            ProjectId::Sashiko => build_sashiko_series_context(
+            ProjectId::Sashiko | ProjectId::Xen => build_sashiko_series_context(
                 self.series_range.as_deref(),
                 &patchset,
                 &target_commit_sha,
@@ -384,6 +388,7 @@ impl Worker {
             let sys_template = match self.project {
                 ProjectId::Linux => linux_system_prompt(true),
                 ProjectId::Sashiko => sashiko_system_prompt(true),
+                ProjectId::Xen => crate::workflows::xen_patch_review::xen_system_prompt(true),
             };
             let rendered_sys = sys_template.render_for_log(&state);
             self.global_history.push(AiMessage {
@@ -397,6 +402,13 @@ impl Worker {
         }
 
         let workflow = match self.project {
+            ProjectId::Xen => {
+                crate::workflows::xen_patch_review::build_xen_patch_review_workflow_with_effort(
+                    self.max_interactions,
+                    self.temperature,
+                    self.effort,
+                )
+            }
             ProjectId::Linux => build_linux_patch_review_workflow_with_effort(
                 self.max_interactions,
                 self.temperature,

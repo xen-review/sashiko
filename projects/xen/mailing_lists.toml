@@ -1,0 +1,8 @@
+[defaults]
+track = true
+mute_all = true
+positive_review = "none"
+reply_to = ["author"]
+
+["xen-devel@lists.xenproject.org"]
+nntp_group = "org.xenproject.lists.xen-devel"

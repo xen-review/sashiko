@@ -68,6 +68,7 @@ pub fn severity_guide(project: ProjectId) -> &'static str {
     match project {
         ProjectId::Linux => kernel_severity_guide(),
         ProjectId::Sashiko => sashiko_severity_guide(),
+        ProjectId::Xen => include_str!("../projects/xen/prompts/severity.md"),
     }
 }
 
@@ -142,6 +143,19 @@ mod tests {
         assert!(guide.contains("# Severity Levels"));
         assert!(guide.contains("## Critical"));
         assert!(guide.contains("## High"));
+    }
+
+    #[test]
+    fn test_xen_prompt_bundle_integrity() {
+        for required in ["xen/review-core.md", "xen/severity.md"] {
+            assert!(
+                PROMPT_BUNDLE_FILES
+                    .iter()
+                    .any(|(path, bytes)| *path == required && !bytes.is_empty())
+            );
+        }
+        assert!(severity_guide(ProjectId::Xen).contains("Xen Finding Severity"));
+        assert!(!ProjectId::Xen.uses_maintainers());
     }
 
     #[test]

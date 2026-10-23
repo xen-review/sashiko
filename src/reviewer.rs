@@ -135,22 +135,29 @@ impl Reviewer {
         let concurrency = settings.review.concurrency;
         let repo_path = PathBuf::from(&settings.git.repository_path);
 
-        let baseline_registry =
-            match BaselineRegistry::new(&repo_path, settings.git.custom_remotes.clone()) {
-                Ok(r) => Arc::new(r),
-                Err(e) => {
-                    error!(
-                        "Failed to initialize BaselineRegistry: {}. Using empty registry.",
-                        e
-                    );
-                    Arc::new(
-                        BaselineRegistry::new(&repo_path, settings.git.custom_remotes.clone())
-                            .unwrap_or_else(|_| {
-                                panic!("Critical error initializing BaselineRegistry: {}", e)
-                            }),
+        let baseline_registry = match BaselineRegistry::for_project(
+            &repo_path,
+            settings.git.custom_remotes.clone(),
+            settings.project.kind.unwrap_or_default(),
+        ) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                error!(
+                    "Failed to initialize BaselineRegistry: {}. Using empty registry.",
+                    e
+                );
+                Arc::new(
+                    BaselineRegistry::for_project(
+                        &repo_path,
+                        settings.git.custom_remotes.clone(),
+                        settings.project.kind.unwrap_or_default(),
                     )
-                }
-            };
+                    .unwrap_or_else(|_| {
+                        panic!("Critical error initializing BaselineRegistry: {}", e)
+                    }),
+                )
+            }
+        };
 
         let provider = create_provider_cached(&settings.ai, Some(settings.database.url.as_str()))
             .await
@@ -2079,6 +2086,9 @@ impl Reviewer {
                                             toolbox = Some(Arc::new(tb));
                                         }
                                         let review_tool = match project {
+                                            crate::project::ProjectId::Xen => {
+                                                "sashiko:xen_patch_review"
+                                            }
                                             crate::project::ProjectId::Linux => {
                                                 "sashiko:linux_patch_review"
                                             }
