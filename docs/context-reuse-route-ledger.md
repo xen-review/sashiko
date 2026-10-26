@@ -93,6 +93,14 @@ by default. This policy is separate from the coding assistant's model setting.
   48 main, seven CLI, and 25 integration tests, formatting, and all Clippy
   profiles. Per-patch artifact validation and atomic partial persistence are
   still required before enabling sequential strategy.
+  Checkpoint context/request builders now preserve complete series context in
+  a fixed contract and append exact selected patch, original message ID,
+  applied commit, and parent identity. Tests cover parent attribution across
+  unselected context patches, stable context, scope/identity substitutions,
+  first-patch baseline, and oversize rejection. The existing artifact parser
+  validates one-patch scope without another schema. Full gates passed 1,114
+  library, 48 main, seven CLI, and 25 integration tests plus all lint profiles.
+  Runtime sequential execution remains disabled pending atomic persistence.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
