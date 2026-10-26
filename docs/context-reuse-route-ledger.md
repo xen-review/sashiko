@@ -7,6 +7,34 @@ the general improvement ledger retains other independent tasks.
 
 ### Deployed Staging Checkpoint
 
+Latest source/runtime at 00:38 CET: exact-ancestry increment 113b83a5 is signed,
+pushed, and deployed. Installed/release SHA-256:
+9617248a4903bf54a06ba2765f8fe103c2a39caf273eeee408ac18750ed71bac.
+Private before-exact-ancestry-20261027-003736.db passed quick_check; matching
+sashiko-before-exact-ancestry-20261027-003736 rollback binary retained. Service
+active, PID 1096952; API healthy, schema 16, 4,072 messages, 452 series, 99
+Reviewed, no Pending or In Review. No active review was interrupted or model
+turn started. Normal provider/model/effort, scheduling, and muted delivery stay
+unchanged. Review 48's original findings and counters remain intact.
+
+Exact provenance reuses saved applied coverage and requires the same immutable
+commit and current patch ID in the pinned reachable snapshot. It adds no schema,
+history scan, or series-filter changes. Focused storage and both-route API tests,
+renderer escaping, and native browser disclosure checks at 1,280/390 pixels pass.
+The full gate passes 1,141 library tests (two ignored), 49 main, seven CLI, 27
+integration, formatting, and all Clippy profiles. Release build passed with no
+new OOM events. The synthetic 8097 fixture is stopped and the shared browser is
+back on the live Unknown list; the pre-existing 8096 listener was left alone.
+
+The first normal snapshot remains unobserved (zero saved snapshots). The saved
+upstream successful-fetch timestamp is 00:00 CET; normal refresh skips until its
+one-hour interval elapses. Do not force-fetch, alter timestamps, or weaken the
+successful-covering-fetch requirement merely to finish validation. Attributable
+human-review evidence is the next open staging/filter dimension. Quota policy,
+live/native usage, and self-review restrictions remain separate.
+
+### Earlier Rollout Evidence
+
 Authoritative rollout state at 00:20 CET on 2026-10-27: bd966c85 is signed,
 pushed to origin/add-xen-support, and deployed on schema 16. The implementation
 worktree is clean before this documentation update. Main's unrelated untracked

@@ -284,8 +284,11 @@ stale, changed-source, or rewritten-snapshot checks. No new schema or series
 filter semantics are required. The focused storage/API/escaping checks and
 desktop/mobile native disclosure checks pass. The full gate passes 1,141 library
 tests (two ignored), 49 main, seven CLI, 27 integration, formatting, and all
-Clippy profiles. The 8097 fixture is stopped; ancestry deployment and attributable
-human-review evidence remain pending. No live staging
+Clippy profiles. The 8097 fixture is stopped. Ancestry source 113b83a5 is deployed
+at 00:38 CET on 2026-10-27 with a checked idle database backup, matching hashes,
+healthy API, unchanged schema 16, and all 99 successful series preserved. No
+positive live ancestry is claimed before the first snapshot. Attributable
+human-review evidence remains pending. No live staging
 history scan or feature-specific model call has run. Ordinary
 scheduling and muted delivery are unchanged; the normal bzimage review completed
 without new issues or email, bringing Reviewed series to 99.

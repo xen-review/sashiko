@@ -196,7 +196,8 @@ captured; their browser-host resources are not directly inspectable here, so no
 independent visual inspection is claimed. Node checks cover escaping, all states,
 clear behavior and invalid timestamps. No fixture result is a live classification.
 
-Exact ancestry and attributable human-review evidence remain pending.
+At this milestone, exact ancestry and attributable human-review evidence remained
+pending; the subsequent ancestry increment below is now deployed.
 The normal daemon completed the newly ingested v2 bzimage payload-boundary review
 without new findings or outbound email. Its review artifacts are preserved.
 
@@ -239,5 +240,9 @@ real-router, and rendering checks pass. The full make check-pr gate passes
 and all Clippy profiles. Synthetic browser checks at 1,280/390 pixels verify
 native disclosure clicks, exact provenance, the revert caveat, and no viewport
 overflow or page errors. The temporary 8097 fixture is stopped; none of its
-synthetic evidence entered the live database. Deployment of this increment is
-pending. Attributable human-review evidence remains open.
+synthetic evidence entered the live database. This increment is deployed at
+00:38 CET on 2026-10-27 after a checked idle database backup and matching hashes.
+Schema 16 and all 99 Reviewed series are preserved. Fresh served code/API health
+checks pass, and historical review 48 is unchanged. A first live snapshot remains
+unobserved, so no positive live ancestry result is claimed. Attributable
+human-review evidence remains open.
