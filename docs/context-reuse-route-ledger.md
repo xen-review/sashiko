@@ -136,6 +136,17 @@ by default. This policy is separate from the coding assistant's model setting.
   formatting, and all Clippy profiles. Terminal invocation completion and
   daemon/local sequential dispatch remain pending; runtime selection is still
   fail-closed and these storage changes have not been installed in the live DB.
+  Terminal invocation completion now requires all selected checkpoints before
+  success, retains earlier Reviewed artifacts on later failure/cancellation,
+  stores only newly reported call interactions, and keeps raw failed or
+  interrupted traces without inventing in-flight usage. Shared accounting
+  helpers serve checkpoint and terminal writes. Tests inject final-state failure
+  and verify rollback, repeated completion rejection, full-scope success, partial
+  failure, external cancellation, and exact known-call totals. Server-only
+  helpers are feature-gated; the minimal build and all full gates passed:
+  1,121 library, 48 main, seven CLI, 25 integration tests, formatting, and all
+  Clippy profiles. Dispatch and partial-result API/UI remain pending, so runtime
+  sequential selection is still disabled and no live DB deployment was made.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

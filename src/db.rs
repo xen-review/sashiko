@@ -442,6 +442,110 @@ pub struct HarnessCheckpointWrite<'a> {
     pub trace: &'a crate::agent_harness::session::HarnessTrace,
 }
 
+pub struct HarnessCheckpointFinish<'a> {
+    pub review_id: i64,
+    pub series_fingerprint: &'a str,
+    pub previous: HarnessCheckpointCursor,
+    pub outcome: &'a crate::agent_harness::session::HarnessOutcome,
+}
+
+#[cfg(feature = "server")]
+struct PreparedHarnessCall {
+    provider_call: i64,
+    history_end: i64,
+    interaction_id: String,
+    input: libsql::Value,
+    output: libsql::Value,
+    tokens_in: i64,
+    tokens_out: i64,
+    tokens_cached: i64,
+}
+
+#[cfg(feature = "server")]
+fn validate_checkpoint_trace(
+    trace: &crate::agent_harness::session::HarnessTrace,
+    complete: bool,
+) -> Result<()> {
+    let mut summed = crate::ai::AiUsage::default();
+    let mut history_end = 0;
+    if trace.call_usage.len() > trace.provider_calls {
+        bail!("Checkpoint has more usage records than provider calls");
+    }
+    for (position, call) in trace.call_usage.iter().enumerate() {
+        if call.provider_call != position + 1
+            || call.response_history_end <= history_end
+            || !matches!(
+                trace
+                    .history
+                    .get(call.response_history_end.saturating_sub(1))
+                    .map(|message| &message.role),
+                Some(crate::ai::AiRole::Assistant)
+            )
+        {
+            bail!("Checkpoint call usage has inconsistent call or history boundaries");
+        }
+        crate::agent_harness::session::accumulate_usage(&mut summed, &call.usage)?;
+        history_end = call.response_history_end;
+    }
+    if (complete
+        && (history_end != trace.history.len() || trace.call_usage.len() != trace.provider_calls))
+        || summed.prompt_tokens != trace.usage.prompt_tokens
+        || summed.completion_tokens != trace.usage.completion_tokens
+        || summed.total_tokens != trace.usage.total_tokens
+        || summed.cached_tokens.unwrap_or_default() != trace.usage.cached_tokens.unwrap_or_default()
+    {
+        bail!("Checkpoint aggregate usage or terminal history does not match its calls");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+async fn prepare_checkpoint_calls(
+    review_id: i64,
+    fingerprint: &str,
+    trace: &crate::agent_harness::session::HarnessTrace,
+    from: usize,
+) -> Result<Vec<PreparedHarnessCall>> {
+    if from > trace.call_usage.len() {
+        bail!("Checkpoint trace is missing already persisted calls");
+    }
+    let mut interactions = Vec::new();
+    for call in trace.call_usage.iter().skip(from) {
+        let input = serde_json::to_string(
+            &serde_json::json!({"checkpoint_session": review_id, "series_fingerprint": fingerprint, "history": &trace.history[..call.response_history_end - 1]}),
+        )?;
+        let output = serde_json::to_string(&trace.history[call.response_history_end - 1])?;
+        interactions.push(PreparedHarnessCall {
+            provider_call: i64::try_from(call.provider_call)?,
+            history_end: i64::try_from(call.response_history_end)?,
+            interaction_id: uuid::Uuid::new_v4().to_string(),
+            input: crate::compression::compress_string_async(&input).await,
+            output: crate::compression::compress_string_async(&output).await,
+            tokens_in: i64::try_from(call.usage.prompt_tokens)?,
+            tokens_out: i64::try_from(call.usage.completion_tokens)?,
+            tokens_cached: i64::try_from(call.usage.cached_tokens.unwrap_or_default())?,
+        });
+    }
+    Ok(interactions)
+}
+
+#[cfg(feature = "server")]
+async fn insert_checkpoint_calls(
+    tx: &DatabaseTransaction,
+    review_id: i64,
+    provider: &str,
+    model: &str,
+    calls: Vec<PreparedHarnessCall>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    for call in calls {
+        tx.execute("INSERT INTO ai_interactions (id, provider, model, input_context, output_raw, tokens_in, tokens_out, tokens_cached, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            libsql::params![call.interaction_id.as_str(), provider, model, call.input, call.output, call.tokens_in, call.tokens_out, call.tokens_cached, now]).await?;
+        tx.execute("INSERT INTO harness_provider_calls (review_id, provider_call, response_history_end, interaction_id) VALUES (?, ?, ?, ?)", libsql::params![review_id, call.provider_call, call.history_end, call.interaction_id]).await?;
+    }
+    Ok(())
+}
+
 pub struct AiInteractionParams<'a> {
     pub id: &'a str,
     pub parent_id: Option<&'a str>,
@@ -2369,7 +2473,6 @@ impl Database {
         &self,
         write: HarnessCheckpointWrite<'_>,
     ) -> Result<HarnessCheckpointCursor> {
-        use crate::ai::AiRole;
         if write.artifacts.reviewer_notes.trim().is_empty()
             || write.artifacts.reply_drafts.len() != 1
         {
@@ -2387,33 +2490,7 @@ impl Database {
                 "Checkpoint requires new, completely accounted provider calls without budget overshoot"
             );
         }
-        let mut summed = crate::ai::AiUsage::default();
-        let mut history_end = 0;
-        for (position, call) in trace.call_usage.iter().enumerate() {
-            if call.provider_call != position + 1
-                || call.response_history_end <= history_end
-                || !matches!(
-                    trace
-                        .history
-                        .get(call.response_history_end.saturating_sub(1))
-                        .map(|message| &message.role),
-                    Some(AiRole::Assistant)
-                )
-            {
-                bail!("Checkpoint call usage has inconsistent call or history boundaries");
-            }
-            crate::agent_harness::session::accumulate_usage(&mut summed, &call.usage)?;
-            history_end = call.response_history_end;
-        }
-        if history_end != trace.history.len()
-            || summed.prompt_tokens != trace.usage.prompt_tokens
-            || summed.completion_tokens != trace.usage.completion_tokens
-            || summed.total_tokens != trace.usage.total_tokens
-            || summed.cached_tokens.unwrap_or_default()
-                != trace.usage.cached_tokens.unwrap_or_default()
-        {
-            bail!("Checkpoint aggregate usage or terminal history does not match its calls");
-        }
+        validate_checkpoint_trace(trace, true)?;
         let next = HarnessCheckpointCursor {
             checkpoints: write
                 .previous
@@ -2426,19 +2503,13 @@ impl Database {
         let notes =
             crate::compression::compress_string_async(&write.artifacts.reviewer_notes).await;
         let reply = crate::compression::compress_string_async(&draft.body).await;
-        let mut interactions = Vec::new();
-        for call in trace.call_usage.iter().skip(write.previous.provider_calls) {
-            let input = serde_json::to_string(
-                &serde_json::json!({"checkpoint_session": write.review_id, "series_fingerprint": write.series_fingerprint, "history": &trace.history[..call.response_history_end - 1]}),
-            )?;
-            let output = serde_json::to_string(&trace.history[call.response_history_end - 1])?;
-            interactions.push((
-                call,
-                uuid::Uuid::new_v4().to_string(),
-                crate::compression::compress_string_async(&input).await,
-                crate::compression::compress_string_async(&output).await,
-            ));
-        }
+        let interactions = prepare_checkpoint_calls(
+            write.review_id,
+            write.series_fingerprint,
+            trace,
+            write.previous.provider_calls,
+        )
+        .await?;
         let tx = self.begin_transaction().await?;
         let mut rows = tx.query(
             "SELECT r.patchset_id, r.provider, r.model FROM reviews r JOIN patchsets p ON p.id = r.patchset_id
@@ -2478,11 +2549,7 @@ impl Database {
         }
         drop(rows);
         let now = chrono::Utc::now().timestamp();
-        for (call, interaction_id, input, output) in interactions {
-            tx.execute("INSERT INTO ai_interactions (id, provider, model, input_context, output_raw, tokens_in, tokens_out, tokens_cached, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                libsql::params![interaction_id.as_str(), provider.as_str(), model.as_str(), input, output, i64::try_from(call.usage.prompt_tokens)?, i64::try_from(call.usage.completion_tokens)?, i64::try_from(call.usage.cached_tokens.unwrap_or_default())?, now]).await?;
-            tx.execute("INSERT INTO harness_provider_calls (review_id, provider_call, response_history_end, interaction_id) VALUES (?, ?, ?, ?)", libsql::params![write.review_id, i64::try_from(call.provider_call)?, i64::try_from(call.response_history_end)?, interaction_id]).await?;
-        }
+        insert_checkpoint_calls(&tx, write.review_id, &provider, &model, interactions).await?;
         tx.execute("INSERT INTO harness_patch_checkpoints (review_id, checkpoint_index, patch_id, message_id, commit_id, reviewer_notes, reply_body, history_end, provider_calls_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             libsql::params![write.review_id, i64::try_from(next.checkpoints)?, write.patch.patch_id, message_id, write.patch.commit_id.to_string(), notes, reply, i64::try_from(next.history_end)?, i64::try_from(next.provider_calls)?, now]).await?;
         tx.execute(
@@ -2493,6 +2560,91 @@ impl Database {
         tx.execute("UPDATE harness_checkpoint_sessions SET checkpoint_count = ?, provider_calls_end = ?, history_end = ? WHERE review_id = ?", libsql::params![i64::try_from(next.checkpoints)?, i64::try_from(next.provider_calls)?, i64::try_from(next.history_end)?, write.review_id]).await?;
         tx.commit().await?;
         Ok(next)
+    }
+
+    pub async fn finish_checkpoint_session(
+        &self,
+        finish: HarnessCheckpointFinish<'_>,
+    ) -> Result<ReviewStatus> {
+        use crate::agent_harness::session::HarnessStatus;
+        let trace = &finish.outcome.trace;
+        let requested_status = match &finish.outcome.status {
+            HarnessStatus::Completed { .. } => ReviewStatus::Reviewed,
+            HarnessStatus::Cancelled => ReviewStatus::Cancelled,
+            _ => ReviewStatus::Failed,
+        };
+        validate_checkpoint_trace(trace, requested_status == ReviewStatus::Reviewed)?;
+        if trace.provider_calls < finish.previous.provider_calls
+            || trace.history.len() < finish.previous.history_end
+        {
+            bail!("Terminal checkpoint trace cannot discard persisted progress");
+        }
+        if requested_status == ReviewStatus::Reviewed
+            && (trace.input_token_overshoot > 0 || trace.output_token_overshoot > 0)
+        {
+            bail!("A checkpoint session with budget overshoot cannot complete successfully");
+        }
+        let calls = prepare_checkpoint_calls(
+            finish.review_id,
+            finish.series_fingerprint,
+            trace,
+            finish.previous.provider_calls,
+        )
+        .await?;
+        let logs =
+            crate::compression::compress_string_async(&serde_json::to_string(finish.outcome)?)
+                .await;
+        let tx = self.begin_transaction().await?;
+        let mut rows = tx.query(
+            "SELECT r.patchset_id, r.provider, r.model, r.status, p.status,
+               (SELECT COUNT(*) FROM review_patch_coverage c WHERE c.review_id = r.id AND NOT EXISTS
+                   (SELECT 1 FROM harness_patch_checkpoints k WHERE k.review_id = c.review_id AND k.patch_id = c.patch_id))
+             FROM reviews r JOIN patchsets p ON p.id = r.patchset_id JOIN harness_checkpoint_sessions s ON s.review_id = r.id
+             WHERE r.id = ? AND r.status IN ('In Review', 'Cancelled') AND s.state = 'active' AND r.prompts_hash = ?
+               AND s.series_fingerprint = ? AND s.checkpoint_count = ? AND s.provider_calls_end = ? AND s.history_end = ?",
+            libsql::params![finish.review_id, finish.outcome.instruction_fingerprint.as_str(), finish.series_fingerprint,
+                i64::try_from(finish.previous.checkpoints)?, i64::try_from(finish.previous.provider_calls)?, i64::try_from(finish.previous.history_end)?],
+        ).await?;
+        let row = rows
+            .next()
+            .await?
+            .context("Checkpoint completion owner, identity, or cursor is no longer active")?;
+        let patchset_id: i64 = row.get(0)?;
+        let provider: String = row.get(1)?;
+        let model: String = row.get(2)?;
+        let review_status: String = row.get(3)?;
+        let patchset_status: String = row.get(4)?;
+        let remaining: i64 = row.get(5)?;
+        drop(rows);
+        let status = if review_status == "Cancelled" || patchset_status != "In Review" {
+            ReviewStatus::Cancelled
+        } else {
+            requested_status
+        };
+        if status == ReviewStatus::Reviewed && (remaining != 0 || finish.previous.checkpoints == 0)
+        {
+            bail!("A sequential review cannot complete before every selected checkpoint is stored");
+        }
+        let state = match status {
+            ReviewStatus::Reviewed => "completed",
+            ReviewStatus::Cancelled => "cancelled",
+            _ => "failed",
+        };
+        insert_checkpoint_calls(&tx, finish.review_id, &provider, &model, calls).await?;
+        tx.execute("UPDATE reviews SET status = ?, logs = ?, result_description = 'Sequential harness output; completed checkpoints preserved; not independently verified', independently_verified = 0 WHERE id = ?",
+            libsql::params![status.as_str(), logs, finish.review_id]).await?;
+        if patchset_status == "In Review" {
+            tx.execute("UPDATE patches SET status = ? WHERE patchset_id = ? AND COALESCE(status, '') NOT IN ('Reviewed', 'Skipped', 'Cancelled')
+                AND id IN (SELECT c.patch_id FROM review_patch_coverage c WHERE c.review_id = ? AND NOT EXISTS
+                    (SELECT 1 FROM harness_patch_checkpoints k WHERE k.review_id = c.review_id AND k.patch_id = c.patch_id))",
+                libsql::params![status.as_str(), patchset_id, finish.review_id]).await?;
+            tx.execute("UPDATE patchsets SET status = ?, failed_reason = CASE WHEN ? = 'Failed' THEN 'Sequential review failed after retaining completed checkpoints; see review trace' ELSE NULL END WHERE id = ?",
+                libsql::params![status.as_str(), status.as_str(), patchset_id]).await?;
+        }
+        tx.execute("UPDATE harness_checkpoint_sessions SET state = ?, provider_calls_end = ?, history_end = ? WHERE review_id = ?",
+            libsql::params![state, i64::try_from(trace.provider_calls)?, i64::try_from(trace.history.len())?, finish.review_id]).await?;
+        tx.commit().await?;
+        Ok(status)
     }
 
     pub async fn complete_harness_review(
@@ -12019,6 +12171,197 @@ mod tests {
         db.create_patch(patchset_id, "base-2", 2, "diff two")
             .await?;
         Ok(patchset_id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_terminal_completion_preserves_partial_results_and_usage() -> Result<()> {
+        use crate::agent_harness::{
+            series::{ReplyDraft, ReviewArtifacts},
+            session::{HarnessCallUsage, HarnessOutcome, HarnessStatus, HarnessTrace},
+        };
+        use crate::ai::{AiMessage, AiRole, AiUsage};
+        let message = |role| AiMessage {
+            role,
+            content: Some("Retained source evidence".to_string()),
+            thought: None,
+            thought_signature: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        for terminal in [
+            ReviewStatus::Reviewed,
+            ReviewStatus::Failed,
+            ReviewStatus::Cancelled,
+        ] {
+            let db = setup_db().await;
+            let patchset_id = insert_stored_prerequisite_series(&db).await?;
+            let diffs = db.get_patch_diffs(patchset_id).await?;
+            let covered: Vec<_> = diffs
+                .iter()
+                .map(|(patch_id, index, ..)| HarnessReviewPatch {
+                    patch_id: *patch_id,
+                    commit_id: crate::baseline::CommitId::parse(&format!("{index:040x}")).unwrap(),
+                })
+                .collect();
+            db.update_patchset_status(patchset_id, "In Review").await?;
+            let review_id = db
+                .start_harness_review(HarnessReviewStart {
+                    patchset_id,
+                    provider: "codex-cli",
+                    model: "gpt-6-luna",
+                    baseline_id: None,
+                    prompts_hash: "snapshot",
+                    patches: &covered,
+                })
+                .await?
+                .unwrap();
+            let fingerprint = db
+                .initialize_checkpoint_session(review_id, r#"{"series":"exact input"}"#)
+                .await?;
+            let mut trace = HarnessTrace::default();
+            let mut cursor = HarnessCheckpointCursor::default();
+            for position in 0..2 {
+                trace.provider_calls += 1;
+                trace.history.push(message(AiRole::User));
+                if position == 1 && terminal == ReviewStatus::Cancelled {
+                    break;
+                }
+                trace.history.push(message(AiRole::Assistant));
+                let usage = AiUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    cached_tokens: Some(3),
+                };
+                crate::agent_harness::session::accumulate_usage(&mut trace.usage, &usage)?;
+                trace.call_usage.push(HarnessCallUsage {
+                    provider_call: trace.provider_calls,
+                    response_history_end: trace.history.len(),
+                    usage,
+                });
+                if position == 1 && terminal == ReviewStatus::Failed {
+                    break;
+                }
+                let artifacts = ReviewArtifacts {
+                    reviewer_notes: "Retained notes".to_string(),
+                    reply_drafts: vec![ReplyDraft {
+                        patch_index: diffs[position].1,
+                        message_id: Some(diffs[position].6.clone()),
+                        body: "Complete reply".to_string(),
+                    }],
+                };
+                cursor = db
+                    .persist_harness_checkpoint(HarnessCheckpointWrite {
+                        review_id,
+                        patch: &covered[position],
+                        instruction_fingerprint: "snapshot",
+                        series_fingerprint: &fingerprint,
+                        previous: cursor,
+                        artifacts: &artifacts,
+                        trace: &trace,
+                    })
+                    .await?;
+                if position == 0 {
+                    let premature = HarnessOutcome {
+                        status: HarnessStatus::Completed {
+                            report: "Premature success".to_string(),
+                        },
+                        trace: serde_json::from_value(serde_json::to_value(&trace)?)?,
+                        instruction_fingerprint: "snapshot".to_string(),
+                    };
+                    assert!(
+                        db.finish_checkpoint_session(HarnessCheckpointFinish {
+                            review_id,
+                            series_fingerprint: &fingerprint,
+                            previous: cursor,
+                            outcome: &premature
+                        })
+                        .await
+                        .is_err()
+                    );
+                }
+            }
+            let outcome = HarnessOutcome {
+                status: match terminal {
+                    ReviewStatus::Reviewed => HarnessStatus::Completed {
+                        report: "All checkpoints persisted".to_string(),
+                    },
+                    ReviewStatus::Cancelled => HarnessStatus::Cancelled,
+                    _ => HarnessStatus::Failed {
+                        reason: "Later checkpoint output malformed".to_string(),
+                    },
+                },
+                trace,
+                instruction_fingerprint: "snapshot".to_string(),
+            };
+            if terminal == ReviewStatus::Cancelled {
+                db.update_patchset_status(patchset_id, "Cancelled").await?;
+            }
+            db.execute_batch("CREATE TEMP TRIGGER fail_terminal_checkpoint BEFORE UPDATE OF state ON harness_checkpoint_sessions BEGIN SELECT RAISE(ABORT, 'Injected terminal write failure'); END;").await?;
+            let finish = || HarnessCheckpointFinish {
+                review_id,
+                series_fingerprint: &fingerprint,
+                previous: cursor,
+                outcome: &outcome,
+            };
+            assert!(db.finish_checkpoint_session(finish()).await.is_err());
+            let mut rows = db
+                .conn
+                .query("SELECT COUNT(*) FROM ai_interactions", ())
+                .await?;
+            assert_eq!(
+                rows.next().await?.unwrap().get::<i64>(0)?,
+                if terminal == ReviewStatus::Reviewed {
+                    2
+                } else {
+                    1
+                }
+            );
+            drop(rows);
+            db.execute_batch("DROP TRIGGER fail_terminal_checkpoint")
+                .await?;
+            assert_eq!(db.finish_checkpoint_session(finish()).await?, terminal);
+            assert!(db.finish_checkpoint_session(finish()).await.is_err());
+            let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached) FROM ai_interactions", ()).await?;
+            let row = rows.next().await?.unwrap();
+            let known_calls = if terminal == ReviewStatus::Cancelled {
+                1
+            } else {
+                2
+            };
+            assert_eq!(row.get::<i64>(0)?, known_calls);
+            assert_eq!(row.get::<i64>(1)?, known_calls * 10);
+            assert_eq!(row.get::<i64>(2)?, known_calls * 2);
+            assert_eq!(row.get::<i64>(3)?, known_calls * 3);
+            drop(rows);
+            let mut rows = db.conn.query("SELECT r.status, r.logs, s.state, (SELECT COUNT(*) FROM patches p WHERE p.patchset_id = r.patchset_id AND p.status = 'Reviewed') FROM reviews r JOIN harness_checkpoint_sessions s ON s.review_id = r.id WHERE r.id = ?", libsql::params![review_id]).await?;
+            let row = rows.next().await?.unwrap();
+            assert_eq!(row.get::<String>(0)?, terminal.as_str());
+            let raw: serde_json::Value =
+                serde_json::from_str(&crate::compression::get_compressed_string(&row, 1)?)?;
+            assert_eq!(raw["trace"]["provider_calls"], 2);
+            assert_eq!(
+                row.get::<String>(2)?,
+                match terminal {
+                    ReviewStatus::Reviewed => "completed",
+                    ReviewStatus::Cancelled => "cancelled",
+                    _ => "failed",
+                }
+            );
+            assert_eq!(
+                row.get::<i64>(3)?,
+                if terminal == ReviewStatus::Reviewed {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                db.get_patchset_status(patchset_id).await?.as_deref(),
+                Some(terminal.as_str())
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

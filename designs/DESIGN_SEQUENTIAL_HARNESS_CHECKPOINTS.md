@@ -1,8 +1,9 @@
 # Sequential Harness Checkpoints
 
 Status: partial-completion policy approved by the operator, 2026-10-26.
-Typed strategy configuration is implemented; sequential execution still fails
-closed until continuation and persistence are wired. This extends the approved
+Typed strategy configuration, bounded continuation, and atomic checkpoint/terminal
+persistence are implemented. Sequential execution still fails closed until
+dispatch and partial-result API/UI are wired. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
 default change, automatic retry, public posting, or effort adaptation is proposed.
 
@@ -19,6 +20,28 @@ or savings. The clarified trial used more uncached input than the diff-only run.
 The operator prefers patch-level control while retaining prior investigation.
 Add checkpoints to the existing engine rather than another tool loop. Compare
 against whole-series and independent workflow execution before choosing defaults.
+
+## Existing State and the Specific Gap
+
+Sashiko already stores review and patch/series statuses, interaction output, and
+completed results. Those mechanisms are useful and are not being replaced. In
+independent per-patch workflows, a completed patch is already a durable boundary.
+
+The optional whole-series harness has one shared conversation and currently
+returns its series result at the end. A global Reviewed status cannot establish
+which validated patch boundary belongs to this exact invocation, commit sequence,
+selected scope, instruction snapshot, and conversation. For an eight-patch session
+that finishes drafts 1-3 and fails during patch 4, invocation-scoped checkpoints
+retain those validated drafts and attribute completed provider calls once, rather
+than confusing them with partial output or older reviews of the same patches.
+
+The tradeoff is additional persistence and recovery invariants, growing context
+cost, and possible carryover of mistaken prior conclusions. Stable prefixes do
+not guarantee cache hits or better review quality. These are durable result
+checkpoints, not automatic cross-process conversation resume: the first version
+preserves completed artifacts and terminalizes the interrupted invocation. A
+requested rerun is a new invocation. Dispatch, partial-state API/UI, quota-aware
+deferral, and independent verification are not delivered by storage alone.
 
 ## Proposed Contract
 
