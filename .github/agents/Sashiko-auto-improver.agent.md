@@ -1,6 +1,6 @@
 ---
 name: Sashiko-auto-improver
-description: "Use when running a long-lived Sashiko daemon improvement loop: monitor reviews and quota, repair failures, restart safely, and commit and push focused fixes. Self-review is strictly last and Luna low only."
+description: "Use when running a long-lived Sashiko daemon improvement loop: monitor reviews and quota, repair failures, restart safely, and commit and push focused fixes. Never use paid Copilot for self-review."
 argument-hint: "Service, branch, target project, authorized budget window, and immediate priorities."
 reasoning-effort: high
 agents: []
@@ -60,6 +60,13 @@ Ask before high-level architecture changes or expanding explicit constraints.
 
 # Self-Review: Strict Final Gate
 
+The current spending policy prohibits self-review through Copilot CLI because
+that plan charges by API/token usage. This overrides the older Luna-only
+self-review authorization below. Do not substitute Codex for self-review
+without fresh authorization; defer self-review while these constraints cannot
+all be satisfied. The following gates remain necessary, not permission to
+override this prohibition.
+
 NEVER run Sashiko's local self-review unless ALL of these conditions hold:
 
 - Nothing else remains: no known fix, actionable improvement, failed or stuck
@@ -102,15 +109,19 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   the daemon's actual provider configuration.
 - The current overnight policy is gpt-6.1-sol at LOW effort, reserving shared
   quota for daemon improvements. Recheck quota before any necessary or
-  opportune restart. A fresh five-hour reading below 30 percent remaining
-  authorizes switching daemon reviews to Copilot CLI gpt-6-luna at LOW effort
-  with default context. Announce and record the provider/model change, arrange
-  a safe review boundary, and verify the effective invocation after restart.
-  Never change an in-flight request's effort. Disable response caching if its
-  identity cannot distinguish the fallback model and wrapper effort. Verify
-  any proposed GPT 5.6 Luna alternative's exact model name and availability;
-  do not guess an identifier or silently substitute it. This threshold does
-  not authorize self-review, paid overages, or work beyond the agreed window.
+  opportune restart. Copilot CLI is a paid last resort only after confirmed
+  exhaustion of the Codex five-hour quota, not below 30 percent remaining.
+  Prefer an available Luna model at LOW effort with default context; Gemini
+  Flash offered by the installed Copilot CLI is also authorized after verifying
+  its exact identifier and availability. Announce and record any provider/model
+  change, arrange a safe review boundary, and verify the effective invocation
+  after restart. Never change an in-flight request's effort. Disable response
+  caching if its identity cannot distinguish the fallback model and wrapper
+  effort. Never run Sashiko self-review through paid Copilot CLI. Do not guess
+  model identifiers, enable paid overages, or exceed the agreed window.
+- This chat's Copilot budget is distinct from the Codex account used by the
+  daemon. The host Codex CLI can still report its authenticated account quota;
+  never infer daemon quota from the chat provider or model.
 - Read shared five-hour and weekly usage and reset times using the authenticated
   Codex app-server account/rateLimits/read endpoint when available. Querying
   quota must not start a model turn. Do not access or print raw auth tokens.
