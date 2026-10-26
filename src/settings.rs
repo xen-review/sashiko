@@ -593,6 +593,109 @@ pub struct CodexCliSettings {
     /// whose effort that layer substitutes fails.
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub timeout_profiles: Vec<CodexTimeoutProfile>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexTimeoutEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
+
+impl CodexTimeoutEffort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CodexTimeoutProfile {
+    pub model: String,
+    pub effort: CodexTimeoutEffort,
+    pub call_timeout_seconds: u64,
+    pub minimum_review_timeout_seconds: u64,
+    pub review_timeout_seconds_per_patch: u64,
+}
+
+impl CodexTimeoutProfile {
+    pub fn review_timeout_seconds(&self, patch_count: usize) -> Result<u64, String> {
+        if patch_count == 0 {
+            return Err("timeout profile requires a non-empty selected patch scope".to_string());
+        }
+        let scaled = u64::try_from(patch_count)
+            .ok()
+            .and_then(|count| count.checked_mul(self.review_timeout_seconds_per_patch))
+            .ok_or_else(|| "timeout profile patch allowance overflows seconds".to_string())?;
+        let seconds = scaled.max(self.minimum_review_timeout_seconds);
+        if std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(seconds))
+            .is_none()
+        {
+            return Err("timeout profile scaled review duration is not representable".to_string());
+        }
+        Ok(seconds)
+    }
+}
+
+impl CodexCliSettings {
+    pub fn validate_timeout_profiles(&self) -> Result<(), String> {
+        let mut keys = std::collections::BTreeSet::new();
+        for profile in &self.timeout_profiles {
+            if profile.model.trim().is_empty() || !keys.insert((&profile.model, profile.effort)) {
+                return Err(
+                    "Codex timeout profiles require non-empty models and unique model/effort keys"
+                        .to_string(),
+                );
+            }
+            for seconds in [
+                profile.call_timeout_seconds,
+                profile.minimum_review_timeout_seconds,
+                profile.review_timeout_seconds_per_patch,
+            ] {
+                if seconds == 0
+                    || std::time::Instant::now()
+                        .checked_add(std::time::Duration::from_secs(seconds))
+                        .is_none()
+                {
+                    return Err(
+                        "Codex timeout profile limits must be positive, representable durations"
+                            .to_string(),
+                    );
+                }
+            }
+            if profile.effort == CodexTimeoutEffort::Max
+                && (profile.call_timeout_seconds < 3600
+                    || profile.minimum_review_timeout_seconds < 3600)
+            {
+                return Err("MAX timeout profiles require call and minimum review timeouts of at least 3600 seconds".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn timeout_profile(&self, model: &str) -> Option<&CodexTimeoutProfile> {
+        self.timeout_profiles.iter().find(|profile| {
+            profile.model == model && Some(profile.effort.as_str()) == self.effort.as_deref()
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -650,6 +753,35 @@ pub struct AiSettings {
     pub claude_cli: Option<ClaudeCliSettings>,
     pub codex_cli: Option<CodexCliSettings>,
     pub devin_cli: Option<DevinCliSettings>,
+}
+
+impl AiSettings {
+    pub fn harness_timeout_seconds(
+        &self,
+        patch_count: usize,
+        harness: u64,
+        review: u64,
+    ) -> Result<u64, String> {
+        let fallback = if review > 0 {
+            harness.min(review)
+        } else {
+            harness
+        };
+        self.review_timeout_seconds(patch_count, fallback)
+    }
+
+    pub fn review_timeout_seconds(&self, patch_count: usize, fallback: u64) -> Result<u64, String> {
+        match self.codex_timeout_profile() {
+            Some(profile) => profile.review_timeout_seconds(patch_count),
+            None => Ok(fallback),
+        }
+    }
+
+    pub fn codex_timeout_profile(&self) -> Option<&CodexTimeoutProfile> {
+        (self.provider == "codex-cli")
+            .then(|| self.codex_cli.as_ref()?.timeout_profile(&self.model))
+            .flatten()
+    }
 }
 
 fn default_response_cache_ttl_days() -> u64 {
@@ -1486,6 +1618,11 @@ impl Settings {
             .build()?;
 
         let mut settings: Self = s.try_deserialize()?;
+        if let Some(codex) = &settings.ai.codex_cli {
+            codex
+                .validate_timeout_profiles()
+                .map_err(ConfigError::Message)?;
+        }
         settings
             .review
             .validate_mode()
@@ -1568,6 +1705,70 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_timeout_profiles_match_exact_model_effort_and_scale_scope() {
+        let configuration = "effort = 'xhigh'\n[[timeout_profiles]]\nmodel = 'gpt-6-luna'\neffort = 'xhigh'\ncall_timeout_seconds = 3600\nminimum_review_timeout_seconds = 3600\nreview_timeout_seconds_per_patch = 600\n";
+        let mut settings: CodexCliSettings = toml::from_str(configuration).unwrap();
+        let mut ai: AiSettings = toml::from_str(&format!(
+            "provider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[codex_cli]\n{}",
+            configuration.replace("[[timeout_profiles]]", "[[codex_cli.timeout_profiles]]")
+        ))
+        .unwrap();
+        assert_eq!(ai.review_timeout_seconds(8, 1800).unwrap(), 4800);
+        assert_eq!(ai.harness_timeout_seconds(8, 600, 1800).unwrap(), 4800);
+        assert_eq!(ai.harness_timeout_seconds(1, 10, 1800).unwrap(), 3600);
+        ai.provider = "copilot-cli".to_string();
+        assert_eq!(ai.review_timeout_seconds(8, 1800).unwrap(), 1800);
+        assert_eq!(ai.harness_timeout_seconds(8, 600, 1800).unwrap(), 600);
+        assert_eq!(ai.harness_timeout_seconds(8, 600, 0).unwrap(), 600);
+        assert_eq!(ai.harness_timeout_seconds(8, 1800, 600).unwrap(), 600);
+        assert!(settings.validate_timeout_profiles().is_ok());
+        let profile = settings.timeout_profile("gpt-6-luna").unwrap();
+        assert_eq!(profile.review_timeout_seconds(8).unwrap(), 4800);
+        assert_eq!(profile.review_timeout_seconds(1).unwrap(), 3600);
+        assert!(profile.review_timeout_seconds(0).is_err());
+        assert!(settings.timeout_profile("gpt-5.6-luna").is_none());
+        settings.effort = Some("medium".to_string());
+        assert!(settings.timeout_profile("gpt-6-luna").is_none());
+        settings.effort = None;
+        assert!(settings.timeout_profile("gpt-6-luna").is_none());
+        settings
+            .timeout_profiles
+            .push(settings.timeout_profiles[0].clone());
+        assert!(
+            settings
+                .validate_timeout_profiles()
+                .unwrap_err()
+                .contains("unique")
+        );
+        settings.timeout_profiles.pop();
+        settings.timeout_profiles[0].call_timeout_seconds = 0;
+        assert!(settings.validate_timeout_profiles().is_err());
+        settings.timeout_profiles[0].call_timeout_seconds = 600;
+        settings.timeout_profiles[0].effort = CodexTimeoutEffort::Max;
+        assert!(
+            settings
+                .validate_timeout_profiles()
+                .unwrap_err()
+                .contains("3600")
+        );
+        settings.timeout_profiles[0].call_timeout_seconds = 3600;
+        assert!(settings.validate_timeout_profiles().is_ok());
+        settings.timeout_profiles[0].review_timeout_seconds_per_patch = u64::MAX;
+        assert!(
+            settings.timeout_profiles[0]
+                .review_timeout_seconds(8)
+                .is_err()
+        );
+        assert!(settings.validate_timeout_profiles().is_err());
+        assert!(
+            toml::from_str::<CodexCliSettings>(&configuration.replace("xhigh", "typo")).is_err()
+        );
+        let legacy: CodexCliSettings = toml::from_str("effort = 'low'").unwrap();
+        assert!(legacy.timeout_profiles.is_empty());
+        assert!(legacy.validate_timeout_profiles().is_ok());
+    }
 
     #[test]
     fn harness_mode_defaults_and_limits_are_fail_closed() {

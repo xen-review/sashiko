@@ -160,6 +160,41 @@ Settings for the Codex CLI provider (`provider = "codex-cli"`).
 |-----|------|---------|-------------|
 | `effort` | string | -- | Reasoning effort: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Passed as `-c model_reasoning_effort=<effort>`, which outranks `~/.codex/config.toml` but not an enterprise-managed requirements layer. A run whose effort that layer substitutes fails. |
 
+Optional exact model/effort timeout profiles override the Codex call deadline
+and the local/daemon review deadline. Without a match, the call deadline remains
+600 seconds and existing review/harness limits remain unchanged. Profiles do not
+select a model or change effort, and unset effort never guesses a model default.
+
+```toml
+[[ai.codex_cli.timeout_profiles]]
+model = "gpt-6-luna"
+effort = "xhigh"
+call_timeout_seconds = 3600
+minimum_review_timeout_seconds = 3600
+review_timeout_seconds_per_patch = 600
+
+[[ai.codex_cli.timeout_profiles]]
+model = "gpt-6-luna"
+effort = "max"
+call_timeout_seconds = 4800
+minimum_review_timeout_seconds = 3600
+review_timeout_seconds_per_patch = 600
+```
+
+The overall allowance is the larger of the minimum and selected patch count
+times seconds per patch. Eight selected patches therefore receive 4,800 seconds
+(80 minutes), shared across the full-series harness, not renewed at tool turns
+or checkpoints. Independent workflow jobs use the one-patch allowance. A matched
+profile replaces both legacy review and harness caps; cancellation and token,
+tool, and provider-call limits remain in force. The call deadline includes prompt
+transfer and output collection. Configure each model/effort pair separately;
+these Codex-specific profiles do not affect other providers.
+
+All profile limits must be positive and representable; duplicate keys, unknown
+effort names, and scaled-duration overflow fail. MAX profiles require at least
+3,600 seconds for both the call and minimum overall deadline. Longer timeouts do
+not extend the authorized operating window or enable higher-effort calls.
+
 #### `[ai.gemini]`
 
 Settings for the Gemini provider (`provider = "gemini"`).

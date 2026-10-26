@@ -19,6 +19,18 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Prioritized Work
 
+### P1: Configure Model/Effort and Patch-Scaled Timeouts
+
+Status: implemented following the operator's 2026-10-26 request. Optional exact
+Codex model/effort profiles configure call, minimum overall, and per-selected-
+patch allowances. Local and daemon paths share resolution; a matching profile
+replaces legacy review/harness caps. Eight patches at 600 seconds receive
+4,800 seconds overall. Defaults and other providers remain unchanged. The
+provider deadline also bounds stdin transfer. Full gates passed 1,116 library,
+48 main, seven CLI, and 25 integration tests, formatting, and all Clippy profiles.
+See the configuration reference and DESIGN_MODEL_EFFORT_TIMEOUTS.md. Longer
+limits do not select higher effort or authorize additional model spending.
+
 ### P0: Track Provider JSON Failures Without Inventing Results
 
 Update at 13:22 CET: the operator authorized raising Luna effort progressively

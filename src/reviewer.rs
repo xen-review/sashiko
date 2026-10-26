@@ -1353,11 +1353,15 @@ impl Reviewer {
             .clone()
             .context("Daemon harness requires execution limits")?;
         limits.validate().map_err(anyhow::Error::msg)?;
-        if ctx.settings.review.timeout_seconds > 0 {
-            limits.timeout_seconds = limits
-                .timeout_seconds
-                .min(ctx.settings.review.timeout_seconds);
-        }
+        limits.timeout_seconds = ctx
+            .settings
+            .ai
+            .harness_timeout_seconds(
+                request.selected_indexes.len(),
+                limits.timeout_seconds,
+                ctx.settings.review.timeout_seconds,
+            )
+            .map_err(anyhow::Error::msg)?;
         let prompt = crate::agent_harness::series::build_prompt(
             request.input,
             request.baseline,
@@ -2937,8 +2941,12 @@ async fn run_review_tool_with_cmd_and_overrides(
     use tokio::time::{timeout, timeout_at};
 
     // Perform interaction with timeout
+    let review_timeout_seconds = settings
+        .ai
+        .review_timeout_seconds(1, settings.review.timeout_seconds)
+        .map_err(anyhow::Error::msg)?;
     let deadline = Arc::new(std::sync::Mutex::new(
-        TokioInstant::now() + Duration::from_secs(settings.review.timeout_seconds),
+        TokioInstant::now() + Duration::from_secs(review_timeout_seconds),
     ));
 
     // Retry rate-limited and transient failures with the shared limiter rather
@@ -3268,7 +3276,7 @@ async fn run_review_tool_with_cmd_and_overrides(
     if timed_out {
         error!(
             "Review tool timed out after {} active seconds. Killing process.",
-            settings.review.timeout_seconds
+            review_timeout_seconds
         );
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(5), child.wait()).await;

@@ -283,7 +283,10 @@ pub async fn run_worker(
     // Handed in, because the process read them once already: nothing here opens
     // the settings file, and nothing here merges an override onto it.
     let concurrency = settings.review.concurrency;
-    let timeout_seconds = settings.review.timeout_seconds;
+    let timeout_seconds = settings
+        .ai
+        .review_timeout_seconds(1, settings.review.timeout_seconds)
+        .map_err(anyhow::Error::msg)?;
     let worktree_dir = settings.review.worktree_dir.as_deref().map(Path::new);
 
     let patchset_id = input.id;
@@ -1012,9 +1015,14 @@ async fn run_worker_in_worktree(
             .agent_harness
             .clone()
             .context("agent_harness requires execution limits")?;
-        if timeout_seconds > 0 {
-            limits.timeout_seconds = limits.timeout_seconds.min(timeout_seconds);
-        }
+        limits.timeout_seconds = settings
+            .ai
+            .harness_timeout_seconds(
+                selected_indexes.len(),
+                limits.timeout_seconds,
+                settings.review.timeout_seconds,
+            )
+            .map_err(anyhow::Error::msg)?;
         if settings.ai.provider != "codex-cli" {
             anyhow::bail!("agent_harness currently requires provider = 'codex-cli'");
         }

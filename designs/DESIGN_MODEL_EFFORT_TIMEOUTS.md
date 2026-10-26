@@ -1,6 +1,6 @@
 # Model and Effort Timeouts
 
-Status: requested by the operator, 2026-10-26. Preserve existing timeouts when
+Status: implemented and deterministically validated, 2026-10-26. Preserve existing timeouts when
 no profile matches; do not change effort, model, or active requests automatically.
 
 ## Policy
@@ -41,3 +41,11 @@ unknown effort, eight-patch scaling, and overflow. A fake Codex executable must
 verify configurable per-call timeout behavior without paid calls. Existing
 whole-series and independent workflow tests must retain legacy behavior when
 profiles are absent. Run required deterministic gates before code commits.
+
+Validation passed: exact matching and legacy fallback, duplicate/zero/unknown
+effort rejection, overflow checks, eight-patch scaling to 4,800 seconds, profile
+override of both harness/review caps, and a fake Codex process whose blocked
+stdin is terminated by its configured one-second deadline. Full gates passed
+1,116 library tests, 48 main tests, seven CLI tests, 25 integration tests,
+formatting, and all three Clippy feature profiles. No MAX model call was used
+to validate timeout plumbing.

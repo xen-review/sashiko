@@ -34,6 +34,7 @@ use crate::utils::redact_secret;
 pub struct CodexCliProvider {
     pub model: String,
     pub effort: Option<String>,
+    pub timeout_seconds: u64,
 }
 
 fn build_codex_args(
@@ -124,14 +125,18 @@ impl CodexCliProvider {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn codex CLI: {}. Is it installed?", e))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(prompt.as_bytes()).await?;
-            stdin.flush().await?;
-        }
-
-        let output = timeout(Duration::from_secs(600), child.wait_with_output())
+        let execution = async move {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(prompt.as_bytes()).await?;
+                stdin.flush().await?;
+            }
+            child.wait_with_output().await
+        };
+        let output = timeout(Duration::from_secs(self.timeout_seconds), execution)
             .await
-            .map_err(|_| anyhow::anyhow!("codex CLI timed out after 10 minutes"))?
+            .map_err(|_| {
+                anyhow::anyhow!("codex CLI timed out after {} seconds", self.timeout_seconds)
+            })?
             .map_err(|e| anyhow::anyhow!("codex CLI wait error: {}", e))?;
 
         let stderr = log_and_redact_stderr("codex-cli", &output.stderr);
@@ -325,6 +330,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let provider = CodexCliProvider {
             model: "test-model".to_string(),
             effort: Some("low".to_string()),
+            timeout_seconds: 600,
         };
         let request = AiRequest {
             system: None,
@@ -403,11 +409,38 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let provider = CodexCliProvider {
             model: "test-model".to_string(),
             effort: Some("low".to_string()),
+            timeout_seconds: 600,
         };
         assert_ne!(
             provider.cache_identity(),
             cache_identity_with("test-model", &[("effort", Some("low"))])
         );
+    }
+
+    #[tokio::test]
+    async fn configured_timeout_includes_blocked_prompt_transfer() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("codex");
+        crate::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nwhile :; do :; done\n",
+        );
+        let provider = CodexCliProvider {
+            model: "test-model".to_string(),
+            effort: None,
+            timeout_seconds: 1,
+        };
+        let error = provider
+            .generate_content_with_binary(
+                AiRequest {
+                    system: Some("x".repeat(1024 * 1024)),
+                    ..Default::default()
+                },
+                executable.as_os_str(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out after 1 seconds"));
     }
 
     #[test]
@@ -429,6 +462,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let raised = CodexCliProvider {
             model: "gpt-5-codex".to_string(),
             effort: Some("xhigh".to_string()),
+            timeout_seconds: 600,
         };
         assert!(raised.check_error_message(message).is_err());
 
@@ -437,6 +471,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let plain = CodexCliProvider {
             model: "gpt-5-codex".to_string(),
             effort: None,
+            timeout_seconds: 600,
         };
         assert!(plain.check_error_message(message).is_ok());
         assert!(
@@ -490,6 +525,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let raised = CodexCliProvider {
             model: "gpt-5-codex".to_string(),
             effort: Some("xhigh".to_string()),
+            timeout_seconds: 600,
         };
         let err = raised
             .check_error_message(
@@ -510,6 +546,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let provider = CodexCliProvider {
             model: "test-model".to_string(),
             effort: None,
+            timeout_seconds: 600,
         };
         assert!(provider.check_error_message(
             "Configured value for `features.shell_tool` is disallowed by requirements; falling back to required value true."
@@ -521,10 +558,12 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let plain = CodexCliProvider {
             model: "gpt-5-codex".to_string(),
             effort: None,
+            timeout_seconds: 600,
         };
         let raised = CodexCliProvider {
             model: "gpt-5-codex".to_string(),
             effort: Some("xhigh".to_string()),
+            timeout_seconds: 600,
         };
         assert_ne!(plain.cache_identity(), raised.cache_identity());
     }
