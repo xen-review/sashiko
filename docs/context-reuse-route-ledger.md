@@ -101,6 +101,11 @@ by default. This policy is separate from the coding assistant's model setting.
   validates one-patch scope without another schema. Full gates passed 1,114
   library, 48 main, seven CLI, and 25 integration tests plus all lint profiles.
   Runtime sequential execution remains disabled pending atomic persistence.
+  Completed provider calls now retain their individual usage and exact response
+  history boundary alongside aggregate totals. Checkpoint tests verify disjoint
+  boundaries, summed input totals, and older trace deserialization without
+  invented call usage. The same full deterministic gates passed. This is a
+  persistence prerequisite, not a completed database checkpoint implementation.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

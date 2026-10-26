@@ -32,10 +32,19 @@ pub enum HarnessStatus {
 pub struct HarnessTrace {
     pub history: Vec<AiMessage>,
     pub usage: AiUsage,
+    #[serde(default)]
+    pub call_usage: Vec<HarnessCallUsage>,
     pub provider_calls: usize,
     pub tool_calls: usize,
     pub input_token_overshoot: usize,
     pub output_token_overshoot: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HarnessCallUsage {
+    pub provider_call: usize,
+    pub response_history_end: usize,
+    pub usage: AiUsage,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -208,6 +217,11 @@ async fn run_session(
             .usage
             .context("harness provider omitted token usage; refusing continuation")?;
         accumulate_usage(&mut trace.usage, &usage)?;
+        trace.call_usage.push(HarnessCallUsage {
+            provider_call: trace.provider_calls,
+            response_history_end: trace.history.len(),
+            usage,
+        });
         trace.input_token_overshoot = trace
             .usage
             .prompt_tokens
@@ -359,6 +373,26 @@ mod tests {
             }
             assert_eq!(session.trace.provider_calls, 2);
             assert_eq!(session.trace.usage.prompt_tokens, 20);
+            assert_eq!(session.trace.call_usage.len(), 2);
+            for (position, call) in session.trace.call_usage.iter().enumerate() {
+                assert_eq!(call.provider_call, position + 1);
+                assert_eq!(call.response_history_end, (position + 1) * 2);
+                assert_eq!(call.usage.prompt_tokens, 10);
+            }
+            assert_eq!(
+                session
+                    .trace
+                    .call_usage
+                    .iter()
+                    .map(|call| call.usage.prompt_tokens)
+                    .sum::<usize>(),
+                session.trace.usage.prompt_tokens
+            );
+            let mut legacy = serde_json::to_value(&session.trace).unwrap();
+            legacy.as_object_mut().unwrap().remove("call_usage");
+            let legacy: HarnessTrace = serde_json::from_value(legacy).unwrap();
+            assert!(legacy.call_usage.is_empty());
+            assert_eq!(legacy.usage.prompt_tokens, 20);
             assert!(matches!(
                 session
                     .checkpoint(&provider, &tools, "Third patch.", std::future::pending())
