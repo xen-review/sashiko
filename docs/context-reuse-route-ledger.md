@@ -78,7 +78,10 @@ by default. This policy is separate from the coding assistant's model setting.
   Full deterministic gates passed: 1,112 library, 48 main, seven CLI, and
   25 integration tests, formatting, and all three Clippy profiles.
   No full/small benchmark or automatic queue refill is authorized by this plan.
-6. Design sequential checkpoints on this engine before implementation. Retain
+6. Sequential checkpoint design drafted in
+  [DESIGN_SEQUENTIAL_HARNESS_CHECKPOINTS.md](../designs/DESIGN_SEQUENTIAL_HARNESS_CHECKPOINTS.md).
+  Approval is needed for partial-completion and recovery semantics before code.
+  Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
    checkpoint to exact baseline, series revision, and selected patch identity.
