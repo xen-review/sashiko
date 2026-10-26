@@ -88,6 +88,7 @@ pub fn parse_email(raw_email: &[u8]) -> Result<(PatchsetMetadata, Option<Patch>)
     let received_date = extract_received_date(raw_email);
 
     let message = MessageParser::default()
+        .with_mime_headers()
         .with_address_headers()
         .with_message_ids()
         .header_text(mail_parser::HeaderName::Subject)
@@ -598,6 +599,48 @@ pub fn inject_changelog_into_git_show(git_show: &str, changelog: &str) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_email_decodes_multipart_quoted_printable_patch() {
+        let raw = concat!(
+            "From: Author <author@example.com>\r\n",
+            "Message-ID: <mime-patch@example.com>\r\n",
+            "Subject: [PATCH] Fix foo\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative;\r\n boundary=\"patch-part\"\r\n",
+            "\r\n",
+            "--patch-part\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n",
+            "\r\n",
+            "Fix foo=2Ec=2E\r\n",
+            "\r\n",
+            "diff --git a/foo=2Ec b/foo=2Ec\r\n",
+            "--- a/foo=2Ec\r\n",
+            "+++ b/foo=2Ec\r\n",
+            "@@ -1 +1 @@\r\n",
+            "-old\r\n",
+            "+n=\r\n",
+            "ew\r\n",
+            "--patch-part\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>HTML alternative</p>\r\n",
+            "--patch-part--\r\n",
+        );
+        let (metadata, patch) = parse_email(raw.as_bytes()).unwrap();
+        let patch = patch.unwrap();
+
+        assert!(metadata.is_patch_or_cover);
+        assert_eq!(patch.body, metadata.body);
+        assert!(patch.diff.contains("Fix foo.c."));
+        assert!(patch.diff.contains("diff --git a/foo.c b/foo.c"));
+        assert!(patch.diff.contains("+new"));
+        assert!(!patch.diff.contains("=2E"));
+        assert!(!patch.diff.contains("Content-Transfer-Encoding"));
+        assert!(!patch.diff.contains("patch-part"));
+        assert!(!patch.diff.contains("HTML alternative"));
+    }
 
     #[test]
     fn test_authors_match() {
