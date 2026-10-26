@@ -4427,6 +4427,26 @@
             `;
         }
 
+        function renderReviewDispositionSummary(reviewMap) {
+            if (!Array.isArray(reviewMap?.threads) || reviewMap.threads.length === 0) return '';
+            let regressions = 0;
+            let preexisting = 0;
+            let dismissed = 0;
+            let unresolved = 0;
+            for (const thread of reviewMap.threads) {
+                if (thread.outcome === 'preexisting_concern' || (thread.outcome === 'finding' && thread.preexisting)) preexisting++;
+                else if (thread.outcome === 'finding') regressions++;
+                else if (['dismissed_1b', 'unverified_dismissed', 'refuted_hard_case'].includes(thread.outcome)) dismissed++;
+                else unresolved++;
+            }
+            return `<div class="review-disposition-summary text-muted-sm" style="margin:8px 0; overflow-wrap:anywhere;">
+                ${regressions} regression ${regressions === 1 ? 'finding' : 'findings'} &middot;
+                ${preexisting} pre-existing ${preexisting === 1 ? 'concern' : 'concerns'} &middot;
+                ${dismissed} dismissed &middot; ${unresolved} unresolved
+                <div>Pre-existing concerns and dismissed candidates are not regression findings.</div>
+            </div>`;
+        }
+
         function renderReviewCard(r, emailHtml = '') {
             const uniqueId = Math.random().toString(36).substr(2, 9);
             const isHarness = r.review_mode === 'agent_harness';
@@ -4594,7 +4614,10 @@
                 const hasIssues = parsedFindings && !displayResult.includes('No regressions');
                 const isOpen = hasIssues ? 'open' : '';
                 const icon = hasIssues ? '▼' : '▶';
-                inlineHtml = `
+                const concise = inlineReview.trim();
+                inlineHtml = concise.length <= 160 && !/[\r\n]/.test(concise) ? `
+                    <p class="review-inline-summary" style="margin:8px 0; overflow-wrap:anywhere;">${escapeHtml(concise)}</p>
+                ` : `
                     <div style="margin-top:8px;">
                         <button class="toggle-btn" onclick="toggleCollapsible('inline-${uniqueId}', this)">${icon} Inline Review</button>
                         <div id="inline-${uniqueId}" class="collapsible ${isOpen}" style="position: relative;">
@@ -4627,6 +4650,7 @@
                     ${checkpointHtml}
                     ${summaryHtml}
                     ${inlineHtml}
+                    ${isHarness ? '' : renderReviewDispositionSummary(outputJson?.review_map)}
                     ${draftsHtml}
                     <div style="margin-top: 24px; margin-bottom: 0;">
                         ${emailHtml}
@@ -6292,6 +6316,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                 stagesSectionHtml = `
                     <div class="section">
                         <h2>Stages (${activeStages.length})</h2>
+                        <div style="overflow-x:auto;">
                         <table>
                             <thead>
                                 <tr>
@@ -6306,6 +6331,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                                 ${stageRowsHtml}
                             </tbody>
                         </table>
+                        </div>
                         ${skippedFooterHtml}
                     </div>
                 `;
@@ -6344,6 +6370,8 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                         <span>Findings &amp; Concerns (${threads.length})</span>
                         ${threads.length > 0 ? `<button type="button" id="rm-expand-all-btn" class="toggle-btn" onclick="toggleAllReviewMapThreads()" style="font-size:0.85em; font-weight:normal;">▶ Expand All</button>` : ''}
                     </h2>
+                    ${renderReviewDispositionSummary(reviewMap)}
+                    <div style="overflow-x:auto;">
                     <table>
                         <thead>
                             <tr>
@@ -6356,6 +6384,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                             ${threadRowsHtml}
                         </tbody>
                     </table>
+                    </div>
                 </div>
 
                 ${stagesSectionHtml}

@@ -93,3 +93,26 @@ start a high-level confidence-calibration or review-policy redesign implicitly.
 - Successful results, original false-positive artifacts, human replies, access
   controls, and muted outbound delivery remain intact. No automatic rerun or
   public posting is part of this report.
+
+## Implementation Progress
+
+The first UI slice now renders short single-line inline results directly and
+retains disclosures for substantive reports. Cards and maps share a breakdown
+of stored regression findings, pre-existing concerns, dismissed items, and
+unresolved states. The runstate fixture shows zero, one, one, and zero respectively.
+Both map tables scroll within narrow screens instead of widening the page.
+No historical disposition or final artifact is changed.
+
+JavaScript syntax, short/long/multiline/escaped content, unknown and legacy map
+states, and read-only review-48 rendering checks pass. Browser fixtures at 1,280
+and 390 pixels show no page or summary overflow, no injected image element, and
+working disclosure handlers. Pointer automation timed out in the shared browser;
+direct DOM activation verified the unchanged handlers. Browser screenshots were
+captured but not available to the workspace image viewer, so no separate visual
+inspection is claimed. The diff-aware make check-pr gate passed.
+
+Effort persistence, confidence provenance, missing-usage presentation, and
+configuration-sensitive prompt regression work remain open. Review 48's public
+API and saved prompt do not contain effort; the stored token totals are zero but
+do not establish that its Copilot invocation actually used no tokens. This first
+slice does not invent either missing attribution or confidence.

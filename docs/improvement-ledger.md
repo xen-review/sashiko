@@ -23,7 +23,7 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ### P1: Explain Review Results, Effort, and Confidence
 
-Status: operator feedback recorded on 2026-10-26; implementation pending.
+Status: operator feedback recorded on 2026-10-26; first UI slice implemented.
 See [the concrete report and acceptance checks](../designs/DESIGN_REVIEW_TRANSPARENCY.md).
 The runstate-NULL v2 patch page hides a one-line inline result, while review map
 48 retains one Low pre-existing compat concern and one dismissed native-path
@@ -41,6 +41,14 @@ historical guesses, or hiding low-confidence possible bugs. Preserve the
 operator's recall preference. First inspect stored output and invocation evidence;
 do not assume Luna means low effort or that current runtime settings applied.
 No new premium review or source modification is authorized by this report.
+
+The initial slice shows concise inline results directly and displays the same
+stored outcome breakdown on cards/maps. Responsive map tables no longer widen
+the page on narrow screens. Syntax, escaping, real review-48 rendering, mixed
+dispositions, legacy cases, desktop/mobile overflow, and disclosure-handler
+checks pass; make check-pr passes. No historical artifact was relabeled.
+Actual-effort attribution, confidence, missing usage, and configuration-sensitive
+evidence guidance remain open; see the report for browser-verification limits.
 
 ### P1: Budget-Gated Premium Model Comparisons
 
