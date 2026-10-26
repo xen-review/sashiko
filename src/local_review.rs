@@ -14,7 +14,7 @@
 
 use crate::{
     git_ops::{GitWorktree, extract_patch_metadata, get_commit_hash, resolve_git_range},
-    settings::{AiSettings, Settings},
+    settings::{AiSettings, ReviewMode, Settings},
     toolbox::ToolBox,
     worker::{
         PatchInput, ReviewInput, Worker, WorkerConfig, calculate_series_range,
@@ -976,6 +976,86 @@ async fn run_worker_in_worktree(
         }));
     }
 
+    if settings.review.mode == ReviewMode::AgentHarness {
+        if options.custom_prompt.is_some()
+            || settings.review.stages.is_some()
+            || options.report_preexisting
+        {
+            anyhow::bail!(
+                "agent_harness uses its instruction manifest; custom prompts, workflow stages, and pre-existing reports are not supported"
+            );
+        }
+        let mut input = ReviewInput {
+            id: patchset_id,
+            subject,
+            patches,
+        };
+        for patch in &mut input.patches {
+            patch.commit_id = patch_shas.get(&patch.index).cloned();
+        }
+        let baseline_commit = get_commit_hash(&worktree.path, baseline_sha).await?;
+        let selected_indexes: Vec<_> = patches_to_review.iter().map(|patch| patch.index).collect();
+        let request = crate::agent_harness::series::SeriesRequest {
+            input: &input,
+            baseline: &baseline_commit,
+            selected_indexes: &selected_indexes,
+            cover_letter: None,
+            max_bytes: 8 * 1024 * 1024,
+        };
+        let instructions = settings
+            .review
+            .instruction_snapshot
+            .as_ref()
+            .context("agent_harness requires a settings-file instruction snapshot")?;
+        let mut limits = settings
+            .review
+            .agent_harness
+            .clone()
+            .context("agent_harness requires execution limits")?;
+        if timeout_seconds > 0 {
+            limits.timeout_seconds = limits.timeout_seconds.min(timeout_seconds);
+        }
+        if settings.ai.provider != "codex-cli" {
+            anyhow::bail!("agent_harness currently requires provider = 'codex-cli'");
+        }
+        let mut ai = settings.ai.clone();
+        ai.response_cache = false;
+        let provider = crate::ai::create_provider_cached(&ai, None).await?;
+        let mut tools = ToolBox::new(worktree.path.clone(), None);
+        if let Some(commit) = input
+            .patches
+            .last()
+            .and_then(|patch| patch.commit_id.clone())
+        {
+            tools.set_virtual_head(commit);
+        }
+        emit(
+            progress,
+            ProgressEvent::AiReviewStarted {
+                patches: selected_indexes.len(),
+            },
+        );
+        let outcome = crate::agent_harness::series::review(
+            provider.as_ref(),
+            &tools,
+            instructions,
+            &request,
+            &limits,
+        )
+        .await?;
+        let mut result = format_harness_result(patchset_id, baseline_arg, patch_results, outcome);
+        result["review_attribution"] = json!({
+            "provider": ai.provider,
+            "model": ai.model,
+            "effort": ai.codex_cli.as_ref().and_then(|config| config.effort.as_deref()),
+            "response_cache": false,
+            "baseline_commit": baseline_commit,
+            "selected_patch_indexes": selected_indexes,
+            "instruction_snapshot": instructions,
+        });
+        return Ok(result);
+    }
+
     info!(
         "Patches applied. Starting AI reviews for {} patches...",
         patches_to_review.len()
@@ -1328,6 +1408,26 @@ pub fn result_has_high_or_critical_findings(result: &Value) -> bool {
 /// `--agent` mode, omitting internal LLM conversation history, raw prompt context,
 /// dismissed concerns, and human-formatted inline reports.
 pub fn format_agent_review_output(result: &Value) -> Value {
+    if result.get("review_mode").and_then(Value::as_str) == Some("agent_harness") {
+        return json!({
+            "status": if result_has_error(result) { "error" } else { "completed_without_independent_verification" },
+            "review_mode": "agent_harness",
+            "independently_verified": false,
+            "baseline": result["baseline"],
+            "patches": result["patches"],
+            "artifacts": result["artifacts"],
+            "instruction_fingerprint": result["harness"]["instruction_fingerprint"],
+            "provider_calls": result["harness"]["trace"]["provider_calls"],
+            "tool_calls": result["harness"]["trace"]["tool_calls"],
+            "provider": result["review_attribution"]["provider"],
+            "model": result["review_attribution"]["model"],
+            "effort": result["review_attribution"]["effort"],
+            "tokens_in": result["tokens_in"],
+            "tokens_out": result["tokens_out"],
+            "tokens_cached": result["tokens_cached"],
+            "error": result["error"],
+        });
+    }
     let findings = result
         .get("review")
         .and_then(|r| r.get("findings"))
@@ -1388,6 +1488,32 @@ pub fn format_agent_review_output(result: &Value) -> Value {
     }
 
     out
+}
+
+fn format_harness_result(
+    patchset_id: i64,
+    baseline: &str,
+    patches: Vec<Value>,
+    outcome: crate::agent_harness::series::SeriesOutcome,
+) -> Value {
+    let error = match &outcome.execution.status {
+        crate::agent_harness::session::HarnessStatus::Completed { .. } => None,
+        crate::agent_harness::session::HarnessStatus::Failed { reason } => Some(reason.as_str()),
+        crate::agent_harness::session::HarnessStatus::TimedOut => Some("Agent harness timed out"),
+    };
+    json!({
+        "patchset_id": patchset_id,
+        "baseline": baseline,
+        "patches": patches,
+        "review_mode": "agent_harness",
+        "independently_verified": false,
+        "artifacts": outcome.artifacts,
+        "tokens_in": outcome.execution.trace.usage.prompt_tokens,
+        "tokens_out": outcome.execution.trace.usage.completion_tokens,
+        "tokens_cached": outcome.execution.trace.usage.cached_tokens,
+        "error": error,
+        "harness": outcome.execution,
+    })
 }
 
 async fn apply_single_patch(
@@ -2282,6 +2408,49 @@ mod tests {
         );
         assert!(progress_line(ProgressEvent::PatchApplied { index: 1 }).is_none());
         assert!(PROGRESS_LINE_PREFIX.ends_with(' '));
+    }
+
+    #[test]
+    fn harness_results_are_not_reported_as_verified_clean() {
+        use crate::agent_harness::{
+            series::SeriesOutcome,
+            session::{HarnessOutcome, HarnessStatus, HarnessTrace},
+        };
+        let mut trace = HarnessTrace::default();
+        trace.usage.prompt_tokens = 30;
+        trace.usage.completion_tokens = 5;
+        trace.provider_calls = 1;
+        let mut result = format_harness_result(
+            1,
+            "HEAD^",
+            vec![],
+            SeriesOutcome {
+                artifacts: None,
+                execution: HarnessOutcome {
+                    status: HarnessStatus::Completed {
+                        report: "Raw report".to_string(),
+                    },
+                    trace,
+                    instruction_fingerprint: "snapshot".to_string(),
+                },
+            },
+        );
+        assert_eq!(result["harness"]["status"]["status"], "completed");
+        assert_eq!(result["harness"]["status"]["report"], "Raw report");
+        assert!(!result_has_error(&result));
+        let concise = format_agent_review_output(&result);
+        assert_eq!(
+            concise["status"],
+            "completed_without_independent_verification"
+        );
+        assert_eq!(concise["independently_verified"], false);
+        assert_eq!(concise["tokens_in"], 30);
+        assert_eq!(concise["provider_calls"], 1);
+        assert!(concise.get("harness").is_none());
+        assert!(concise.get("findings").is_none());
+        result["error"] = json!("invalid artifacts");
+        assert!(result_has_error(&result));
+        assert_eq!(format_agent_review_output(&result)["status"], "error");
     }
 
     #[test]

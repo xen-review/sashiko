@@ -34,11 +34,14 @@ by default. This policy is separate from the coding assistant's model setting.
   in one call, and invalid final artifacts preserve raw output and usage without
   a repair call. Required gates passed: 1,108 library, 47 main, seven CLI, and
   24 integration tests, plus formatting and all Clippy profiles.
-3. Next: wire local review dispatch and explicit output labeling. Preserve no-AI mode,
-   exact applied commits, selected patch scope, and settings-relative snapshots.
-   Completion is not independent verification. Keep unsupported daemon mode
-   rejected until persistence and cancellation are implemented.
-4. Add daemon whole-series persistence and cancellation with one series usage
+3. Done: local dispatch branches before per-patch workflows, with exact baseline
+  and patch commits, selected scope, settings-relative instruction snapshots,
+  explicit unverified artifacts, raw failure traces, and model attribution.
+  A fake Codex executable proves a two-patch range uses one provider call,
+  no-AI uses zero, and malformed output is retained without retry or fallback.
+  Required gates passed: 1,109 library, 48 main, seven CLI, 25 integration tests,
+  formatting, and all Clippy profiles. Daemon harness mode remains rejected.
+4. Next: add daemon whole-series persistence and cancellation with one series usage
    record, covered patch identities, atomic status updates, and no automatic
    public delivery. Validate before enabling this mode in runtime settings.
 5. Establish one bounded Luna evaluation with retained artifacts and measured
@@ -81,7 +84,7 @@ CI and agent edits; never stage or revert them. Fast-forward main and push only
 origin/add-xen-support after signed commits and required checks.
 
 The installed daemon remains on the older restricted Codex completion runtime;
-new harness source is not yet enabled or deployed. Preserve mute_all and SMTP
+local harness dispatch is checked in but not yet installed. Preserve mute_all and SMTP
 policy. Do not stop an active review for routine checks. Before tests, stop at
 a safe boundary, verify workers exited, and resume the service promptly.
 

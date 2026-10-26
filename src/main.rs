@@ -3028,6 +3028,22 @@ fn write_review_result(
     }
 
     let Some(review) = result.get("review") else {
+        if result.get("review_mode").and_then(Value::as_str) == Some("agent_harness") {
+            writeln!(out, "\nAgent harness review (not independently verified):")?;
+            if let Some(notes) = result["artifacts"]["reviewer_notes"].as_str() {
+                writeln!(out, "\n{notes}")?;
+            }
+            if let Some(drafts) = result["artifacts"]["reply_drafts"].as_array() {
+                for draft in drafts {
+                    writeln!(
+                        out,
+                        "\nReply draft for patch {}:\n{}",
+                        draft["patch_index"],
+                        draft["body"].as_str().unwrap_or("")
+                    )?;
+                }
+            }
+        }
         return Ok(());
     };
     let Some(findings) = review.get("findings").and_then(|v| v.as_array()) else {
@@ -4172,6 +4188,26 @@ mod tests {
             no_patch_findings_message(true),
             "\nNo patch-introduced issues found.\n"
         );
+    }
+
+    #[test]
+    fn write_review_result_renders_unverified_harness_artifacts() {
+        let result = serde_json::json!({
+            "review_mode": "agent_harness",
+            "artifacts": {
+                "reviewer_notes": "Source investigation notes.",
+                "reply_drafts": [{"patch_index": 2, "body": "Hello,\n\nReview reply."}]
+            }
+        });
+        let mut buf = Buffer::no_color();
+        write_review_result(&mut buf, &result, "HEAD", false).unwrap();
+        let output = String::from_utf8(buf.into_inner()).unwrap();
+        assert!(output.contains("not independently verified"));
+        assert!(output.contains("Source investigation notes."));
+        assert!(output.contains("Reply draft for patch 2:"));
+        assert!(output.contains("Hello,\n\nReview reply."));
+        assert!(!output.contains("No issues found"));
+        assert!(!output.contains("No AI review was run"));
     }
 
     #[test]

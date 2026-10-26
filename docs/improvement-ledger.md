@@ -151,13 +151,18 @@ authorized continued implementation and subscription-backed daemon operation.
 Implemented foundations:
 
 - `76439f00`: typed mode and positive generation/tool/token/time settings;
-  existing configurations still select workflow. Harness mode currently fails
-  closed with an explicit error rather than running the old workflow.
+  existing configurations still select workflow. Local harness dispatch is now
+  implemented; daemon harness mode remains rejected until persistence is ready.
 - `ad34e99f`: ordered, settings-relative instruction snapshots with original
   bytes, validated frontmatter, prompt bodies, total byte limits, and SHA-256
   identity covering contents and order. No metadata enables tools.
-- Latest full gate passed 1,096 library, 47 main, seven CLI, and 24 integration
+- Latest full gate passed 1,109 library, 48 main, seven CLI, and 25 integration
   tests, plus formatting and all Clippy profiles. Two library tests are ignored.
+- Local CLI regression: a two-patch range uses one fake Codex call, no-AI uses
+  zero calls, and malformed final artifacts fail with raw history and usage
+  retained. Full JSON includes exact baseline, selected indexes, model/effort,
+  and immutable instruction contents. Human and agent output explicitly avoid
+  claiming independent verification. No paid trial or runtime mode change.
 
 Execution budget decision approved: for subscription-backed Codex, enforce
 token thresholds between model turns, permitting one-generation overshoot.

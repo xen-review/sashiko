@@ -301,6 +301,65 @@ pass.
 | `max_total_output_tokens` | integer | `1000000` | Maximum cumulative output tokens (including thinking tokens) per review. Set to 0 to disable. |
 | `effort` | string | `"mid"` (Argon 4) | Reasoning effort mode for models that support configurable effort levels (currently Argon 4; ignored for other models). Options: `"low"` (uniform `Low` effort across all stages), `"mid"` (uniform `Medium` effort across all stages, default), `"high"` (`High` effort across screening, planning, analysis, and verification stages; `Medium` for report formatting), or `"dynamic"` (`Low` for screening/planning/summary, planned `Medium` or `High` per analysis stage, `High` for verification stages, `Medium` for report formatting). Can also be set via `--effort`. |
 
+#### Local Agent Harness
+
+`[review] mode = "workflow"` remains the default. Local `sashiko review` can
+instead use `mode = "agent_harness"` with `provider = "codex-cli"`. This mode
+replaces the entire planning/analysis/verification/report workflow with one
+bounded whole-series session using operator-supplied instructions and read-only
+Git tools. It may make multiple provider calls. Daemon harness persistence is
+not implemented yet; daemon startup rejects this mode rather than falling back.
+
+Example local configuration, using subscription-backed Codex authentication:
+
+```toml
+[ai]
+provider = "codex-cli"
+model = "gpt-6-luna"
+
+[ai.codex_cli]
+effort = "low"
+
+[review]
+concurrency = 1
+mode = "agent_harness"
+
+[review.agent_harness]
+instruction_files = ["agents/reviewer.md", "skills/review/SKILL.md"]
+max_generations = 12
+max_tool_calls = 30
+max_input_tokens = 400000
+max_output_tokens = 20000
+timeout_seconds = 600
+```
+
+All harness fields are required and limits must be positive. The instruction
+manifest is ordered; list all required agents, skills, style guides, and reference
+examples explicitly. Relative paths resolve against the settings file directory,
+not the repository or CLI working directory. Sashiko snapshots original contents
+and hashes them at configuration load; frontmatter does not enable tools. Missing
+files fail configuration loading. Instructions are capped at 1 MiB total and
+serialized series input at 8 MiB; oversized inputs are rejected, not truncated.
+
+Run `sashiko --settings local.toml --project xen review BASE..HEAD --format json`
+for the full result, including instructions, raw conversation, usage, and exact
+baseline/patch attribution. `--agent` returns concise artifacts labeled
+`completed_without_independent_verification`, never a verified-clean result.
+Reviewer notes and per-patch plain-text reply drafts remain separate. Drafts are
+not sent and proposed source fixes are not applied. `--no-ai` still makes zero
+provider calls. Custom prompts, selected workflow stages, and pre-existing bug
+reports are rejected rather than silently ignored in harness execution.
+
+`max_generations` bounds Sashiko provider calls, not hidden backend generations.
+Native CLI tools remain disabled. Token thresholds count all reported input
+(including cached tokens) and output between calls, allowing a single call to
+overshoot; that overshoot fails the review and is recorded. Missing usage also
+fails the review. No repair call or whole-session retry runs automatically.
+The smaller positive whole-review timeout also applies; Codex retains its
+600-second per-call timeout. MAX effort requires separate timeout support and is
+not authorized by this example. Completed-response caching is disabled for this
+mode; provider-side prefix caching may still apply but is not guaranteed.
+
 ### `[linux_bug]`
 
 Controls pre-existing Linux kernel bug tracking and background analysis.

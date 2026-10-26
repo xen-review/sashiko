@@ -1,8 +1,9 @@
 # Optional Whole-Series Single-Prompt Review
 
 Status: architecture choice approved on 2026-10-26: one bounded harness
-invocation with read-only source tools. Implementation and deterministic
-validation are next; a paid trial requires separate authorization. No runtime
+invocation with read-only source tools. Local dispatch and deterministic
+validation are implemented; daemon persistence is next. A paid trial requires
+separate authorization. No runtime
 default changes are approved by this document. The daemon now uses the
 separately authorized subscription-backed Codex gpt-6-luna at low effort.
 
@@ -73,7 +74,9 @@ earlier operating window or authorize a paid trial.
 
 Use a typed enum, not arbitrary strings in control flow. Existing configurations
 deserialize to `workflow`, preserving all current behavior. The following is a
-proposal, not a working configuration yet:
+manifest excerpt; the required positive execution limits are documented in
+[the configuration reference](../docs/configuration.md#local-agent-harness).
+Only local execution is implemented so far:
 
 ```toml
 [review]

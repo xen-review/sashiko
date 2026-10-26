@@ -990,6 +990,8 @@ pub struct ReviewSettings {
     pub mode: ReviewMode,
     #[serde(default)]
     pub agent_harness: Option<AgentHarnessSettings>,
+    #[serde(skip)]
+    pub instruction_snapshot: Option<crate::agent_harness::InstructionSnapshot>,
     pub concurrency: usize,
     /// Parent directory for the worktrees a review worker checks patches out
     /// into, or None for one under the system temporary directory.
@@ -1040,10 +1042,7 @@ impl ReviewSettings {
             (ReviewMode::AgentHarness, None) => {
                 Err("[review] mode = \"agent_harness\" requires [review.agent_harness]".to_string())
             }
-            (ReviewMode::AgentHarness, Some(harness)) => {
-                harness.validate()?;
-                Err("[review] agent_harness execution is not implemented yet; refusing to fall back to workflow mode".to_string())
-            }
+            (ReviewMode::AgentHarness, Some(harness)) => harness.validate(),
         }
     }
 
@@ -1305,6 +1304,9 @@ impl Settings {
     /// and an empty one reaching a connection attempt or a git command produces
     /// an error far from its cause.
     pub fn validate_for_daemon(&self) -> Result<(), String> {
+        if self.review.mode == ReviewMode::AgentHarness {
+            return Err("[review] agent_harness is currently supported only for local review; daemon persistence is not implemented".to_string());
+        }
         if self.project.kind == Some(ProjectId::Xen) && self.linux_bug.enabled {
             return Err(
                 "[linux_bug] enabled must be false for Xen: Linux bug discovery is not supported"
@@ -1462,11 +1464,26 @@ impl Settings {
             .add_source(Environment::with_prefix("SASHIKO").separator("__"))
             .build()?;
 
-        let settings: Self = s.try_deserialize()?;
+        let mut settings: Self = s.try_deserialize()?;
         settings
             .review
             .validate_mode()
             .map_err(ConfigError::Message)?;
+        if let Some(harness) = &settings.review.agent_harness {
+            if settings.ai.provider != "codex-cli" {
+                return Err(ConfigError::Message(
+                    "[review] agent_harness currently requires provider = 'codex-cli'".to_string(),
+                ));
+            }
+            settings.review.instruction_snapshot = Some(
+                crate::agent_harness::InstructionSnapshot::load(
+                    path.as_ref(),
+                    &harness.instruction_files,
+                    1024 * 1024,
+                )
+                .map_err(|error| ConfigError::Message(format!("{error:#}")))?,
+            );
+        }
         if let Some(smtp) = &settings.smtp {
             smtp.validate().map_err(ConfigError::Message)?;
         }
@@ -1576,19 +1593,14 @@ mod tests {
                 .validate()
                 .is_ok()
         );
-        assert!(
-            configured
-                .validate_mode()
-                .unwrap_err()
-                .contains("not implemented")
-        );
+        assert!(configured.validate_mode().is_ok());
         let inactive: ReviewSettings =
             toml::from_str(&format!("concurrency = 1{manifest}")).unwrap();
         assert!(inactive.validate_mode().is_err());
     }
 
     #[test]
-    fn settings_loader_rejects_unimplemented_harness_mode() {
+    fn settings_loader_snapshots_local_harness_and_rejects_daemon_mode() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("Settings.toml");
         let base =
@@ -1601,8 +1613,36 @@ mod tests {
         let harness = "mode = 'agent_harness'\n[review.agent_harness]\ninstruction_files = ['agent.md']\nmax_generations = 5\nmax_tool_calls = 10\nmax_input_tokens = 10000\nmax_output_tokens = 2000\ntimeout_seconds = 60\n";
         std::fs::write(&path, format!("{base}{harness}")).unwrap();
         let error = Settings::from_file(&path).unwrap_err().to_string();
-        assert!(error.contains("not implemented"), "{error}");
-        assert!(error.contains("refusing to fall back"), "{error}");
+        assert!(error.contains("cannot resolve instruction file"), "{error}");
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let settings = Settings::from_file(&path).unwrap();
+        assert_eq!(settings.review.mode, ReviewMode::AgentHarness);
+        assert_eq!(
+            settings.review.instruction_snapshot.as_ref().unwrap().files[0].body,
+            "Review source."
+        );
+        std::fs::write(directory.path().join("agent.md"), "Changed later.").unwrap();
+        assert_eq!(
+            settings.review.instruction_snapshot.as_ref().unwrap().files[0].body,
+            "Review source."
+        );
+        assert!(
+            settings
+                .validate_for_daemon()
+                .unwrap_err()
+                .contains("only for local review")
+        );
+        std::fs::write(
+            &path,
+            format!("{}{}", base.replace("codex-cli", "copilot-cli"), harness),
+        )
+        .unwrap();
+        assert!(
+            Settings::from_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("requires provider")
+        );
     }
 
     #[test]
