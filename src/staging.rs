@@ -231,6 +231,7 @@ pub struct PatchEvidence {
     pub checked_at: Option<i64>,
     pub scope_complete: bool,
     pub matched_commits: Vec<String>,
+    pub exact_commits: Vec<String>,
     pub reason: Option<String>,
 }
 
@@ -249,6 +250,7 @@ impl PatchEvidence {
             checked_at: None,
             scope_complete: false,
             matched_commits: Vec::new(),
+            exact_commits: Vec::new(),
             reason: Some(reason.to_string()),
         }
     }
@@ -258,6 +260,7 @@ impl PatchEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
     StablePatchId,
+    ExactAncestry,
 }
 
 pub use crate::api::{SeriesEvidence, SeriesState};
@@ -455,7 +458,10 @@ impl crate::db::Database {
         }
         let requested = serde_json::to_string(patch_ids)?;
         let mut rows = self.conn.query("SELECT requested.value, s.id, s.tip, s.refreshed_at, s.checked_at, s.scope_complete, t.last_failure, e.source_identity, p.git_patch_id, s.algorithm_version,
-            (SELECT json_group_array(commit_id) FROM staging_snapshot_commits c WHERE c.snapshot_id = s.id AND c.patch_identity = e.source_identity)
+            (SELECT json_group_array(commit_id) FROM staging_snapshot_commits c WHERE c.snapshot_id = s.id AND c.patch_identity = e.source_identity),
+            (SELECT json_group_array(DISTINCT c.commit_id) FROM staging_snapshot_commits c
+             JOIN review_patch_coverage coverage ON coverage.commit_id = c.commit_id AND coverage.patch_id = requested.value
+             WHERE c.snapshot_id = s.id AND c.patch_identity = e.source_identity)
             FROM json_each(?) requested
             LEFT JOIN staging_targets t ON t.repository = ? AND t.remote = ? AND t.target_ref = ?
             LEFT JOIN staging_snapshots s ON s.id = t.snapshot_id
@@ -510,11 +516,20 @@ fn project_evidence(
         result.reason = Some("No textual patch-ID match in the checked range; not proof of absence or an effective change".to_string());
     } else {
         result.state = MembershipState::MatchedHistory;
-        result.match_kind = Some(MatchKind::StablePatchId);
-        result.reason = Some(
-            "Diff-equivalent commit reachable at the checked tip; may have been reverted"
-                .to_string(),
-        );
+        result.exact_commits = serde_json::from_str(&row.get::<String>(11)?)?;
+        if result.exact_commits.is_empty() {
+            result.match_kind = Some(MatchKind::StablePatchId);
+            result.reason = Some(
+                "Diff-equivalent commit reachable at the checked tip; may have been reverted"
+                    .to_string(),
+            );
+        } else {
+            result.match_kind = Some(MatchKind::ExactAncestry);
+            result.reason = Some(
+                "Saved applied commit with the same patch identity is reachable at the checked tip; may have been reverted"
+                    .to_string(),
+            );
+        }
     }
     Ok(result)
 }
@@ -522,6 +537,104 @@ fn project_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_ancestry_requires_reachable_coverage_and_current_patch_identity() -> Result<()> {
+        let db = crate::db::Database::new(&crate::settings::DatabaseSettings {
+            url: ":memory:".into(),
+            token: String::new(),
+        })
+        .await?;
+        db.migrate().await?;
+        db.conn.execute_batch("INSERT INTO patchsets(id,status,subject) VALUES (1,'Reviewed','saved series');
+            INSERT INTO messages(message_id) VALUES ('ancestry@example.invalid');
+            INSERT INTO patches(id,patchset_id,message_id,part_index,git_patch_id)
+            VALUES (1,1,'ancestry@example.invalid',1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+            INSERT INTO reviews(id,patchset_id,patch_id,status) VALUES (1,1,1,'Reviewed'), (2,1,1,'Reviewed');").await?;
+        let (_, settings) = fixture();
+        let mut snapshot = StagingSnapshot {
+            target_ref: settings.target_ref.clone(),
+            tip: "c".repeat(40),
+            algorithm_version: INDEX_VERSION,
+            scope_complete: false,
+            diff_bytes: 1,
+            entries: vec![
+                IndexEntry {
+                    commit: "c".repeat(40),
+                    identity: CommitIdentity::Text {
+                        patch_id: "a".repeat(40),
+                    },
+                },
+                IndexEntry {
+                    commit: "d".repeat(40),
+                    identity: CommitIdentity::Text {
+                        patch_id: "b".repeat(40),
+                    },
+                },
+            ],
+        };
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 90, 100)
+            .await?;
+        db.execute(
+            "INSERT INTO review_patch_coverage(review_id,patch_id,commit_id) VALUES (1,1,?)",
+            libsql::params!["d".repeat(40)],
+        )
+        .await?;
+        let evidence = db.staging_patch_evidence("repo", &settings, 1, 100).await?;
+        assert_eq!(
+            serde_json::to_value(evidence.match_kind)?,
+            "stable_patch_id"
+        );
+        assert!(evidence.exact_commits.is_empty());
+        db.execute(
+            "UPDATE review_patch_coverage SET commit_id=? WHERE review_id=1",
+            libsql::params!["c".repeat(40)],
+        )
+        .await?;
+        db.execute(
+            "INSERT INTO review_patch_coverage(review_id,patch_id,commit_id) VALUES (2,1,?)",
+            libsql::params!["c".repeat(40)],
+        )
+        .await?;
+        let evidence = db.staging_patch_evidence("repo", &settings, 1, 100).await?;
+        assert_eq!(serde_json::to_value(evidence.match_kind)?, "exact_ancestry");
+        assert_eq!(evidence.exact_commits, vec!["c".repeat(40)]);
+        assert_eq!(evidence.matched_commits, evidence.exact_commits);
+        assert!(
+            db.staging_patch_evidence("repo", &settings, 1, 90000)
+                .await?
+                .exact_commits
+                .is_empty()
+        );
+        db.execute(
+            "UPDATE patches SET git_patch_id=? WHERE id=1",
+            libsql::params!["b".repeat(40)],
+        )
+        .await?;
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 100)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 101, 102)
+            .await?;
+        let evidence = db.staging_patch_evidence("repo", &settings, 1, 102).await?;
+        assert_eq!(
+            serde_json::to_value(evidence.match_kind)?,
+            "stable_patch_id"
+        );
+        assert_eq!(evidence.matched_commits, vec!["d".repeat(40)]);
+        assert!(evidence.exact_commits.is_empty());
+        snapshot.entries.clear();
+        snapshot.tip = "e".repeat(40);
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 102, 103)
+            .await?;
+        let evidence = db.staging_patch_evidence("repo", &settings, 1, 103).await?;
+        assert_eq!(evidence.state, MembershipState::NoMatchInCheckedRange);
+        assert!(evidence.exact_commits.is_empty());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn series_evidence_uses_all_parts_and_a_fresh_pinned_snapshot() -> Result<()> {

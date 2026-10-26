@@ -568,6 +568,47 @@ async fn test_patchset_staging_evidence_is_batched_paginated_and_read_only() {
         "b".repeat(40)
     );
     assert_eq!(first["staging"]["page_only"], true);
+    assert_eq!(
+        first["patches"][0]["staging_evidence"]["exact_commits"],
+        serde_json::json!([])
+    );
+    server
+        .db
+        .conn
+        .execute(
+            "INSERT INTO reviews (id,patchset_id,patch_id,status) VALUES (1,1,1,'Reviewed')",
+            (),
+        )
+        .await
+        .unwrap();
+    server
+        .db
+        .conn
+        .execute(
+            "INSERT INTO review_patch_coverage (review_id,patch_id,commit_id) VALUES (1,1,?)",
+            libsql::params!["c".repeat(40)],
+        )
+        .await
+        .unwrap();
+    for route in ["patchset", "patch"] {
+        let exact: serde_json::Value = client
+            .get(format!("{}/api/{route}?id=1&per_page=1", server.base_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(exact["status"], "Reviewed");
+        assert_eq!(
+            exact["patches"][0]["staging_evidence"]["match_kind"],
+            "exact_ancestry"
+        );
+        assert_eq!(
+            exact["patches"][0]["staging_evidence"]["exact_commits"],
+            serde_json::json!(["c".repeat(40)])
+        );
+    }
     let listing: serde_json::Value = client
         .get(format!(
             "{}/api/patchsets?staging_state=partially_matched&per_page=1",

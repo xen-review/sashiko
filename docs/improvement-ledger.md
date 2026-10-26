@@ -277,7 +277,15 @@ The approved upstream/staging target is enabled with bounded initial limits.
 Its first normal fetch was skipped as fresh, so zero snapshots are published
 and current evidence correctly remains Unknown. Observe a later normal successful
 covering refresh before claiming live matching or filter validation. Exact
-ancestry and attributable human-review evidence remain pending. No live staging
+ancestry is implemented in source as the next bounded increment: saved applied
+coverage must name the same reachable commit and current patch identity. Exact
+commit evidence is separate from diff-equivalent matches and cannot survive
+stale, changed-source, or rewritten-snapshot checks. No new schema or series
+filter semantics are required. The focused storage/API/escaping checks and
+desktop/mobile native disclosure checks pass. The full gate passes 1,141 library
+tests (two ignored), 49 main, seven CLI, 27 integration, formatting, and all
+Clippy profiles. The 8097 fixture is stopped; ancestry deployment and attributable
+human-review evidence remain pending. No live staging
 history scan or feature-specific model call has run. Ordinary
 scheduling and muted delivery are unchanged; the normal bzimage review completed
 without new issues or email, bringing Reviewed series to 99.

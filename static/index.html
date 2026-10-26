@@ -4472,7 +4472,9 @@
         function renderStagingEvidence(evidence) {
             if (!evidence || typeof evidence !== 'object') return '';
             const labels = {matched_history: 'Patch-ID match in staging history', no_match_in_checked_range: 'No match in checked range', stale: 'Stale staging evidence', unknown: 'Staging membership unknown'};
-            const label = labels[evidence.state] || labels.unknown;
+            const exactCommits = Array.isArray(evidence.exact_commits) ? evidence.exact_commits : [];
+            const exact = evidence.state === 'matched_history' && evidence.match_kind === 'exact_ancestry' && exactCommits.length > 0;
+            const label = exact ? 'Exact applied commit in staging history' : labels[evidence.state] || labels.unknown;
             const commits = Array.isArray(evidence.matched_commits) ? evidence.matched_commits : [];
             return `<details style="margin:8px 0;overflow-wrap:anywhere;min-width:0;">
                 <summary>${escapeHtml(label)}</summary>
@@ -4482,6 +4484,7 @@
                     <div>Refreshed: ${escapeHtml(formatEvidenceTime(evidence.refreshed_at))} &middot; Checked: ${escapeHtml(formatEvidenceTime(evidence.checked_at))}</div>
                     <div>History scope: ${evidence.scope_complete === true ? 'All reachable commits enumerated' : 'Bounded or unknown'}</div>
                     ${evidence.match_kind === 'stable_patch_id' ? '<div>Evidence: stable Git patch-ID equivalence</div>' : ''}
+                    ${exact ? `<div>Evidence: saved applied commit reachable with matching patch identity</div><div>Exact applied commits: ${exactCommits.map(commit => `<code>${escapeHtml(String(commit))}</code>`).join(', ')}</div>` : ''}
                     ${commits.length ? `<div>Matching commits: ${commits.map(commit => `<code>${escapeHtml(String(commit))}</code>`).join(', ')}</div>` : ''}
                     <div>${escapeHtml(evidence.reason || 'No current evidence')}</div>
                 </div>

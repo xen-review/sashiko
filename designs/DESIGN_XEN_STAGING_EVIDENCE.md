@@ -91,6 +91,16 @@ No scheduling change is included. A later policy for prioritizing unmatched work
 requires separate approval and tests; it must preserve active and completed
 reviews and retain unmerged patches in mixed series.
 
+Incremental exact-ancestry evidence reuses saved applied commit IDs in
+review_patch_coverage. Promote an existing fresh history match only when that
+same immutable commit is in the pinned snapshot and its indexed patch ID equals
+the current mailed patch identity. A saved commit ID alone, a subject, or an
+untrusted mail header is insufficient. Return exact_commits separately from
+all diff-equivalent matched_commits; duplicate review coverage cannot duplicate
+the exact evidence. Existing source-change, freshness, and ref-rewrite checks
+still apply. This requires no new store, live Git query, scheduling change, or
+claim that a matched change remains effective after a revert.
+
 ## Incremental Checks
 
 1. Fake Git repositories cover exact ancestry, rewritten commit IDs with stable
@@ -208,3 +218,26 @@ fetches, not startup, commit timestamps, or skipped refreshes, establish the
 publication boundary. The existing hourly worker will check again normally;
 no live matching success or completed rollout observation is claimed until a
 snapshot and its API provenance have been inspected.
+
+## Exact-Ancestry Increment
+
+Exact ancestry is now implemented in source using saved applied commit coverage,
+the same pinned reachability snapshot, and matching current mailed patch IDs.
+The existing batched evidence query returns exact_commits independently of all
+diff-equivalent matches; no schema or series-count predicate changes are needed.
+Coverage for an unrelated diff cannot promote a match, duplicate review coverage
+does not duplicate evidence, and stale/source-changed/rewritten snapshots cannot
+retain an exact positive. A commit outside the bounded snapshot remains unproved;
+the API does not walk additional history to manufacture a result.
+
+The existing two-route API test verifies patch-ID-only evidence upgrades only
+after saving matching exact coverage, without changing Reviewed state or series
+totals. The escaped native disclosure distinguishes an exact saved applied commit
+from a diff-equivalent commit and retains the revert caveat. Focused storage,
+real-router, and rendering checks pass. The full make check-pr gate passes
+1,141 library tests (two ignored), 49 main, seven CLI, 27 integration, formatting,
+and all Clippy profiles. Synthetic browser checks at 1,280/390 pixels verify
+native disclosure clicks, exact provenance, the revert caveat, and no viewport
+overflow or page errors. The temporary 8097 fixture is stopped; none of its
+synthetic evidence entered the live database. Deployment of this increment is
+pending. Attributable human-review evidence remains open.
