@@ -186,7 +186,25 @@ captured; their browser-host resources are not directly inspectable here, so no
 independent visual inspection is claimed. Node checks cover escaping, all states,
 clear behavior and invalid timestamps. No fixture result is a live classification.
 
-Exact ancestry and attributable human-review evidence remain pending. The
-installed runtime is unchanged on schema 15; live staging rollout has not run.
+Exact ancestry and attributable human-review evidence remain pending.
 The normal daemon completed the newly ingested v2 bzimage payload-boundary review
 without new findings or outbound email. Its review artifacts are preserved.
+
+## Deployment Checkpoint
+
+At 00:20 CET on 2026-10-27, source bd966c85 is deployed on schema 16 with the
+approved refs/remotes/upstream/staging target enabled. The idle database backup
+passed quick_check before migration; the previous binary and configuration are
+retained privately. Release and installed hashes match, the API is healthy, and
+all 99 successful series remain preserved. No review scheduling, provider,
+effort, or delivery policy changed. The older source-only milestones above are
+historical rather than claims about the installed runtime.
+
+Initial limits are 128 reachable commits, 1,000 mailed patches, 16 MiB of new
+diffs, 120 seconds per indexing attempt, and 86,400 seconds of evidence freshness.
+The first normal sync skipped its fetches as fresh, so no snapshot was published
+and staging evidence correctly remains Unknown. Actual successful covering
+fetches, not startup, commit timestamps, or skipped refreshes, establish the
+publication boundary. The existing hourly worker will check again normally;
+no live matching success or completed rollout observation is claimed until a
+snapshot and its API provenance have been inspected.

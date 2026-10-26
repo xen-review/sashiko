@@ -271,8 +271,14 @@ before pagination. The latest full gate passes 1,140 library tests (two ignored)
 49 main, seven CLI and 27 integration tests, formatting and all Clippy profiles.
 Synthetic desktop/mobile interaction and DOM bounds checks pass at 1,280/390
 pixels, with screenshots captured and no independent visual-inspection claim.
-Exact ancestry, human-review evidence and backed-up schema-16 rollout remain
-pending. No live staging scan or feature-specific model call has run. Ordinary
+Schema 16 and source bd966c85 are deployed at 00:20 CET on 2026-10-27 after an
+idle checked backup, matching release/installed hashes, and API health checks.
+The approved upstream/staging target is enabled with bounded initial limits.
+Its first normal fetch was skipped as fresh, so zero snapshots are published
+and current evidence correctly remains Unknown. Observe a later normal successful
+covering refresh before claiming live matching or filter validation. Exact
+ancestry and attributable human-review evidence remain pending. No live staging
+history scan or feature-specific model call has run. Ordinary
 scheduling and muted delivery are unchanged; the normal bzimage review completed
 without new issues or email, bringing Reviewed series to 99.
 

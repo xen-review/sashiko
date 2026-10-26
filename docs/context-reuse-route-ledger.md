@@ -5,6 +5,43 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Deployed Staging Checkpoint
+
+Authoritative rollout state at 00:20 CET on 2026-10-27: bd966c85 is signed,
+pushed to origin/add-xen-support, and deployed on schema 16. The implementation
+worktree is clean before this documentation update. Main's unrelated untracked
+user files remain preserved. Installed/release SHA-256:
+ada9eabd9c9154ecb60e3f08a298b541950f6b1a240df7f7e89297dd93e140ff.
+Private backup before-staging-evidence-20261027-0010.db and its matching rollback
+binary and Settings snapshot are retained outside Git. The stopped backup passed
+quick_check before migration, and all 99 Reviewed series remain preserved.
+
+Service active, PID 1086081; API healthy version 0.6.3, 4,072 messages and 452
+series, no Pending or In Review. Runtime remains workflow / codex-cli /
+gpt-6-luna / medium with muted outbound delivery and no SMTP. The approved
+upstream target is enabled with 128 commits, 1,000 mailed patches, 16 MiB of new
+diffs, a 120-second indexing bound, and 86,400-second evidence freshness.
+
+No live snapshot has been published yet: zero snapshots, index entries, or patch
+evidence. The startup sync cycle at 00:10 CET skipped both fetches as fresh and
+correctly stored No successful staging remote fetch in this sync cycle. The
+existing sync worker checks hourly; only an actual covering successful fetch
+can publish under the approved conservative contract. Do not call this a live
+matching success, infer freshness from commit dates, bypass the guard, or restart
+the healthy daemon just to repeat it. Recheck after normal forward sync progress.
+The source gates and synthetic browser evidence below remain valid, but their
+older pending-rollout/schema-15 statements are historical.
+
+Fresh authenticated quota at 00:20:09 CET: 95% five-hour and 62% weekly remaining,
+next five-hour reset 05:03:09 CET. These are shared-account percentages, not exact
+tokens or permission for self-review, extra experiments, or paid overages. No
+model turn, queue refill, force push, self-review, or benchmark was started for
+rollout verification. Exact ancestry and attributable human-review evidence
+remain open; quota allocation/deferral and complete native/live usage remain
+separate ledger tasks. No watcher or temporary fixture process is running.
+
+### Earlier Implementation Evidence
+
 Current task boundary: staging design drafted in
 designs/DESIGN_XEN_STAGING_EVIDENCE.md. After interruption, the operator explicitly
 approved the integrated bounded index/persisted evidence architecture and
