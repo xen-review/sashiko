@@ -68,13 +68,20 @@ increase effort again unless medium actually fails, and do not change active cal
 Fresh 13:41:52 CET quota: 8% five-hour, 86% weekly, reset 14:00:02 CET. The
 loaded queue was exhausted with no pending or active series; no refill was made.
 
-Status: unresolved provider-output failure observed on 2026-10-26 at 12:07 UTC.
+Status: the two identified malformed-output examples have recovered; future
+format reliability remains observational, not guaranteed. A 13:43 CET read-only
+check found the GICv3 v4 series fully Reviewed, including its previously failed
+first patch, with the earlier Failed review retained. Native artifacts also
+contain a malformed 3,048-character verification response; its JSON was already
+invalid before Sashiko parsed it. No additional retry or model call was needed.
+
+Original provider-output failure observed on 2026-10-26 at 12:07 UTC:
 The final patch of x86/alternatives: Adjust all insn-relative fields exhausted
 three schema-validation attempts. Native Codex assistant artifacts at 12:07:00,
 12:07:08, and 12:07:13 contain malformed JSON themselves (1,519, 1,453, and
 1,453 characters), with missing container closures. This is not evidence that
-Sashiko dropped a complete valid response. A prior GICv3 review also failed on
-EOF JSON parsing; its native artifacts have not been compared yet.
+Sashiko dropped a complete valid response. The prior GICv3 EOF failure has now
+also been compared against native output and its later recovery confirmed.
 
 Preserve the failed review, native artifacts, and completed patch results. Do
 not manufacture a successful result by guessing missing JSON or repeatedly
