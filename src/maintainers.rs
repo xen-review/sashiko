@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Linux kernel MAINTAINERS file parsing and subsystem identification.
+//! Project MAINTAINERS parsing and subsystem identification.
 //!
-//! Directly inspired by `scripts/get_maintainer.pl` from the Linux kernel source,
-//! this module parses the MAINTAINERS file and matches modified file paths
-//! against section inclusion (`F:`), exclusion (`X:`), and regex (`N:`) patterns.
+//! Directly inspired by Linux's `scripts/get_maintainer.pl`, this module parses
+//! Linux- and Xen-style MAINTAINERS files and matches paths against section
+//! inclusion (`F:`), exclusion (`X:`), and regex (`N:`) patterns.
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -54,7 +54,11 @@ impl CompiledPattern {
                 prefix: pattern.to_string(),
                 depth,
             }
-        } else if !pattern.contains('*') && !pattern.contains('?') {
+        } else if !pattern.contains('*')
+            && !pattern.contains('?')
+            && !pattern.contains('{')
+            && !pattern.contains('}')
+        {
             CompiledPattern::ExactFile {
                 path: pattern.to_string(),
                 depth,
@@ -98,31 +102,88 @@ impl CompiledPattern {
 }
 
 fn glob_to_regex(glob: &str) -> String {
-    let mut re = String::from("^");
-    let mut chars = glob.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '*' => {
-                if chars.peek() == Some(&'*') {
-                    chars.next();
-                    re.push_str(".*");
-                } else {
-                    re.push_str("[^/]*");
+    fn append_pattern(regex: &mut String, pattern: &str) {
+        let mut chars = pattern.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '*' => {
+                    if chars.peek() == Some(&'*') {
+                        chars.next();
+                        regex.push_str(".*");
+                    } else {
+                        regex.push_str("[^/]*");
+                    }
                 }
+                '?' => regex.push_str("[^/]"),
+                '{' => {
+                    let mut alternatives = Vec::new();
+                    let mut alternative = String::new();
+                    let mut nested = 0;
+                    let mut closed = false;
+                    for next in chars.by_ref() {
+                        match next {
+                            '{' => {
+                                nested += 1;
+                                alternative.push(next);
+                            }
+                            '}' if nested > 0 => {
+                                nested -= 1;
+                                alternative.push(next);
+                            }
+                            '}' => {
+                                closed = true;
+                                break;
+                            }
+                            ',' if nested == 0 => {
+                                alternatives.push(std::mem::take(&mut alternative));
+                            }
+                            _ => alternative.push(next),
+                        }
+                    }
+
+                    if closed && !alternatives.is_empty() {
+                        alternatives.push(alternative);
+                        regex.push_str("(?:");
+                        for (index, option) in alternatives.iter().enumerate() {
+                            if index > 0 {
+                                regex.push('|');
+                            }
+                            append_pattern(regex, option);
+                        }
+                        regex.push(')');
+                    } else {
+                        regex.push_str("\\{");
+                        for (index, option) in alternatives.iter().enumerate() {
+                            if index > 0 {
+                                regex.push(',');
+                            }
+                            append_pattern(regex, option);
+                        }
+                        if !alternatives.is_empty() {
+                            regex.push(',');
+                        }
+                        append_pattern(regex, &alternative);
+                        if closed {
+                            regex.push_str("\\}");
+                        }
+                    }
+                }
+                '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '}' | '\\' => {
+                    regex.push('\\');
+                    regex.push(c);
+                }
+                _ => regex.push(c),
             }
-            '?' => re.push_str("[^/]"),
-            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '{' | '}' | '\\' => {
-                re.push('\\');
-                re.push(c);
-            }
-            _ => re.push(c),
         }
     }
-    re.push('$');
-    re
+
+    let mut regex = String::from("^");
+    append_pattern(&mut regex, glob);
+    regex.push('$');
+    regex
 }
 
-/// A parsed section from the Linux kernel MAINTAINERS file.
+/// A parsed section from a project's MAINTAINERS file.
 #[derive(Debug, Clone)]
 pub struct MaintainerSection {
     /// The section title / subsystem name (e.g. `NETWORKING DRIVERS`, `BTRFS FILE SYSTEM`).
@@ -139,8 +200,8 @@ pub struct MaintainerSection {
     pub maintainers: Vec<String>,
     /// `T:` SCM source trees.
     pub trees: Vec<(String, Option<String>)>,
-    /// Whether a file pattern claims the whole tree, which in the current file
-    /// means `F: *` or `F: */` and only occurs in THE REST.
+    /// Whether a file pattern claims the whole tree, which means `F: *` or
+    /// `F: */` and normally occurs in THE REST.
     ///
     /// This cannot be recovered from the compiled patterns: `*` compiles to a
     /// glob that matches only top-level files, and `*/` to a prefix that
@@ -276,11 +337,11 @@ impl MaintainersIndex {
     }
 
     /// Whether the address is listed on a section that claims the whole tree,
-    /// which today means THE REST and therefore Linus Torvalds.
+    /// which is represented by THE REST in the project's MAINTAINERS file.
     ///
     /// Such a maintainer is responsible for every file, so scoping them to the
-    /// handful of top-level paths their patterns literally match would be an
-    /// accident of the pattern syntax rather than a decision.
+    /// handful of paths their patterns literally match would be an accident of
+    /// the pattern syntax rather than a project decision.
     pub fn is_global_maintainer(&self, address: &str) -> bool {
         self.global_addresses
             .contains(&address.trim().to_ascii_lowercase())
@@ -295,13 +356,13 @@ impl MaintainersIndex {
         Self::from_reader(reader)
     }
 
-    /// Loads and parses MAINTAINERS from a Linux repository path.
+    /// Loads and parses MAINTAINERS from the project's repository path.
     pub fn from_repo<P: AsRef<Path>>(repo_path: P) -> Result<Self> {
         let path = repo_path.as_ref().join("MAINTAINERS");
         Self::from_file(path)
     }
 
-    /// Loads and parses MAINTAINERS from the top-of-trunk of Linus's tree in the repository.
+    /// Loads and parses MAINTAINERS from the repository's top-of-trunk refs.
     /// Tries `origin/master:MAINTAINERS`, `master:MAINTAINERS`, `HEAD:MAINTAINERS`,
     /// and falls back to reading the `MAINTAINERS` file directly on disk.
     pub fn from_top_of_trunk<P: AsRef<Path>>(repo_path: P) -> Result<Self> {
@@ -359,7 +420,8 @@ impl MaintainersIndex {
             let trimmed = line.trim();
 
             if in_header {
-                if trimmed.eq_ignore_ascii_case("maintainers list") {
+                let heading = trimmed.to_ascii_lowercase();
+                if heading == "maintainers list" || heading.starts_with("maintainers list (") {
                     in_header = false;
                 }
                 continue; // Skip everything else in the header
@@ -555,7 +617,7 @@ impl MaintainersIndex {
 
 static GLOBAL_MAINTAINERS: RwLock<Option<Arc<MaintainersIndex>>> = RwLock::new(None);
 
-/// Initializes the global MAINTAINERS index loaded from the top-of-trunk of Linus's tree.
+/// Initializes the global MAINTAINERS index loaded from the project's top-of-trunk.
 /// Can only be set once at startup and is never altered during normal work.
 pub fn init_global_maintainers(index: Arc<MaintainersIndex>) {
     let mut guard = GLOBAL_MAINTAINERS.write().unwrap();
@@ -722,6 +784,38 @@ F:	*/
     fn test_parse_maintainers() {
         let index = MaintainersIndex::from_reader(SAMPLE_MAINTAINERS.as_bytes()).unwrap();
         assert_eq!(index.len(), 6);
+    }
+
+    #[test]
+    fn test_parse_xen_maintainers_heading_patterns_and_exclusions() {
+        let content = r#"
+Repository maintainer guidance.
+
+Maintainers List (try to look for most precise areas first)
+===========================================================
+
+KEXEC
+M: Xen Maintainer <maintainer@xenproject.org>
+R: Xen Reviewer <reviewer@xenproject.org>
+S: Supported
+F: xen/common/{kexec,kimage}.c
+X: xen/common/kexec.c
+"#;
+        let index = MaintainersIndex::from_reader(content.as_bytes()).unwrap();
+
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.match_file("xen/common/kimage.c"), ["KEXEC"]);
+        assert!(index.match_file("xen/common/kexec.c").is_empty());
+        assert!(
+            index
+                .subsystems_for_address("maintainer@xenproject.org")
+                .is_some()
+        );
+        assert!(
+            index
+                .subsystems_for_address("reviewer@xenproject.org")
+                .is_some()
+        );
     }
 
     #[test]

@@ -728,15 +728,14 @@ async fn run_daemon(
         Err(e) => error!("Failed to clean up interrupted Fetching patchsets: {}", e),
     }
 
-    // Load and initialize authoritative immutable MAINTAINERS index when the
-    // reviewed project uses kernel MAINTAINERS.
+    // Load the reviewed project's MAINTAINERS index when it has one.
     let maintainers_index = if project.uses_maintainers() {
-        let linux_repo_path = std::path::PathBuf::from(&settings.git.repository_path);
-        match sashiko::maintainers::MaintainersIndex::from_top_of_trunk(&linux_repo_path) {
+        let maintainers_repo_path = std::path::PathBuf::from(&settings.git.repository_path);
+        match sashiko::maintainers::MaintainersIndex::from_top_of_trunk(&maintainers_repo_path) {
             Ok(idx) => {
                 info!(
-                    "Successfully parsed and indexed {} MAINTAINERS sections from top-of-trunk of Linus's tree",
-                    idx.len()
+                    "Successfully parsed and indexed {} MAINTAINERS sections from the {project} repository's top-of-trunk",
+                    idx.len(),
                 );
                 Arc::new(idx)
             }
@@ -749,7 +748,7 @@ async fn run_daemon(
             }
         }
     } else {
-        info!("Project {project} does not use kernel MAINTAINERS; skipping index.");
+        info!("Project {project} does not use a MAINTAINERS index; skipping index.");
         Arc::new(sashiko::maintainers::MaintainersIndex::new())
     };
     sashiko::maintainers::init_global_maintainers(maintainers_index);

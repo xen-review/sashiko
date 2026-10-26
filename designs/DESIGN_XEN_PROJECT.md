@@ -21,7 +21,9 @@ instance pointed at a different repository.
   repository's default branch, retaining the local checkout as a final fallback
   when remote HEAD is unavailable. Never add linux-next or Linus's tree for Xen.
 - Keep existing Linux and Sashiko project behavior unchanged.
-- Disable Linux bug discovery and Linux-specific MAINTAINERS authority for Xen.
+- Disable Linux bug discovery for Xen. Use Xen's own MAINTAINERS file for
+  subsystem attribution and maintainer access; never use Linux's MAINTAINERS
+  index for Xen.
 - Track only xen-devel; default outbound delivery to muted, with no SMTP
   configured. Bind the installed instance to loopback.
 
@@ -40,8 +42,9 @@ read-only baseline refreshes. Do not push or configure credentials during setup.
 ## Verification
 
 Add focused tests for project parsing, workflow selection, prompt inclusion,
-finding verification and Xen baseline isolation. Run the repository's PR
-checks and local Sashiko self-review before deployment. Verify service startup,
+finding verification, Xen MAINTAINERS parsing and Xen baseline isolation. Run
+the repository's PR checks and local Sashiko self-review before deployment.
+Verify service startup,
 loopback HTTP access, xen-devel ingestion and an actual Codex-backed review.
 Do not enable public posting or run benchmark suites as part of installation.
 

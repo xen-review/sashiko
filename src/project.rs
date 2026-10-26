@@ -77,14 +77,12 @@ impl ProjectId {
         }
     }
 
-    /// Whether this project has a MAINTAINERS file worth indexing at startup.
-    ///
-    /// Indexing one is several seconds of work against a tree that may not have
-    /// the file at all, and everything downstream of the index is Linux-only.
+    /// Whether this project's MAINTAINERS file should drive subsystem and
+    /// maintainer indexing.
     pub fn uses_maintainers(self) -> bool {
         match self {
-            ProjectId::Linux => true,
-            ProjectId::Sashiko | ProjectId::Xen => false,
+            ProjectId::Linux | ProjectId::Xen => true,
+            ProjectId::Sashiko => false,
         }
     }
 
@@ -172,6 +170,13 @@ mod tests {
             assert_eq!(ProjectId::from_str(project.as_str()), Ok(*project));
             assert_eq!(project.to_string(), project.as_str());
         }
+    }
+
+    #[test]
+    fn test_maintainers_index_is_project_scoped() {
+        assert!(ProjectId::Linux.uses_maintainers());
+        assert!(ProjectId::Xen.uses_maintainers());
+        assert!(!ProjectId::Sashiko.uses_maintainers());
     }
 
     #[test]

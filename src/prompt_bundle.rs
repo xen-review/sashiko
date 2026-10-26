@@ -155,7 +155,7 @@ mod tests {
             );
         }
         assert!(severity_guide(ProjectId::Xen).contains("Xen Finding Severity"));
-        assert!(!ProjectId::Xen.uses_maintainers());
+        assert!(ProjectId::Xen.uses_maintainers());
     }
 
     #[test]
