@@ -356,9 +356,25 @@ For OpenAI's coding-optimized model, use
 
 **What you get:**
 
-- Runs `codex exec --json --sandbox read-only` as a stateless backend
-- Prompt sent via stdin to avoid `ARG_MAX` issues
-- No tool access -- sandbox is read-only
+- Runs `codex exec --json --sandbox read-only` as a completion backend, from a
+  fresh temporary directory rather than the source checkout.
+- Sends the prompt via stdin to avoid `ARG_MAX` issues.
+- Replaces Codex's coding-agent instructions with a short completion-only
+  instruction and disables AGENTS.md loading. Sashiko supplies the review
+  instructions and executes the Git tool requests returned as JSON.
+- Disables native shell/code-mode, apps, plugins, hooks, browser/computer,
+  multi-agent, skill-search, memory, and goal features, plus web/image tools.
+  Read-only sandboxing alone does **not** disable tools.
+- Ignores Codex user configuration and execpolicy rules. Authentication still
+  uses the existing account; user-configured custom providers, routing,
+  instructions, MCP servers, and hooks are not used by this profile. Configure
+  the desired model and effort in Sashiko rather than relying on Codex defaults.
+- Requires the CLI controls available in Codex 0.164.0. Older versions that
+  reject the flags fail instead of falling back to an unrestricted request.
+  Managed policy remains authoritative; reported substitutions that weaken the
+  profile fail the request. Fake-CLI tests check the invocation and cleanup,
+  not the behavior of every managed installation or future CLI version.
+- Separates restricted-profile responses from older responses in the cache.
 
 **Reasoning effort:**
 
@@ -369,11 +385,12 @@ effort = "xhigh"    # "none", "minimal", "low", "medium", "high", "xhigh", "max"
 
 Sashiko passes this as `codex exec -c model_reasoning_effort=<effort>`,
 so the setting applies only to a reasoning model such as `gpt-5-codex`.
-A `-c` override outranks `~/.codex/config.toml`. It does not outrank an
-enterprise-managed requirements layer, which substitutes its own value
+A `-c` override does not outrank an enterprise-managed requirements layer,
+which substitutes its own value
 whatever the origin. A run whose effort that layer substitutes fails
 rather than record a review at an effort other than the one configured.
-Leave the setting unset to accept the account default.
+Leave the setting unset to accept the CLI/managed default, not a user-configured
+effort from the ignored Codex configuration file.
 
 #### Devin CLI Setup
 

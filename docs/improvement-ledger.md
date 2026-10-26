@@ -44,7 +44,8 @@ preserve successful results and diagnostic artifacts.
 
 ### P1: Disable Unnecessary Native CLI Tools and Ambient Instructions
 
-Status: confirmed problem; fix near the top of the queue.
+Status: restricted invocation implemented; fake-CLI tests and full gates passed.
+No paid Codex experiment was run and the daemon remains locked to Luna.
 
 Evidence: three sequential Sol CLI sessions at 02:55:48, 02:55:58, and 02:56:10
 CET loaded repository instructions and native tool definitions. Native `exec`
@@ -52,10 +53,16 @@ calls searched `ALL_TOOLS` for Sashiko's prompt-defined Git tools, causing extra
 model generations. These were not parallel patchset reviews. The current
 `review.concurrency = 1` limits model calls to one in flight.
 
-Next: restrict the Codex completion backend to its intended role using verified
-installed CLI controls and an isolated working directory. Reuse the neighboring
-restricted Claude provider's patterns where suitable. Keep authentication and
-required routing, but do not load arbitrary repository instructions or tools.
+Implemented: isolate the Codex completion backend using installed CLI controls
+and a fresh working directory, with a short replacement instruction instead of
+the coding-agent prompt. Fake-subprocess tests check arguments, prompt delivery,
+cleanup, model/effort, usage, and cache-profile separation. Managed substitution
+of the restricted profile fails rather than silently accepting ambient tools.
+
+The implementation replaces the ambient coding-agent instructions, disables
+native tool features, and ignores user configuration. Existing authentication
+is retained, but custom routing from user config is intentionally not loaded;
+this compatibility change is documented. The active daemon remains on Luna.
 
 Done when: offline subprocess tests verify effective arguments, working
 directory, cleanup, cache-profile separation, and failure handling. Do not claim
@@ -64,7 +71,8 @@ requires explicit model authorization and recorded generation counts.
 
 ### P1: Reduce Repeated Large Prompts and Improve Cache Reuse
 
-Status: confirmed overhead; measure before choosing the smallest change.
+Status: ambient Codex instruction overhead removed by the restricted profile;
+repeated Sashiko stage context still needs measurement and a focused reduction.
 
 Evidence: the same brief Sol interval recorded 171,604 input tokens, including
 118,528 cached and 53,076 uncached tokens, with only 785 output tokens. The three

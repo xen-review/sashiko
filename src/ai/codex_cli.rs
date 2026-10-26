@@ -36,36 +36,87 @@ pub struct CodexCliProvider {
     pub effort: Option<String>,
 }
 
-#[async_trait]
-impl AiProvider for CodexCliProvider {
-    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+fn build_codex_args(
+    model: &str,
+    effort: Option<&str>,
+    instructions: &std::path::Path,
+) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "exec",
+        "--json",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        model,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    for feature in [
+        "shell_tool",
+        "code_mode_host",
+        "apps",
+        "hooks",
+        "multi_agent",
+        "skill_search",
+        "skill_mcp_dependency_install",
+        "remote_plugin",
+        "plugins",
+        "tool_suggest",
+        "browser_use",
+        "browser_use_external",
+        "computer_use",
+        "memories",
+        "goals",
+        "sleep_tool",
+    ] {
+        args.extend(["--disable".to_string(), feature.to_string()]);
+    }
+    for setting in [
+        "project_doc_max_bytes=0".to_string(),
+        "developer_instructions=\"\"".to_string(),
+        "web_search=\"disabled\"".to_string(),
+        "tools.view_image=false".to_string(),
+        format!(
+            "model_instructions_file={}",
+            toml::Value::String(instructions.to_string_lossy().into_owned())
+        ),
+    ] {
+        args.extend(["-c".to_string(), setting]);
+    }
+    if let Some(effort) = effort {
+        args.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
+    }
+    args
+}
+
+impl CodexCliProvider {
+    async fn generate_content_with_binary(
+        &self,
+        request: AiRequest,
+        binary: &std::ffi::OsStr,
+    ) -> Result<AiResponse> {
         let prompt = build_prompt(&request);
 
         debug!("codex-cli prompt length: {} chars", prompt.len());
 
-        // codex exec --json --sandbox read-only -m MODEL \
-        //     [-c model_reasoning_effort=EFFORT]
-        // Prompt is passed via stdin to avoid ARG_MAX issues with large prompts.
-        let mut args = vec![
-            "exec".to_string(),
-            "--json".to_string(),
-            "--sandbox".to_string(),
-            "read-only".to_string(),
-            "-m".to_string(),
-            self.model.clone(),
-        ];
-
-        // A `-c` override outranks ~/.codex/config.toml. It does not outrank
-        // an enterprise-managed requirements layer, which overrides a
-        // configured value whatever its origin and reports the substitution as
-        // an error event.
-        if let Some(effort) = &self.effort {
-            args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort={effort}"));
-        }
-
-        let mut child = Command::new("codex")
-            .args(&args)
+        let working_directory = tempfile::tempdir()?;
+        let instructions = working_directory.path().join("completion.md");
+        tokio::fs::write(
+            &instructions,
+            "Act only as a text completion backend. Follow the supplied review prompt and its response format. Tool names inside that prompt describe JSON requests for the caller, not native tools to discover or execute. Do not inspect the host, load local instructions, or delegate work. Return exactly one response.\n",
+        )
+        .await?;
+        let mut child = Command::new(binary)
+            .args(build_codex_args(
+                &self.model,
+                self.effort.as_deref(),
+                &instructions,
+            ))
+            .current_dir(working_directory.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -156,6 +207,14 @@ impl AiProvider for CodexCliProvider {
 
         parse_inner_response(&response_text, usage)
     }
+}
+
+#[async_trait]
+impl AiProvider for CodexCliProvider {
+    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_binary(request, std::ffi::OsStr::new("codex"))
+            .await
+    }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
@@ -165,7 +224,13 @@ impl AiProvider for CodexCliProvider {
     }
 
     fn cache_identity(&self) -> String {
-        cache_identity_with(&self.model, &[("effort", self.effort.as_deref())])
+        cache_identity_with(
+            &self.model,
+            &[
+                ("effort", self.effort.as_deref()),
+                ("completion_profile", Some("restricted-v1")),
+            ],
+        )
     }
 }
 
@@ -177,6 +242,10 @@ impl CodexCliProvider {
         let message = redact_secret(message);
         if is_approval_policy_substitution(&message) {
             debug!("codex-cli: {}", message);
+        } else if message.contains("disallowed by requirements")
+            && !is_effort_substitution(&message)
+        {
+            anyhow::bail!("codex CLI could not apply the completion profile: {message}");
         } else if self.effort.is_some() && is_effort_substitution(&message) {
             // The response cache files the reply under the configured effort,
             // so a reply produced at the substituted one must not be returned.
@@ -236,6 +305,110 @@ fn is_effort_substitution(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_profile_isolated_from_repository_and_native_tools() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("codex");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+fixture_dir=${0%/*}
+printf '%s\n' "$PWD" "$@" > "$fixture_dir/args"
+cat completion.md > "$fixture_dir/instructions"
+cat > "$fixture_dir/stdin"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"content\":\"OK\"}"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
+"#,
+        );
+        let provider = CodexCliProvider {
+            model: "test-model".to_string(),
+            effort: Some("low".to_string()),
+        };
+        let request = AiRequest {
+            system: None,
+            messages: vec![],
+            tools: None,
+            temperature: None,
+            response_format: None,
+            context_tag: None,
+            reasoning_effort: None,
+        };
+        let prompt = build_prompt(&request);
+        let response = provider
+            .generate_content_with_binary(request, executable.as_os_str())
+            .await
+            .unwrap();
+        assert_eq!(response.content.as_deref(), Some("OK"));
+        assert_eq!(response.usage.unwrap().total_tokens, 15);
+        let captured = std::fs::read_to_string(fixture.path().join("args")).unwrap();
+        let mut lines = captured.lines();
+        let cwd = std::path::PathBuf::from(lines.next().unwrap());
+        assert_ne!(cwd, std::env::current_dir().unwrap());
+        assert!(!cwd.exists());
+        let arguments: Vec<&str> = lines.collect();
+        for flag in [
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+        ] {
+            assert!(arguments.contains(&flag), "{flag}");
+        }
+        for feature in [
+            "shell_tool",
+            "code_mode_host",
+            "hooks",
+            "apps",
+            "multi_agent",
+            "plugins",
+            "browser_use",
+            "computer_use",
+        ] {
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair == ["--disable", feature])
+            );
+        }
+        for setting in [
+            "project_doc_max_bytes=0",
+            "developer_instructions=\"\"",
+            "web_search=\"disabled\"",
+            "tools.view_image=false",
+            "model_reasoning_effort=low",
+        ] {
+            assert!(arguments.windows(2).any(|pair| pair == ["-c", setting]));
+        }
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--model", "test-model"])
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.starts_with("model_instructions_file="))
+        );
+        let instructions = std::fs::read_to_string(fixture.path().join("instructions")).unwrap();
+        assert!(instructions.contains("not native tools to discover or execute"));
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("stdin")).unwrap(),
+            prompt
+        );
+    }
+
+    #[test]
+    fn restricted_cache_profile_excludes_ambient_agent_responses() {
+        let provider = CodexCliProvider {
+            model: "test-model".to_string(),
+            effort: Some("low".to_string()),
+        };
+        assert_ne!(
+            provider.cache_identity(),
+            cache_identity_with("test-model", &[("effort", Some("low"))])
+        );
+    }
 
     #[test]
     fn only_the_approval_policy_substitution_is_demoted() {
@@ -330,6 +503,17 @@ mod tests {
         assert!(!err.contains("sk-secret"));
         assert!(!err.contains("tok-123"));
         assert!(!err.contains("user:pass"));
+    }
+
+    #[test]
+    fn managed_substitution_cannot_silently_relax_completion_profile() {
+        let provider = CodexCliProvider {
+            model: "test-model".to_string(),
+            effort: None,
+        };
+        assert!(provider.check_error_message(
+            "Configured value for `features.shell_tool` is disallowed by requirements; falling back to required value true."
+        ).is_err());
     }
 
     #[test]
