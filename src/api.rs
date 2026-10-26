@@ -18,12 +18,35 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// endpoints put on their pages too.
 pub const MAX_PATCHSET_PAGE_SIZE: u32 = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub enum PatchsetReviewFilter {
+    NotReviewed,
+    State(crate::ReviewStatus),
+}
+
+impl TryFrom<String> for PatchsetReviewFilter {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value == "not_reviewed" {
+            Ok(Self::NotReviewed)
+        } else {
+            value
+                .parse()
+                .map(Self::State)
+                .map_err(|()| format!("unknown patchset review state: {value}"))
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Pagination {
     pub page: Option<usize>,
     pub per_page: Option<usize>,
     pub q: Option<String>,
     pub mailing_list: Option<String>,
+    pub review_state: Option<PatchsetReviewFilter>,
 }
 
 #[derive(Serialize, Deserialize)]

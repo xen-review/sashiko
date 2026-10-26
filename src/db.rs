@@ -8168,6 +8168,34 @@ impl Database {
         Ok(rows > 0)
     }
 
+    fn build_patchset_search(
+        &self,
+        query: Option<String>,
+        mailing_list: Option<String>,
+        review_state: Option<crate::api::PatchsetReviewFilter>,
+    ) -> (String, Vec<String>) {
+        let (mut clause, mut params) = self.build_search(query, mailing_list, "patchset");
+        if let Some(filter) = review_state {
+            clause.push_str(if clause.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            let state = match filter {
+                crate::api::PatchsetReviewFilter::NotReviewed => {
+                    clause.push_str("(p.status IS NULL OR p.status != ?)");
+                    ReviewStatus::Reviewed
+                }
+                crate::api::PatchsetReviewFilter::State(state) => {
+                    clause.push_str("p.status = ?");
+                    state
+                }
+            };
+            params.push(state.as_str().to_string());
+        }
+        (clause, params)
+    }
+
     pub async fn get_patchsets(
         &self,
         limit: usize,
@@ -8175,7 +8203,19 @@ impl Database {
         query: Option<String>,
         mailing_list: Option<String>,
     ) -> Result<Vec<PatchsetRow>> {
-        let (where_clause, params) = self.build_search(query, mailing_list, "patchset");
+        self.get_patchsets_filtered(limit, offset, query, mailing_list, None)
+            .await
+    }
+
+    pub async fn get_patchsets_filtered(
+        &self,
+        limit: usize,
+        offset: usize,
+        query: Option<String>,
+        mailing_list: Option<String>,
+        review_state: Option<crate::api::PatchsetReviewFilter>,
+    ) -> Result<Vec<PatchsetRow>> {
+        let (where_clause, params) = self.build_patchset_search(query, mailing_list, review_state);
         // We use p.* alias implicitely by using unqualified names in WHERE which is fine given no collisions.
         // But for clarity/safety we should alias in FROM.
         // build_search returns "WHERE author ...".
@@ -8349,7 +8389,17 @@ impl Database {
         query: Option<String>,
         mailing_list: Option<String>,
     ) -> Result<usize> {
-        let (where_clause, params) = self.build_search(query, mailing_list, "patchset");
+        self.count_patchsets_filtered(query, mailing_list, None)
+            .await
+    }
+
+    pub async fn count_patchsets_filtered(
+        &self,
+        query: Option<String>,
+        mailing_list: Option<String>,
+        review_state: Option<crate::api::PatchsetReviewFilter>,
+    ) -> Result<usize> {
+        let (where_clause, params) = self.build_patchset_search(query, mailing_list, review_state);
         // We must alias patchsets as p because build_search uses p.id for filters
         let sql = format!("SELECT COUNT(*) FROM patchsets p {}", where_clause);
 
@@ -11109,6 +11159,69 @@ fn transactional_email_params(email: &TransactionalEmail<'_>) -> Result<libsql::
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
+    #[tokio::test]
+    async fn patchset_review_state_filters_share_counts_and_page_predicates() -> Result<()> {
+        use crate::api::PatchsetReviewFilter;
+        let db = Database::new(&DatabaseSettings {
+            url: ":memory:".into(),
+            token: String::new(),
+        })
+        .await?;
+        db.migrate().await?;
+        db.execute(
+            "INSERT INTO patchsets (id, status, subject, date) VALUES
+            (1, 'Reviewed', 'needle one', 60), (2, 'Pending', 'needle two', 50),
+            (3, 'Reviewed', 'needle three', 40), (4, 'Failed', 'other', 30),
+            (5, NULL, 'needle missing', 20), (6, 'Failed To Apply', 'needle failed', 10)",
+            (),
+        )
+        .await?;
+        for (filter, expected) in [
+            (
+                PatchsetReviewFilter::State(ReviewStatus::Reviewed),
+                vec![1, 3],
+            ),
+            (PatchsetReviewFilter::State(ReviewStatus::Failed), vec![4]),
+            (
+                PatchsetReviewFilter::State(ReviewStatus::FailedToApply),
+                vec![6],
+            ),
+            (PatchsetReviewFilter::NotReviewed, vec![2, 4, 5, 6]),
+        ] {
+            let rows = db
+                .get_patchsets_filtered(10, 0, None, None, Some(filter))
+                .await?;
+            assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), expected);
+            assert_eq!(
+                db.count_patchsets_filtered(None, None, Some(filter))
+                    .await?,
+                expected.len()
+            );
+        }
+        let reviewed = Some(PatchsetReviewFilter::State(ReviewStatus::Reviewed));
+        assert_eq!(
+            db.get_patchsets_filtered(1, 1, None, None, reviewed)
+                .await?[0]
+                .id,
+            3
+        );
+        assert_eq!(
+            db.get_patchsets_filtered(10, 0, Some("one".into()), None, reviewed)
+                .await?
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.count_patchsets_filtered(Some("one".into()), None, reviewed)
+                .await?,
+            1
+        );
+        assert_eq!(db.count_patchsets(None, None).await?, 6);
+        assert_eq!(db.get_patchsets(10, 0, None, None).await?.len(), 6);
+        assert!(PatchsetReviewFilter::try_from("Reviewed' OR 1=1".to_string()).is_err());
+        Ok(())
+    }
+
     /// The message id lookup behind /api/patchset must seek an index.
     ///
     /// UNIQUE(patchset_id, message_id) looks like it covers this query but

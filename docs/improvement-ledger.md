@@ -205,10 +205,24 @@ full request and native response before attributing the error to a prompt bug.
 
 ### P1: Classify Xen Staging Merges and Filter Review State
 
-Status: operator-requested follow-up on 2026-10-26; ledger only, not a change to
-the current harness implementation or active review scheduling. A targeted code
+Status: view-only recorded review-state filter implemented and validated in
+source; deployment pending. See
+[the incremental filter design](../designs/DESIGN_PATCHSET_REVIEW_STATE_FILTER.md).
+The dropdown sits directly right of All Lists, before search, with typed
+server-side predicates shared by list/count queries before pagination. It
+combines with search and list selection, isolates default caches, restores URL
+state, resets pages, clears the state without clearing the list, and is omitted
+from Messages/Bugs. Not Reviewed Yet means current series state is not Reviewed,
+not absence of earlier partial or human reviews. Existing embargo redaction and
+scheduling are unchanged. Focused database/API/permissions/URL checks and
+desktop/mobile workflows pass. The full gate passed 1,131 library tests (two
+ignored), 49 main, seven CLI, 26 integration, formatting, and all Clippy profiles.
+The fixture is stopped and the daemon resumed. No model call was needed.
+
+Staging membership and attributable human-review classification remain open;
+neither option is fabricated from existing status. A targeted code
 check did not establish working Xen staging-merge classification or the requested
-human-review/status filter. Existing stored Git patch IDs and baseline resolution
+human-review evidence. Existing stored Git patch IDs and baseline resolution
 are possible foundations, not evidence this feature is already implemented.
 
 Goal: detect and display when an individual patch is already incorporated into

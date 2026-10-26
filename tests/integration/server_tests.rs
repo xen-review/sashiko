@@ -429,6 +429,72 @@ async fn test_patchset_page_size_reaches_the_query() {
 }
 
 #[tokio::test]
+async fn test_patchset_review_state_filter_counts_pages_and_cache_isolation() {
+    use serde_json::Value;
+    let server = spawn_test_server(false).await;
+    server.db.conn.execute_batch("INSERT INTO messages (id, message_id, subject, date, body)
+        VALUES (1, '<state-cover@example.com>', 'needle xen', 60, '');
+        INSERT INTO mailing_lists (id, name, nntp_group) VALUES (1, 'Xen', 'xen-devel');
+        INSERT INTO messages_mailing_lists (message_id, mailing_list_id) VALUES (1, 1);
+        INSERT INTO patchsets (id, status, subject, date, cover_letter_message_id, embargo_until) VALUES
+        (1, 'Reviewed', 'needle xen', 60, '<state-cover@example.com>', NULL),
+        (2, 'Pending', 'needle pending', 50, NULL, NULL),
+        (3, 'Reviewed', 'other reviewed', 40, NULL, 9999999999),
+        (4, NULL, 'other missing', 30, NULL, NULL);
+        INSERT INTO reviews (id, patchset_id, status) VALUES (1, 3, 'Reviewed');
+        INSERT INTO findings (id, review_id, severity, problem, preexisting)
+        VALUES (1, 1, 3, 'embargoed finding', 0);").await.unwrap();
+    let client = reqwest::Client::new();
+    let get = |query: &str| {
+        let client = client.clone();
+        let url = format!("{}/api/patchsets?{query}", server.base_url);
+        async move { client.get(url).send().await.unwrap() }
+    };
+    let default: Value = get("").await.json().await.unwrap();
+    assert_eq!(default["total"], 4);
+    let filtered: Value = get("review_state=Reviewed").await.json().await.unwrap();
+    assert_eq!(filtered["total"], 2);
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+    assert_eq!(filtered["items"][1]["status"], "Embargoed");
+    let original_embargoed = default["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == 3)
+        .unwrap();
+    assert_eq!(
+        filtered["items"][1]["findings_high"],
+        original_embargoed["findings_high"]
+    );
+    let page: Value = get("review_state=Reviewed&per_page=1&page=2")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["items"][0]["id"], 3);
+    let remaining: Value = get("review_state=not_reviewed").await.json().await.unwrap();
+    assert_eq!(remaining["total"], 2);
+    let combined: Value = get("review_state=Reviewed&mailing_list=xen-devel&q=needle")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(combined["total"], 1);
+    assert_eq!(combined["items"][0]["id"], 1);
+    assert_eq!(get("review_state=unknown").await.status(), 400);
+    assert_eq!(
+        get("review_state=Reviewed&review_state=Pending")
+            .await
+            .status(),
+        400
+    );
+    let restored: Value = get("").await.json().await.unwrap();
+    assert_eq!(restored["total"], 4);
+    assert_eq!(restored["items"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test]
 async fn test_stats_reviews_and_tools_endpoints() {
     let server = spawn_test_server(false).await;
     let client = reqwest::Client::new();

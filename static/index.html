@@ -1917,6 +1917,7 @@
             stats: null,
             mailingLists: [],
             selectedList: '',
+            reviewState: '',
             bugSubsystem: '',
             bugSubsystemsList: [],
             selectedSubsystems: null,
@@ -2372,21 +2373,14 @@
             let query = {};
 
             if (search.startsWith('?')) {
-                const qStr = search.substring(1);
-                qStr.split('&').forEach(part => {
-                    const [k, v] = part.split('=');
-                    if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
-                });
+                new URLSearchParams(search).forEach((value, key) => { query[key] = value; });
             }
 
             const qIndex = hash.indexOf('?');
             if (qIndex !== -1) {
-                const qStr = hash.substring(qIndex + 1);
+                const params = new URLSearchParams(hash.substring(qIndex + 1));
                 hash = hash.substring(0, qIndex);
-                qStr.split('&').forEach(part => {
-                    const [k, v] = part.split('=');
-                    if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
-                });
+                params.forEach((value, key) => { query[key] = value; });
             }
 
             if (hash === '#/' || hash === '#') {
@@ -2529,6 +2523,9 @@
             // Handle list param
             if (route.query && typeof route.query.list !== 'undefined') {
                  state.selectedList = route.query.list;
+            }
+            if (route.view === 'list') {
+                state.reviewState = route.query?.review_state || '';
             }
 
             // Clear ECharts cache if navigating to stats from elsewhere
@@ -3192,48 +3189,39 @@
         }
 
         function updateUrlWithList() {
-            let url = new URL(window.location.href);
-            let searchParams = new URLSearchParams(window.location.search);
-            
-            // Check if 'list' is in the query string
-            if (searchParams.has('list') || window.location.search.startsWith('?list=')) {
-                if (state.selectedList) {
-                    searchParams.set('list', state.selectedList);
-                } else {
-                    searchParams.delete('list');
-                }
-                let searchStr = searchParams.toString() ? '?' + searchParams.toString() : '';
-                window.history.replaceState(null, null, window.location.pathname + searchStr + window.location.hash);
-                return;
-            }
-
-            let hash = url.hash;
-            let queryPart = '';
-            
-            const qIndex = hash.indexOf('?');
-            if (qIndex !== -1) {
-                hash = hash.substring(0, qIndex);
-            }
-            if (!hash) {
-                hash = '#/';
-            }
-            
-            // Rebuild query
-            const params = new URLSearchParams();
+            const url = new URL(window.location.href);
+            const queryIndex = url.hash.indexOf('?');
+            const hash = (queryIndex === -1 ? url.hash : url.hash.substring(0, queryIndex)) || '#/';
+            const hashParams = new URLSearchParams(queryIndex === -1 ? '' : url.hash.substring(queryIndex + 1));
+            const useSearch = url.searchParams.has('list') || url.searchParams.has('review_state');
+            const params = useSearch ? url.searchParams : hashParams;
             if (state.selectedList) {
                 params.set('list', state.selectedList);
+            } else {
+                params.delete('list');
             }
-            
-            if (params.toString()) {
-                queryPart = '?' + params.toString();
+            if (state.reviewState) {
+                params.set('review_state', state.reviewState);
+            } else {
+                params.delete('review_state');
             }
-            
-            // Update without reload
-            window.history.replaceState(null, null, window.location.pathname + window.location.search + hash + queryPart);
+            if (useSearch) {
+                hashParams.delete('list');
+                hashParams.delete('review_state');
+            }
+            url.hash = hash + (hashParams.size ? '?' + hashParams.toString() : '');
+            window.history.replaceState(null, null, url.pathname + url.search + url.hash);
         }
 
         function setMailingList(list) {
             state.selectedList = list;
+            state.currentPage = 1;
+            updateUrlWithList();
+            fetchListData();
+        }
+
+        function setReviewState(value) {
+            state.reviewState = value;
             state.currentPage = 1;
             updateUrlWithList();
             fetchListData();
@@ -3252,6 +3240,13 @@
             const listOptions = state.mailingLists.map(l => 
                 `<option value="${escapeHtml(l.group)}" ${state.selectedList === l.group ? 'selected' : ''}>${escapeHtml(l.name)}</option>`
             ).join('');
+            const reviewStateOptions = [
+                ['', 'All States'], ['not_reviewed', 'Not Reviewed Yet'],
+                ['Pending', 'Pending'], ['In Review', 'In Review'],
+                ['Reviewed', 'Reviewed by Sashiko'], ['Incomplete', 'Incomplete'],
+                ['Failed', 'Failed'], ['Failed To Apply', 'Failed To Apply'],
+                ['Skipped', 'Skipped'], ['Cancelled', 'Cancelled'],
+            ].map(([value, label]) => `<option value="${escapeHtml(value)}" ${state.reviewState === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
 
             document.title = getHeaderTitle();
 
@@ -3266,6 +3261,9 @@
                     <select id="listSelector" onchange="setMailingList(this.value)" style="${state.listMode === 'bugs' ? 'display:none;' : ''}">
                         <option value="">All Lists</option>
                         ${listOptions}
+                    </select>
+                    <select id="reviewStateSelector" aria-label="Review state" title="Recorded review state" onchange="setReviewState(this.value)" style="${state.listMode === 'patchsets' ? '' : 'display:none;'}max-width:100%;">
+                        ${reviewStateOptions}
                     </select>
 
                     <div id="bugFilters" style="display: ${state.listMode === 'bugs' ? 'flex' : 'none'}; gap: 8px; align-items: center; position: relative;">
@@ -3314,10 +3312,12 @@
                         <button id="btn-bugs" style="${config && config.bugs_enabled === false ? 'display: none;' : ''}" onclick="setListMode('bugs')" class="${state.listMode === 'bugs' ? 'active' : ''}" data-hint="Pre-existing bugs discovered during review (available to maintainers)" aria-label="Bugs — Pre-existing bugs discovered during review (available to maintainers)">Bugs</button>
                     </div>
                 </div>
-                <table id="dataTable">
-                    <thead id="tableHead"></thead>
-                    <tbody id="tableBody"></tbody>
-                </table>
+                <div style="overflow-x:auto;">
+                    <table id="dataTable">
+                        <thead id="tableHead"></thead>
+                        <tbody id="tableBody"></tbody>
+                    </table>
+                </div>
                 <div class="pagination" id="pagination"></div>
                 <div class="stats" id="stats">Loading stats...</div>
             `;
@@ -3389,6 +3389,9 @@
             }
             if (state.selectedList) {
                 url += `&mailing_list=${encodeURIComponent(state.selectedList)}`;
+            }
+            if (state.listMode === 'patchsets' && state.reviewState) {
+                url += `&review_state=${encodeURIComponent(state.reviewState)}`;
             }
             if (state.listMode === 'bugs') {
                 if (state.selectedSubsystems !== null) {
@@ -3813,6 +3816,12 @@
         function clearSearch() {
             document.getElementById('searchInput').value = '';
             state.searchQuery = '';
+            if (state.listMode === 'patchsets') {
+                state.reviewState = '';
+                const stateSelector = document.getElementById('reviewStateSelector');
+                if (stateSelector) stateSelector.value = '';
+                updateUrlWithList();
+            }
             if (state.listMode === 'bugs') {
                 state.bugSubsystem = '';
                 state.bugMinSeverity = '';
@@ -3859,9 +3868,11 @@
             document.getElementById('btn-bugs')?.classList.toggle('active', mode === 'bugs');
 
             const listSel = document.getElementById('listSelector');
+            const stateSel = document.getElementById('reviewStateSelector');
             const bugFilters = document.getElementById('bugFilters');
             const searchInput = document.getElementById('searchInput');
             if (listSel) listSel.style.display = mode === 'bugs' ? 'none' : '';
+            if (stateSel) stateSel.style.display = mode === 'patchsets' ? '' : 'none';
             if (bugFilters) bugFilters.style.display = mode === 'bugs' ? 'flex' : 'none';
             if (searchInput) {
                 searchInput.placeholder = mode === 'bugs'

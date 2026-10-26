@@ -706,6 +706,7 @@ async fn list_patchsets(
 
     let mut items = if pagination.q.is_none()
         && pagination.mailing_list.is_none()
+        && pagination.review_state.is_none()
         && page == 1
         && per_page == 50
     {
@@ -722,11 +723,12 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .get_patchsets(
+            .get_patchsets_filtered(
                 per_page,
                 offset,
                 pagination.q.clone(),
                 pagination.mailing_list.clone(),
+                pagination.review_state,
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -734,7 +736,10 @@ async fn list_patchsets(
     populate_embargoed_patchset_findings(&state, &headers, auth.0.as_ref(), &principal, &mut items)
         .await?;
 
-    let total = if pagination.q.is_none() && pagination.mailing_list.is_none() {
+    let total = if pagination.q.is_none()
+        && pagination.mailing_list.is_none()
+        && pagination.review_state.is_none()
+    {
         state
             .patchsets_count_cache
             .get_or_fetch(|| async {
@@ -748,7 +753,11 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .count_patchsets(pagination.q.clone(), pagination.mailing_list.clone())
+            .count_patchsets_filtered(
+                pagination.q.clone(),
+                pagination.mailing_list.clone(),
+                pagination.review_state,
+            )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
@@ -5761,6 +5770,7 @@ F:	*
             per_page: Some(50),
             q: None,
             mailing_list: None,
+            review_state: None,
         };
 
         // 1. Anonymous caller sees Embargoed with empty reviews, zeroed list counts,
@@ -5790,6 +5800,22 @@ F:	*
         .unwrap();
         assert_eq!(anon_list.items[0].status.as_deref(), Some("Embargoed"));
         assert_eq!(anon_list.items[0].findings_high, Some(0));
+
+        let Json(anon_filtered) = list_patchsets(
+            crate::auth::OptionalAuthUser(None),
+            OptionalPrincipal(Principal::anonymous()),
+            headers.clone(),
+            State(state.clone()),
+            Query(Pagination {
+                review_state: Some(PatchsetReviewFilter::State(crate::ReviewStatus::Reviewed)),
+                ..list_pagination()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(anon_filtered.total, 1);
+        assert_eq!(anon_filtered.items[0].status.as_deref(), Some("Embargoed"));
+        assert_eq!(anon_filtered.items[0].findings_high, Some(0));
 
         let rev_err = get_review(
             crate::auth::OptionalAuthUser(None),
