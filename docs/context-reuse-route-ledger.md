@@ -28,10 +28,13 @@ by default. This policy is separate from the coding assistant's model setting.
 1. Done: fail-closed typed settings, ordered immutable instruction snapshots,
    a bounded read-only session engine, and exact series/reply identity contracts.
    Delivered in 76439f00, ad34e99f, 02b8345b, and 62d00f14.
-2. Next: compose series input, session execution, and artifact validation behind
-   one tested entry point. Invalid input must make zero provider calls; invalid
-   final artifacts must preserve raw output and usage without a repair call.
-3. Wire local review dispatch and explicit output labeling. Preserve no-AI mode,
+2. Done: compose series input, session execution, and artifact validation behind
+  one tested entry point in agent_harness::series::review. A fake-provider test
+  proves invalid input makes zero provider calls, a two-patch series completes
+  in one call, and invalid final artifacts preserve raw output and usage without
+  a repair call. Required gates passed: 1,108 library, 47 main, seven CLI, and
+  24 integration tests, plus formatting and all Clippy profiles.
+3. Next: wire local review dispatch and explicit output labeling. Preserve no-AI mode,
    exact applied commits, selected patch scope, and settings-relative snapshots.
    Completion is not independent verification. Keep unsupported daemon mode
    rejected until persistence and cancellation are implemented.

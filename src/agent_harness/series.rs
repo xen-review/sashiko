@@ -4,8 +4,62 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::agent_harness::{InstructionSnapshot, session};
+use crate::ai::AiProvider;
 use crate::baseline::CommitId;
+use crate::settings::AgentHarnessSettings;
+use crate::toolbox::ToolBox;
 use crate::worker::ReviewInput;
+
+pub struct SeriesRequest<'a> {
+    pub input: &'a ReviewInput,
+    pub baseline: &'a str,
+    pub selected_indexes: &'a [i64],
+    pub cover_letter: Option<&'a str>,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SeriesOutcome {
+    pub artifacts: Option<ReviewArtifacts>,
+    pub execution: session::HarnessOutcome,
+}
+
+pub async fn review(
+    provider: &dyn AiProvider,
+    tools: &ToolBox,
+    instructions: &InstructionSnapshot,
+    request: &SeriesRequest<'_>,
+    limits: &AgentHarnessSettings,
+) -> Result<SeriesOutcome> {
+    limits.validate().map_err(anyhow::Error::msg)?;
+    let prompt = build_prompt(
+        request.input,
+        request.baseline,
+        request.selected_indexes,
+        request.cover_letter,
+        request.max_bytes,
+    )?;
+    let mut execution = session::run(provider, tools, instructions, &prompt, limits).await;
+    let artifacts = match &execution.status {
+        session::HarnessStatus::Completed { report } => {
+            match parse_artifacts(report, request.input, request.selected_indexes) {
+                Ok(artifacts) => Some(artifacts),
+                Err(error) => {
+                    execution.status = session::HarnessStatus::Failed {
+                        reason: format!("invalid harness review artifacts: {error:#}"),
+                    };
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    Ok(SeriesOutcome {
+        artifacts,
+        execution,
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +189,111 @@ pub fn build_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{AiRequest, AiResponse, AiUsage, ProviderCapabilities};
     use crate::worker::PatchInput;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Provider {
+        calls: AtomicUsize,
+        report: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AiProvider for Provider {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let input: serde_json::Value =
+                serde_json::from_str(request.messages[0].content.as_deref().unwrap()).unwrap();
+            assert_eq!(input["patches"].as_array().unwrap().len(), 2);
+            Ok(AiResponse {
+                content: Some(self.report.clone()),
+                usage: Some(AiUsage {
+                    prompt_tokens: 20,
+                    completion_tokens: 10,
+                    total_tokens: 30,
+                    cached_tokens: Some(5),
+                }),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                truncated: false,
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "fake".to_string(),
+                context_window_size: 10000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn series_execution_validates_without_hidden_repair_calls() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )
+        .unwrap();
+        let limits = AgentHarnessSettings {
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 2,
+            max_tool_calls: 2,
+            max_input_tokens: 1000,
+            max_output_tokens: 1000,
+            timeout_seconds: 10,
+        };
+        let input = series();
+        let baseline = "a".repeat(40);
+        let mut request = SeriesRequest {
+            input: &input,
+            baseline: &baseline,
+            selected_indexes: &[2],
+            cover_letter: None,
+            max_bytes: 10000,
+        };
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        let mut provider = Provider {
+            calls: AtomicUsize::new(0),
+            report: json!({"reviewer_notes":"Notes", "reply_drafts":[{
+                "patch_index":2, "message_id":"patch-2@example.org", "body":"Reply"
+            }]})
+            .to_string(),
+        };
+        request.baseline = "HEAD";
+        assert!(
+            review(&provider, &tools, &instructions, &request, &limits)
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        request.baseline = &baseline;
+        let outcome = review(&provider, &tools, &instructions, &request, &limits)
+            .await
+            .unwrap();
+        assert_eq!(outcome.artifacts.unwrap().reply_drafts[0].patch_index, 2);
+        assert_eq!(outcome.execution.trace.provider_calls, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        provider.report = "Malformed final report retained".to_string();
+        provider.calls.store(0, Ordering::SeqCst);
+        let outcome = review(&provider, &tools, &instructions, &request, &limits)
+            .await
+            .unwrap();
+        assert!(outcome.artifacts.is_none());
+        assert!(matches!(
+            outcome.execution.status,
+            session::HarnessStatus::Failed { .. }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.execution.trace.usage.total_tokens, 30);
+        assert_eq!(
+            outcome.execution.trace.history[1].content.as_deref(),
+            Some(provider.report.as_str())
+        );
+    }
 
     fn series() -> ReviewInput {
         ReviewInput {
