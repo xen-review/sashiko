@@ -107,18 +107,17 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   CLI gpt-6.1-sol at high effort; medium and low are allowed to conserve budget.
   Never silently switch provider or model. The chat model is not evidence of
   the daemon's actual provider configuration.
-- The current overnight policy is gpt-6.1-sol at LOW effort, reserving shared
-  quota for daemon improvements. Recheck quota before any necessary or
-  opportune restart. Copilot CLI is a paid last resort only after confirmed
-  exhaustion of the Codex five-hour quota, not below 30 percent remaining.
-  Prefer an available Luna model at LOW effort with default context; Gemini
-  Flash offered by the installed Copilot CLI is also authorized after verifying
-  its exact identifier and availability. Announce and record any provider/model
-  change, arrange a safe review boundary, and verify the effective invocation
-  after restart. Never change an in-flight request's effort. Disable response
-  caching if its identity cannot distinguish the fallback model and wrapper
-  effort. Never run Sashiko self-review through paid Copilot CLI. Do not guess
-  model identifiers, enable paid overages, or exceed the agreed window.
+- The current daemon policy is Copilot CLI gpt-6-luna at LOW effort with
+  default context. Keep Sashiko on Luna until the user explicitly authorizes
+  another provider or model. Remaining Codex quota, a quota reset, and the
+  chat's provider do not authorize changing this selection. Recheck quota
+  before necessary restarts for reporting, not automatic model selection.
+  Announce any authorized change, arrange a safe review boundary, and verify
+  the effective invocation after restart. Never change an in-flight request's
+  effort. Disable response caching if its identity cannot distinguish the
+  actual model and wrapper effort. Never run Sashiko self-review through paid
+  Copilot CLI. Do not guess model identifiers, enable paid overages, or exceed
+  the agreed window.
 - This chat's Copilot budget is distinct from the Codex account used by the
   daemon. The host Codex CLI can still report its authenticated account quota;
   never infer daemon quota from the chat provider or model.
