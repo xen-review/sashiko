@@ -8557,6 +8557,8 @@ impl Database {
             }
             reviews.push(item);
         }
+        self.decorate_checkpoint_reviews(&mut reviews, false)
+            .await?;
         Ok(reviews)
     }
 
@@ -9016,6 +9018,108 @@ impl Database {
 
     /// Fetches full details for a single review record by review ID, including
     /// its parent `patchset_id` and `embargo_until` timestamp for embargo checks.
+    async fn decorate_checkpoint_reviews(
+        &self,
+        reviews: &mut [serde_json::Value],
+        include_input: bool,
+    ) -> Result<()> {
+        let ids: Vec<_> = reviews
+            .iter()
+            .filter(|review| review["review_mode"] == "agent_harness")
+            .filter_map(|review| review["id"].as_i64())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let params: Vec<_> = ids.iter().map(|id| libsql::Value::Integer(*id)).collect();
+        let input_column = if include_input {
+            "s.input_context"
+        } else {
+            "NULL"
+        };
+        let query = format!("SELECT s.review_id, s.state, s.checkpoint_count, s.provider_calls_end, {input_column},
+                COUNT(h.provider_call), COALESCE(SUM(ai.tokens_in), 0), COALESCE(SUM(ai.tokens_out), 0), COALESCE(SUM(ai.tokens_cached), 0)
+            FROM harness_checkpoint_sessions s LEFT JOIN harness_provider_calls h ON h.review_id = s.review_id
+            LEFT JOIN ai_interactions ai ON ai.id = h.interaction_id
+            WHERE s.review_id IN ({placeholders}) GROUP BY s.review_id");
+        let mut rows = self.conn.query(&query, params.clone()).await?;
+        let mut sessions = std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let state: String = row.get(1)?;
+            let calls: i64 = row.get(3)?;
+            let recorded: i64 = row.get(5)?;
+            sessions.insert(row.get::<i64>(0)?, serde_json::json!({
+                "state": state, "completed_count": row.get::<i64>(2)?,
+                "provider_calls_recorded": recorded,
+                "provider_calls_attempted": if state == "active" { None } else { Some(calls) },
+                "usage_complete": state != "active" && calls == recorded,
+                "input": crate::compression::get_compressed_string_opt(&row, 4)?,
+                "tokens_in": row.get::<i64>(6)?, "tokens_out": row.get::<i64>(7)?, "tokens_cached": row.get::<i64>(8)?,
+                "checkpoints": [], "selected_patch_indexes": [], "remaining_patch_indexes": [],
+            }));
+        }
+        drop(rows);
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let query = format!("SELECT k.review_id, k.checkpoint_index, k.patch_id, p.part_index, k.message_id, k.commit_id,
+                k.reviewer_notes, k.reply_body, k.provider_calls_end, k.history_end
+            FROM harness_patch_checkpoints k JOIN patches p ON p.id = k.patch_id
+            WHERE k.review_id IN ({placeholders}) ORDER BY k.review_id, k.checkpoint_index");
+        let mut rows = self.conn.query(&query, params.clone()).await?;
+        while let Some(row) = rows.next().await? {
+            if let Some(session) = sessions.get_mut(&row.get::<i64>(0)?) {
+                session["checkpoints"].as_array_mut().context("Checkpoint response list is not an array")?.push(serde_json::json!({
+                    "checkpoint_index": row.get::<i64>(1)?, "patch_id": row.get::<i64>(2)?, "patch_index": row.get::<i64>(3)?,
+                    "message_id": row.get::<String>(4)?, "commit_id": row.get::<String>(5)?,
+                    "reviewer_notes": crate::compression::get_compressed_string(&row, 6)?,
+                    "reply_body": crate::compression::get_compressed_string(&row, 7)?,
+                    "provider_calls_end": row.get::<i64>(8)?, "history_end": row.get::<i64>(9)?,
+                }));
+            }
+        }
+        drop(rows);
+        let query = format!("SELECT c.review_id, p.part_index, k.patch_id IS NOT NULL
+            FROM review_patch_coverage c JOIN patches p ON p.id = c.patch_id
+            LEFT JOIN harness_patch_checkpoints k ON k.review_id = c.review_id AND k.patch_id = c.patch_id
+            WHERE c.review_id IN ({placeholders}) ORDER BY c.review_id, p.part_index");
+        let mut rows = self.conn.query(&query, params).await?;
+        while let Some(row) = rows.next().await? {
+            if let Some(session) = sessions.get_mut(&row.get::<i64>(0)?) {
+                let index = row.get::<i64>(1)?;
+                session["selected_patch_indexes"]
+                    .as_array_mut()
+                    .context("Selected checkpoint scope is not an array")?
+                    .push(index.into());
+                if row.get::<i64>(2)? == 0 {
+                    session["remaining_patch_indexes"]
+                        .as_array_mut()
+                        .context("Remaining checkpoint scope is not an array")?
+                        .push(index.into());
+                }
+            }
+        }
+        for review in reviews {
+            if let Some(mut session) = review["id"].as_i64().and_then(|id| sessions.remove(&id)) {
+                for key in ["tokens_in", "tokens_out", "tokens_cached"] {
+                    review[key] = session[key].take();
+                }
+                let input = session["input"].take();
+                if include_input {
+                    review["input"] = input;
+                }
+                session
+                    .as_object_mut()
+                    .context("Checkpoint response must be an object")?
+                    .remove("input");
+                review["review_strategy"] = "sequential_patches".into();
+                review["checkpoint_session"] = session;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_review_details(&self, id: i64) -> Result<Option<serde_json::Value>> {
         let mut rows = self
             .conn
@@ -9062,7 +9166,7 @@ impl Database {
                 .map(|(bug, is_new)| bug_reference_json(&bug, is_new))
                 .collect::<Vec<_>>();
 
-            Ok(Some(serde_json::json!({
+            let mut details = serde_json::json!({
                 "id": r.get::<i64>(0)?,
                 "model": r.get::<Option<String>>(1).ok(),
                 "summary": r.get::<Option<String>>(2).ok(),
@@ -9091,7 +9195,10 @@ impl Database {
                 "independently_verified": r.get::<Option<i64>>(23)?.map(|value| value != 0),
                 "covered_patches": covered_patches,
                 "bugs": bugs_json,
-            })))
+            });
+            self.decorate_checkpoint_reviews(std::slice::from_mut(&mut details), true)
+                .await?;
+            Ok(Some(details))
         } else {
             Ok(None)
         }
@@ -12360,6 +12467,59 @@ mod tests {
                 db.get_patchset_status(patchset_id).await?.as_deref(),
                 Some(terminal.as_str())
             );
+            drop(rows);
+            let details = db.get_review_details(review_id).await?.unwrap();
+            assert_eq!(details["review_strategy"], "sequential_patches");
+            assert_eq!(details["tokens_in"], known_calls * 10);
+            assert_eq!(details["tokens_out"], known_calls * 2);
+            assert_eq!(details["tokens_cached"], known_calls * 3);
+            assert_eq!(details["input"], r#"{"series":"exact input"}"#);
+            let checkpoints = &details["checkpoint_session"];
+            assert_eq!(
+                checkpoints["selected_patch_indexes"],
+                serde_json::json!([1, 2])
+            );
+            assert_eq!(checkpoints["provider_calls_recorded"], known_calls);
+            assert_eq!(checkpoints["provider_calls_attempted"], 2);
+            assert_eq!(
+                checkpoints["usage_complete"],
+                terminal != ReviewStatus::Cancelled
+            );
+            assert_eq!(
+                checkpoints["checkpoints"][0]["reviewer_notes"],
+                "Retained notes"
+            );
+            assert_eq!(
+                checkpoints["checkpoints"][0]["reply_body"],
+                "Complete reply"
+            );
+            assert_eq!(
+                checkpoints["remaining_patch_indexes"],
+                if terminal == ReviewStatus::Reviewed {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([2])
+                }
+            );
+            let patch_ids: Vec<_> = covered.iter().map(|patch| patch.patch_id).collect();
+            let listed = db
+                .get_patchset_reviews_for_patches(
+                    patchset_id,
+                    &patch_ids,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+                .await?;
+            assert_eq!(listed.len(), 1);
+            assert_eq!(
+                listed[0]["checkpoint_session"],
+                details["checkpoint_session"]
+            );
+            assert_eq!(listed[0]["tokens_in"], known_calls * 10);
+            assert!(listed[0].get("input").is_none());
         }
         Ok(())
     }

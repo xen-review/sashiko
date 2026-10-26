@@ -157,6 +157,16 @@ by default. This policy is separate from the coding assistant's model setting.
   Full gates passed 1,122 library, 48 main, seven CLI, and 25 integration tests,
   formatting, and all Clippy profiles. API/UI and daemon/local dispatch are
   still pending; the runtime continues to reject sequential_patches selection.
+  Review details and patchset review lists now batch-load checkpoint sessions,
+  ordered notes/drafts, selected and remaining scope, and disjoint interaction
+  token totals. Usage completeness and recorded versus attempted call counts
+  remain explicit, including cancelled calls without terminal usage. List
+  payloads omit full invocation input. Regression fixtures prove list/detail
+  agreement across completion, later failure, and cancellation without changing
+  ordinary whole-series output. All full gates passed with 1,122 library,
+  48 main, seven CLI, 25 integration tests, formatting, and all Clippy profiles.
+  UI rendering and daemon/local dispatch remain pending and configuration
+  continues to reject runtime sequential selection.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
