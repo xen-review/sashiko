@@ -70,8 +70,11 @@ and explicitly enabled without losing successful results or diagnostic artifacts
 
 ### P0: Resolve Verification Failures That Lose Completed Analysis
 
-Status: prompt/retry feedback fix deployed in `3c3db2d4`; supported retry accepted.
-Await the retried patch's actual outcome; model compliance is not guaranteed.
+Status: resolved. Prompt/retry feedback fix deployed in `3c3db2d4`; supported
+retry completed as Reviewed on 2026-10-26 at 02:53:27 UTC using Luna. A read-only
+database check at 12:54 CET confirmed both the later Reviewed record and the
+original Failed record remain stored. This is evidence of pipeline completion,
+not an independent correctness claim or a guarantee of future model compliance.
 
 Evidence: a Luna review of the x86 microcode timeout-removal patch exhausted
 three validation attempts on 2026-10-26 at 02:23 UTC with
@@ -84,8 +87,8 @@ The prompt now gives this exact distinction, and retry errors list valid IDs.
 A focused regression checks the rejected shape, accepted lineage, and rejection
 of unknown IDs. Evidence and provenance checks remain strict.
 
-Next: inspect the retried review's outcome without repeated restarts. Do not
-claim prompt changes guarantee model compliance. Checks passed with 1,088 library,
+Outcome verified without rerunning or editing the queue. Do not claim prompt
+changes guarantee model compliance. Checks passed with 1,088 library,
 47 main, seven CLI, and 24 integration tests, plus all formatting/Clippy profiles.
 
 Done when: an exact offline reproduction has a focused regression, the cause is
@@ -192,8 +195,10 @@ Status: design proposed in
 [DESIGN_SINGLE_PROMPT_REVIEW.md](../designs/DESIGN_SINGLE_PROMPT_REVIEW.md).
 Operator approved one bounded harness invocation with read-only source tools on
 2026-10-26. Implement a separate `agent_harness` mode, not a tool-free
-single-generation mode. Internal model turns must be observable and bounded;
-no runtime mode change or paid trial has been made. The earlier operating window
+single-generation mode. Internal model turns must be observable and bounded.
+Two bounded local subscription-backed Luna trials now have retained artifacts
+and measured usage in the context-reuse route ledger. Runtime mode remains
+workflow. The earlier operating window
 was not extended by the architecture decision alone; the operator subsequently
 authorized continued implementation and subscription-backed daemon operation.
 
