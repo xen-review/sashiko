@@ -1,17 +1,94 @@
 use crate::git_ops::{BackoffError, FetchOutcome, refresh_remote};
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 pub struct GitSyncWorker {
     repo_path: PathBuf,
+    staging: Option<(crate::settings::StagingSettings, Arc<crate::db::Database>)>,
 }
 
 impl GitSyncWorker {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        Self {
+            repo_path,
+            staging: None,
+        }
+    }
+
+    pub fn with_staging(
+        mut self,
+        settings: Option<crate::settings::StagingSettings>,
+        db: Arc<crate::db::Database>,
+    ) -> Self {
+        self.staging = settings.map(|settings| (settings, db));
+        self
+    }
+
+    async fn update_staging(&self, fetched_at: Option<i64>) -> Result<()> {
+        let Some((settings, db)) = &self.staging else {
+            return Ok(());
+        };
+        let repository = tokio::fs::canonicalize(&self.repo_path)
+            .await?
+            .to_string_lossy()
+            .into_owned();
+        let result = tokio::time::timeout(Duration::from_secs(settings.timeout_seconds), async {
+            let refreshed_at = fetched_at.ok_or_else(|| {
+                anyhow::anyhow!("No successful staging remote fetch in this sync cycle")
+            })?;
+            anyhow::ensure!(
+                crate::staging::fetch_covers_target(&self.repo_path, settings).await?,
+                "Remote fetch does not establish freshness of the configured staging branch"
+            );
+            let cache = db
+                .load_staging_index(&repository, settings.max_commits)
+                .await?;
+            let snapshot =
+                crate::staging::build_snapshot(&self.repo_path, settings, &cache).await?;
+            anyhow::ensure!(
+                crate::staging::target_still_matches(&self.repo_path, &snapshot).await?,
+                "Staging target changed before publication"
+            );
+            let id = db
+                .publish_staging_snapshot(
+                    &repository,
+                    settings,
+                    &snapshot,
+                    refreshed_at,
+                    chrono::Utc::now().timestamp(),
+                )
+                .await?;
+            anyhow::ensure!(
+                crate::staging::target_still_matches(&self.repo_path, &snapshot).await?,
+                "Staging target changed while publishing"
+            );
+            info!(
+                snapshot_id = id,
+                commits = snapshot.entries.len(),
+                scope_complete = snapshot.scope_complete,
+                "Published staging history evidence without changing review state"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Staging indexing deadline exceeded"))
+        .and_then(|result| result);
+        if let Err(error) = result {
+            let reason = crate::utils::redact_secret(&error.to_string());
+            db.invalidate_staging_target(
+                &repository,
+                settings,
+                &reason,
+                chrono::Utc::now().timestamp(),
+            )
+            .await?;
+            warn!("Staging evidence unavailable: {}", reason);
+        }
+        Ok(())
     }
 
     pub async fn run(&self) {
@@ -22,6 +99,12 @@ impl GitSyncWorker {
                     "GitSyncWorker failed during sync cycle: {}",
                     crate::utils::redact_secret(&e.to_string())
                 );
+                if let Err(error) = self.update_staging(None).await {
+                    warn!(
+                        "Failed to invalidate staging evidence after sync error: {}",
+                        crate::utils::redact_secret(&error.to_string())
+                    );
+                }
             }
             // Sleep for 1 hour before checking again.
             // refresh_remote applies the per-remote fetch interval, the
@@ -60,6 +143,7 @@ impl GitSyncWorker {
         let mut backed_off = 0usize;
         let mut stale = 0usize;
         let mut failed = 0usize;
+        let mut staging_fetched = None;
         let mut first_failure = String::new();
         // Git's stderr can carry the remote URL, credentials and
         // all, and runs to several lines.
@@ -98,7 +182,16 @@ impl GitSyncWorker {
             // Check if it's time to fetch and fetch if necessary
             // force_fetch=false so the fetch interval in refresh_remote holds
             match refresh_remote(&self.repo_path, remote, &url, false).await {
-                Ok(FetchOutcome::Fetched) => fetched += 1,
+                Ok(FetchOutcome::Fetched) => {
+                    fetched += 1;
+                    if self
+                        .staging
+                        .as_ref()
+                        .is_some_and(|(settings, _)| settings.remote == remote)
+                    {
+                        staging_fetched = Some(chrono::Utc::now().timestamp());
+                    }
+                }
                 Ok(FetchOutcome::Skipped) => skipped += 1,
                 Ok(FetchOutcome::BackedOff) => backed_off += 1,
                 Ok(FetchOutcome::StaleLocalRef(message)) => {
@@ -131,6 +224,12 @@ impl GitSyncWorker {
         // a review or a baseline lookup failed them within the hour.
         // That cycle has no failure to quote and the network may have
         // recovered since, so it logs at warn.
+        if let Err(error) = self.update_staging(staging_fetched).await {
+            warn!(
+                "Failed to update staging evidence: {}",
+                crate::utils::redact_secret(&error.to_string())
+            );
+        }
         let tried = fetched + stale + failed;
         if fetched == 0 && tried > 0 {
             error!(
@@ -158,6 +257,93 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tracing::instrument::WithSubscriber;
+
+    #[tokio::test]
+    async fn staging_hook_requires_successful_covering_refresh_and_preserves_reviews() -> Result<()>
+    {
+        let repo = tempfile::tempdir()?;
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Staging Test"],
+            vec!["config", "user.email", "staging@example.invalid"],
+            vec!["commit", "--allow-empty", "-m", "base"],
+            vec!["remote", "add", "upstream", "https://example.invalid/xen"],
+            vec!["update-ref", "refs/remotes/upstream/staging", "HEAD"],
+        ] {
+            let status = crate::git_cmd::in_dir_async(repo.path())
+                .args(args)
+                .status()
+                .await?;
+            anyhow::ensure!(status.success(), "fixture Git setup failed");
+        }
+        let db = Arc::new(
+            crate::db::Database::new(&crate::settings::DatabaseSettings {
+                url: ":memory:".to_string(),
+                token: String::new(),
+            })
+            .await?,
+        );
+        db.migrate().await?;
+        db.execute(
+            "INSERT INTO patchsets (id, status, subject) VALUES (1, 'Reviewed', 'preserved')",
+            (),
+        )
+        .await?;
+        db.execute(
+            "INSERT INTO messages (message_id, subject) VALUES ('hook@example.invalid', 'patch')",
+            (),
+        )
+        .await?;
+        db.execute("INSERT INTO patches (id, patchset_id, message_id, part_index, git_patch_id) VALUES (1, 1, 'hook@example.invalid', 1, ?)", libsql::params!["a".repeat(40)]).await?;
+        let settings: crate::settings::StagingSettings =
+            toml::from_str("remote='upstream'\ntarget_ref='refs/remotes/upstream/staging'")?;
+        let repository = tokio::fs::canonicalize(repo.path())
+            .await?
+            .to_string_lossy()
+            .into_owned();
+        let worker = GitSyncWorker::new(repo.path().to_path_buf())
+            .with_staging(Some(settings.clone()), db.clone());
+        worker
+            .update_staging(Some(chrono::Utc::now().timestamp()))
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence(&repository, &settings, 1, chrono::Utc::now().timestamp())
+                .await?
+                .state,
+            crate::staging::MembershipState::NoMatchInCheckedRange
+        );
+        worker.update_staging(None).await?;
+        assert_eq!(
+            db.staging_patch_evidence(&repository, &settings, 1, chrono::Utc::now().timestamp())
+                .await?
+                .state,
+            crate::staging::MembershipState::Unknown
+        );
+        let status = crate::git_cmd::in_dir_async(repo.path())
+            .args([
+                "config",
+                "remote.upstream.fetch",
+                "+refs/heads/master:refs/remotes/upstream/master",
+            ])
+            .status()
+            .await?;
+        assert!(status.success());
+        worker
+            .update_staging(Some(chrono::Utc::now().timestamp()))
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence(&repository, &settings, 1, chrono::Utc::now().timestamp())
+                .await?
+                .state,
+            crate::staging::MembershipState::Unknown
+        );
+        let mut rows = db
+            .conn
+            .query("SELECT status FROM patchsets WHERE id=1", ())
+            .await?;
+        assert_eq!(rows.next().await?.unwrap().get::<String>(0)?, "Reviewed");
+        Ok(())
+    }
 
     #[derive(Clone, Default)]
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);

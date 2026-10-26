@@ -106,6 +106,27 @@ pub async fn target_still_matches(repo: &Path, snapshot: &StagingSnapshot) -> Re
     Ok(resolve_tip(repo, &snapshot.target_ref, deadline).await? == snapshot.tip)
 }
 
+pub async fn fetch_covers_target(repo: &Path, settings: &StagingSettings) -> Result<bool> {
+    settings.validate().map_err(anyhow::Error::msg)?;
+    let key = format!("remote.{}.fetch", settings.remote);
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let output = git_output(repo, &["config", "--get-all", &key], 16384, deadline).await?;
+    let specs = std::str::from_utf8(&output)?;
+    if specs.lines().any(|line| line.starts_with('^')) {
+        return Ok(false);
+    }
+    let branch = settings
+        .target_ref
+        .strip_prefix(&format!("refs/remotes/{}/", settings.remote))
+        .context("staging target remote mismatch")?;
+    let exact = format!("refs/heads/{branch}:{}", settings.target_ref);
+    let wildcard = format!("refs/heads/*:refs/remotes/{}/*", settings.remote);
+    Ok(specs.lines().any(|line| {
+        let line = line.strip_prefix('+').unwrap_or(line);
+        line == exact || line == wildcard
+    }))
+}
+
 pub async fn build_snapshot(
     repo: &Path,
     settings: &StagingSettings,

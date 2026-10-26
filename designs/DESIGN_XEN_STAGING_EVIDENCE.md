@@ -141,7 +141,18 @@ fixtures explicitly remove schema-16 tables before rewinding and now verify the
 new final version. The installed daemon is resumed on schema 15; no live
 database migration has occurred.
 
-Refresh integration, exact-ancestry matching, batched API retrieval, and UI/filter
-classification remain pending. The runtime is unchanged; there has been no live
+The existing GitSyncWorker now has optional staging integration in source.
+It adds no fetch loop: only an actual successful fetch of the configured remote
+in that cycle can publish, and its configured fetch refspec must cover the target.
+The successful fetch time is retained, not a commit date or later scan time.
+Missing/skipped/failed refreshes and indexing errors invalidate the current view;
+tip checks bracket publication. The bounded hook has its own timeout and errors
+do not abort ordinary sync/review work. Isolated hook and redaction tests pass.
+The full integration gate passed 1,139 library tests (two ignored), 49 main,
+seven CLI, 26 integration, formatting, and all Clippy profiles. The installed
+daemon was resumed; schema 16 and this hook have not been deployed.
+
+Exact-ancestry matching, batched API retrieval, and UI/filter classification
+remain pending. The runtime is unchanged; there has been no live
 repository scan, fetch, migration, or model call for this feature. Do not infer
 feature rollout from the configuration or storage types alone.

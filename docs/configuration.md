@@ -284,7 +284,8 @@ SASHIKO__SERVER__ACL__ADMINS="first@example.org,second@example.org"
 
 The optional Xen-only `[git.staging]` section is an opt-in for read-only staging
 membership evidence. Its matching foundation is implemented; background
-publication and API/UI integration are not enabled yet. Omission preserves
+publication is integrated in source, but API/UI integration and rollout are not
+complete yet. Omission preserves
 existing behavior and does not guess a target from local HEAD or origin.
 
 | Key | Type | Default | Description |

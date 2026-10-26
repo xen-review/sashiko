@@ -1414,7 +1414,10 @@ async fn run_daemon(
 
     // Start Git Sync Worker
     let sync_handle = {
-        let sync_worker = Arc::new(sashiko::worker::sync::GitSyncWorker::new(repo_path.clone()));
+        let sync_worker = Arc::new(
+            sashiko::worker::sync::GitSyncWorker::new(repo_path.clone())
+                .with_staging(settings.git.staging.clone(), db.clone()),
+        );
         spawn_supervised_worker("GitSyncWorker", move || {
             let worker = Arc::clone(&sync_worker);
             async move {
