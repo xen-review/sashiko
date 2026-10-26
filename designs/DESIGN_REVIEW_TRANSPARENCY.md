@@ -223,3 +223,17 @@ CET after a checked idle database backup and matching release/installed hashes.
 Fresh live patch/map checks at both widths show unavailable usage and unknown
 coverage on review 48 with no overflow or synthetic values. Its original output
 and counters remain unchanged; no new model call was needed.
+
+The adjacent Codex completion parser had a separate availability defect: an
+empty or partial usage object defaulted missing input/output counters to zero,
+while an explicit cached zero was discarded as unknown. Its source now requires
+measured input/output counters, preserves absent versus zero cached usage, and
+rejects invalid, inconsistent, or overflowing counts as unavailable. A usage
+parser version in response-cache identity prevents pre-fix synthesized counters
+being reused. The introducing provider commit is 6fb16bc02bb6. Focused backend
+and fake-CLI tests pass; the full gate passed 1,132 library tests (two ignored),
+49 main, seven CLI, 26 integration, formatting, and all Clippy profiles. Editor
+diagnostics are clear. The daemon resumed; deployment remains pending. No model call
+or historical record edit was needed. This does not add native-generation or
+backend-confirmed effort telemetry: the current completion event stream provides
+usage and text, not a trustworthy effective-effort field.

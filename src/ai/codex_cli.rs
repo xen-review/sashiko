@@ -185,18 +185,7 @@ impl CodexCliProvider {
                         }
                     }
                     Some("turn.completed") => {
-                        let u = &event["usage"];
-                        if !u.is_null() {
-                            let input = u["input_tokens"].as_u64().unwrap_or(0) as usize;
-                            let output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as usize;
-                            let cached = u["cached_input_tokens"].as_u64().unwrap_or(0) as usize;
-                            usage = Some(AiUsage {
-                                prompt_tokens: input,
-                                completion_tokens: output_tokens,
-                                total_tokens: input + output_tokens,
-                                cached_tokens: if cached > 0 { Some(cached) } else { None },
-                            });
-                        }
+                        usage = parse_usage(&event["usage"]);
                     }
                     _ => {}
                 }
@@ -212,6 +201,27 @@ impl CodexCliProvider {
 
         parse_inner_response(&response_text, usage)
     }
+}
+
+fn parse_usage(value: &Value) -> Option<AiUsage> {
+    let prompt_tokens = usize::try_from(value["input_tokens"].as_u64()?).ok()?;
+    let completion_tokens = usize::try_from(value["output_tokens"].as_u64()?).ok()?;
+    let cached_tokens = match value
+        .get("cached_input_tokens")
+        .filter(|value| !value.is_null())
+    {
+        Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
+        None => None,
+    };
+    if cached_tokens.is_some_and(|cached| cached > prompt_tokens) {
+        return None;
+    }
+    Some(AiUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.checked_add(completion_tokens)?,
+        cached_tokens,
+    })
 }
 
 #[async_trait]
@@ -234,6 +244,7 @@ impl AiProvider for CodexCliProvider {
             &[
                 ("effort", self.effort.as_deref()),
                 ("completion_profile", Some("restricted-v1")),
+                ("usage_profile", Some("measured-v1")),
             ],
         )
     }
@@ -347,7 +358,9 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             .await
             .unwrap();
         assert_eq!(response.content.as_deref(), Some("OK"));
-        assert_eq!(response.usage.unwrap().total_tokens, 15);
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(usage.cached_tokens, None);
         let captured = std::fs::read_to_string(fixture.path().join("args")).unwrap();
         let mut lines = captured.lines();
         let cwd = std::path::PathBuf::from(lines.next().unwrap());
@@ -405,6 +418,38 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
     }
 
     #[test]
+    fn usage_requires_measured_counters_and_preserves_explicit_cached_zero() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"input_tokens": 12}),
+            serde_json::json!({"output_tokens": 3}),
+            serde_json::json!({"input_tokens": "12", "output_tokens": 3}),
+            serde_json::json!({"input_tokens": -1, "output_tokens": 3}),
+            serde_json::json!({"input_tokens": 12, "output_tokens": 3, "cached_input_tokens": 13}),
+            serde_json::json!({"input_tokens": 12, "output_tokens": 3, "cached_input_tokens": "unknown"}),
+            serde_json::json!({"input_tokens": u64::MAX, "output_tokens": 1}),
+        ] {
+            assert!(parse_usage(&value).is_none(), "{value}");
+        }
+        for cached in [None, Some(0), Some(10)] {
+            let mut value = serde_json::json!({"input_tokens": 12, "output_tokens": 3});
+            if let Some(cached) = cached {
+                value["cached_input_tokens"] = serde_json::json!(cached);
+            }
+            let usage = parse_usage(&value).unwrap();
+            assert_eq!(usage.total_tokens, 15);
+            assert_eq!(usage.cached_tokens, cached);
+        }
+        let measured_zero = parse_usage(&serde_json::json!({
+            "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0
+        }))
+        .unwrap();
+        assert_eq!(measured_zero.total_tokens, 0);
+        assert_eq!(measured_zero.cached_tokens, Some(0));
+    }
+
+    #[test]
     fn restricted_cache_profile_excludes_ambient_agent_responses() {
         let provider = CodexCliProvider {
             model: "test-model".to_string(),
@@ -414,6 +459,16 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         assert_ne!(
             provider.cache_identity(),
             cache_identity_with("test-model", &[("effort", Some("low"))])
+        );
+        assert_ne!(
+            provider.cache_identity(),
+            cache_identity_with(
+                "test-model",
+                &[
+                    ("effort", Some("low")),
+                    ("completion_profile", Some("restricted-v1")),
+                ]
+            )
         );
     }
 

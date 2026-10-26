@@ -95,6 +95,18 @@ checks. Review 48's saved output and zero counters remain untouched; its UI says
 Unavailable with unknown coverage. No model call was needed. Actual backend
 effort and complete native-call/live telemetry remain separate open work.
 
+A subsequent local parser check found that Codex CLI defaulted missing
+input/output counters to zero and discarded explicit cached zero. The focused
+fix requires measured counters, keeps cached unknown distinct from zero, and
+rejects inconsistent/overflowed counts as unavailable. Response-cache identity
+now separates the corrected parser profile from pre-fix synthesized totals.
+Backend/fake-CLI tests pass; the full gate passed 1,132 library tests (two ignored),
+49 main, seven CLI, 26 integration, formatting, and all Clippy profiles. The
+daemon resumed; deployment remains pending. No model call
+or historical backfill was used. The completion stream does not supply a
+trustworthy effective-effort field, so the UI must retain Unknown rather than
+promoting configured effort into backend confirmation.
+
 ### P1: Budget-Gated Premium Model Comparisons
 
 Status: agent policy updated in 02453527 with the operator's authorization.
