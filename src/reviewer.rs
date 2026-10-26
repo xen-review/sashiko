@@ -2532,7 +2532,11 @@ fn default_worker_command() -> Result<Command> {
     let is_test_runner = bin_dir.file_name().and_then(|f| f.to_str()) == Some("deps");
 
     let mut c = if !is_test_runner {
-        Command::new(exe_path)
+        #[cfg(target_os = "linux")]
+        let program = Path::new("/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        let program = exe_path.as_path();
+        Command::new(program)
     } else if let Some(parent) = bin_dir.parent()
         && parent.join("sashiko").exists()
     {
@@ -5531,6 +5535,41 @@ inline review content 4\n\n-- \nSashiko AI review · https://sashiko.dev/#/patch
         assert!(body.contains("Sashiko has reviewed this patch and found no issues.\n"));
         assert!(!body.contains("It looks great!"));
 
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_worker_command_survives_executable_replacement() -> Result<()> {
+        const CHILD_ENV: &str = "SASHIKO_TEST_REPLACED_WORKER_EXECUTABLE";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let executable = std::env::current_exe()?;
+            std::fs::remove_file(&executable)?;
+            let command = default_worker_command()?;
+            let output = std::process::Command::new(command.as_std().get_program())
+                .arg("--list")
+                .output()?;
+            assert!(output.status.success(), "{:?}", output);
+            return Ok(());
+        }
+
+        let directory = tempdir()?;
+        let executable = directory.path().join("sashiko");
+        std::fs::copy(std::env::current_exe()?, &executable)?;
+        let output = std::process::Command::new(&executable)
+            .args([
+                "--exact",
+                "reviewer::tests::test_worker_command_survives_executable_replacement",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         Ok(())
     }
 
