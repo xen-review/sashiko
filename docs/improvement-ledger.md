@@ -100,9 +100,11 @@ shared account percentage changes into an invented token price.
 
 Status: design proposed in
 [DESIGN_SINGLE_PROMPT_REVIEW.md](../designs/DESIGN_SINGLE_PROMPT_REVIEW.md).
-Operator decision needed: exactly one tool-free completion versus one bounded
-harness invocation with internal source-tool/model turns. Implementation follows
-review of this architecture choice; no runtime mode change has been made.
+Operator approved one bounded harness invocation with read-only source tools on
+2026-10-26. Implement a separate `agent_harness` mode, not a tool-free
+single-generation mode. Internal model turns must be observable and bounded;
+no runtime mode change or paid trial has been made. The earlier operating window
+is not extended by this architecture decision.
 
 Goal: allow configuration to bypass Sashiko's entire multiphase review procedure
 and replace it with one explicitly selected agent/skill prompt for a whole Xen
@@ -136,9 +138,10 @@ Design decisions and implementation gates:
   disabled unless separately authorized. Treat patch content as untrusted.
 - Include resolved instruction contents, model, effort, mode, and output
   contract in cache identity and review attribution.
-- Test with a fake provider that a series uses exactly one review invocation,
-  with no hidden workflow stages or automatic repair calls. Test default-mode
-  compatibility, errors, cancellation, persistence, and absent dependencies.
+- Test with a fake harness that a series uses exactly one harness invocation,
+  with no hidden Sashiko workflow stages or automatic repair calls. Test
+  enforceable internal-generation/tool budgets, unsupported capabilities,
+  default-mode compatibility, errors, cancellation, and persistence.
 - Implement and deploy incrementally after the design is reviewed. Any paid
   trial must remain on the authorized Luna configuration with bounded usage.
 

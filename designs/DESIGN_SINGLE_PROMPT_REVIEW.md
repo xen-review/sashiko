@@ -1,8 +1,10 @@
 # Optional Whole-Series Single-Prompt Review
 
-Status: proposed, awaiting the source-inspection/call-budget decision below.
-Requested by the operator on 2026-10-26. No runtime default changes are approved
-by this document. The daemon remains Copilot gpt-6-luna, low/default context.
+Status: architecture choice approved on 2026-10-26: one bounded harness
+invocation with read-only source tools. Implementation and deterministic
+validation are next; a paid trial requires separate authorization. No runtime
+default changes are approved by this document. The daemon remains Copilot
+gpt-6-luna, low/default context.
 
 ## Goal
 
@@ -38,7 +40,12 @@ ambient instructions and native-tool detours; replacing the multiphase workflow
 addresses repeated Sashiko review context. Do not remove needed source evidence
 merely to make a prompt smaller.
 
-## Decision Requiring Operator Approval
+## Approved Architecture
+
+The operator selected option 2 below: one bounded harness invocation with
+read-only source tools. It matches the reference agent's source-inspection
+workflow without Sashiko's separate review phases. Option 1 is retained only
+as an explanation of the tradeoff, not the selected implementation.
 
 Two meanings of single call must not be conflated:
 
@@ -55,11 +62,12 @@ Two meanings of single call must not be conflated:
    model generations. Generation, token, wall-time, and tool-call limits must
    be observable and enforceable; one subprocess is not a one-call cost bound.
 
-Recommendation: start with option 1 as the genuinely single-completion mode;
-add a separately named harness mode only if its cost and tool boundaries are
-explicitly approved. Do not silently enable native tools in existing completion
-providers to emulate option 2. The user's reference agent expects source tools,
-so approval of this limitation is needed before implementing that recommendation.
+Implement option 2 as a separately named `agent_harness` mode. Do not silently
+enable native tools in existing completion providers or advertise this mode as
+exactly one model generation. Read-only source inspection is authorized by the
+architecture choice; arbitrary commands, writes, public posting, and changes to
+the current daemon model are not. Approving the architecture does not renew the
+earlier operating window or authorize a paid trial.
 
 ## Configuration Proposal
 
@@ -69,9 +77,9 @@ proposal, not a working configuration yet:
 
 ```toml
 [review]
-mode = "single_prompt"
+mode = "agent_harness"
 
-[review.single_prompt]
+[review.agent_harness]
 instruction_files = [
   "/operator/agents/friendly-series-review-with-suggestions.agent.md",
   "/operator/skills/friendly-series-review-with-suggestions/SKILL.md",
@@ -97,23 +105,35 @@ hash them once per job so edits during a review cannot change its identity.
 
 `Reviewer::review_patchset_task` currently prepares the complete series and then
 creates per-patch jobs. Branch after baseline preparation and existing subject/
-size/permission checks, before spawning per-patch review jobs. Single-prompt mode
+size/permission checks, before spawning per-patch review jobs. Harness mode
 must schedule exactly one eligible series job, not one single prompt per patch.
 Preserve explicit skipped-patch scope in the input; reject an empty eligible set.
 
 The worker currently receives the complete input plus a target patch index, and
 local review constructs a Worker per target patch. Add a whole-series dispatch
 before that per-patch workflow loop. Both daemon and local review must reach the
-same implementation. The pure single-completion runner calls `AiProvider` once
-with no tools, under the existing shared limiter and cancellation/timeout scope.
-It must not use a session helper that silently retries invalid output.
+same implementation. The whole-series runner invokes the selected harness once,
+under the existing shared limiter and cancellation/timeout scope. Its only
+source tools are explicitly allowed, read-only operations against the prepared
+repository at named revisions. Reject unsupported backends or capabilities
+rather than falling back to unrestricted shell access. Existing completion-only
+providers retain their restrictions.
+
+Require explicit positive generation, token, wall-time, and tool-call budgets
+before enabling the mode. Check backend support for enforcing and reporting
+each limit before the first paid call; reject unsupported limits rather than
+pretending a timeout alone bounds spending. Record internal model generations
+and usage, terminate the complete process group on cancellation or limit breach,
+and retain partial output as diagnostics, not a successful review. Do not use a
+session helper that silently retries invalid output or starts another harness.
 
 The deterministic input builder supplies original subjects/message IDs/order,
 cover context, exact parent/commit IDs, all selected patches, and bounded source
 context labeled by revision and file. Reuse existing baseline/prefetch helpers
 where appropriate. Check the final serialized request against configured input
 limits before calling the provider. Fail rather than silently truncate a series
-or drop instruction files. Tool-free mode reports source-inspection limitations.
+or drop instruction files. The harness can inspect additional callers through
+the allowed source tools; its output must disclose unresolved context gaps.
 
 ## Results and Persistence
 
@@ -144,11 +164,14 @@ Do not reuse the earlier paid Copilot cache while its effort identity is absent.
 
 ## Incremental Delivery and Tests
 
-1. Resolve the decision above and review this design. Then add typed config and
-   startup validation with defaults unchanged and invalid combinations rejected.
-2. Add deterministic instruction/input loading and a fake-provider runner test
-   proving exactly one generate_content call for a multi-patch series. Test
-   zero calls on missing instructions, oversized input, empty scope, or no-AI.
+1. Add typed config and startup validation for the approved `agent_harness`
+   mode, keeping defaults unchanged and rejecting invalid combinations or
+   absent enforceable limits.
+2. Add deterministic instruction/input loading and a fake-harness runner test
+   proving exactly one harness invocation for a multi-patch series. Test
+   internal-turn and tool limits, zero calls on unsupported capabilities,
+   missing instructions, oversized input, empty scope, or no-AI. Do not claim
+   this proves one backend model generation.
 3. Wire shared daemon/local whole-series dispatch and series-level persistence.
    Test cancellation, timeouts, failure artifacts, rerun/mode changes, access
    control, muted delivery, and no hidden workflow/repair calls.
