@@ -431,6 +431,46 @@ usage across per-patch rows. Keep daemon progress independent of UI polling.
 Done when: API and UI tests cover live updates, terminal persistence, absent
 telemetry, reconnects, cancelled reviews, and whole-series attribution.
 
+### P3: Durably Defer Reviews on Subscription Quota Exhaustion
+
+Status: lower-priority follow-up requested on 2026-10-26, after the daytime
+reset. Not implemented; no overnight watcher or live exhaustion trial is running.
+Extend the P2 account-quota/hysteresis design rather than adding another quota
+controller. Keep account subscription exhaustion distinct from configured
+per-review token/tool/call limits; a reset must not bypass those safety limits.
+
+Current evidence: QuotaManager provides in-memory shared backoff capped at five
+minutes. BackoffProvider retries typed rate-limit errors, with an attempt ceiling
+on paths without a deadline budget. Untyped Codex CLI errors currently fall back
+to Fatal classification. This is not durable reset-aware queue deferral, and
+subscription exhaustion is not guaranteed to avoid a Failed review today.
+
+Goal: classify authenticated subscription exhaustion explicitly, retain completed
+stages/checkpoints and diagnostic artifacts, and park affected unfinished review
+work until the account's reported reset instead of repeatedly calling the model
+or declaring the patch failed. Persist the account, pause reason, reset/next-check
+time, and resumable progress. Let unrelated eligible accounts continue. Keep
+cancellation, access controls, muted delivery, and explicit interruption semantics;
+do not silently resume a terminal checkpoint invocation or rerun completed work.
+After restart or scheduled wakeup, refresh authenticated quota and apply the
+configured resume threshold before continuing. Unknown/stale telemetry is not
+permission to spend. Never buy credits, enable metered billing, or substitute a
+premium model merely to get past exhaustion.
+
+Test first with fake clocks, quota responses, and providers: short versus long
+reset windows, 429 versus subscription exhaustion versus fatal auth failures,
+late/shifted resets, absent telemetry, another consumer spending the allowance,
+process restart, cancellation while paused, retained output, and no duplicate
+usage or completed work. The paused API/UI state must remain distinguishable
+from Failed, with an honest next-check time. Avoid busy polling and retry storms.
+
+Only after deterministic checks and design approval, prefer a small bounded live
+trial near an authenticated reset between 00:00 and 06:00 in the configured local
+timezone, checking timezone/DST explicitly. Do not drain quota just to force the
+test, start a multi-hour daytime wait, or install an unrequested overnight job.
+Record real pause/resume events, provider calls, quota refreshes, preserved
+progress, and limits. Fresh budget/window authorization is still required.
+
 ### P3: Keep Remaining Operational Problems Evidence-Based
 
 Status: intermittent NNTP TLS/read timeouts continue while queued reviews make
