@@ -5,9 +5,11 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Operating Constraints
 
-- Keep development Xen reviews on `gpt-6-luna`, low effort by default. The
-  authorized runtime now uses subscription-backed Codex CLI; do not select Sol
-  merely because quota has reset or enable metered billing without permission.
+- Prefer `gpt-6-luna`, low effort by default; the runtime currently uses medium
+  after the malformed-output recovery. Bounded premium Codex subscription trials
+  are now authorized only under the agent's fresh strictly-above-50% gate.
+  Start Terra/Sol at low or medium, never above high. A reset alone does not
+  authorize broad Sol use, metered billing, or paid overages.
 - Do not run Sashiko self-review through paid Copilot CLI. Do not spend Sol
   quota to investigate or validate these items without fresh authorization.
 - Preserve muted outbound delivery, completed results, review artifacts, and
@@ -18,6 +20,42 @@ changes are validated. Do not create work merely to keep the daemon busy.
   Follow AGENTS.md for sign-offs, checks, focused commits, and authorized pushes.
 
 ## Prioritized Work
+
+### P1: Budget-Gated Premium Model Comparisons
+
+Status: agent policy updated in 02453527 with the operator's authorization.
+The separate Codex subscription account, not this coding chat's Copilot Business
+plan, controls eligibility. Each premium call requires fresh authenticated quota
+strictly above 50%, enough weekly allowance and operating time, verified model
+availability, subscription authentication, and effective effort no higher than
+high. Start at low/medium. Self-review and paid-billing restrictions are unchanged.
+
+The bounded replay guard passed offline tests for 0%, 49%, exactly 50%, 50.1%,
+51%, unknown/NaN readings, API-key authentication, and absent weekly allowance.
+At 13:59 CET its live check denied an 8% account without a model call. After
+14:00, a fresh account reading confirmed 100% remaining and subscription auth.
+An initial trial was also denied because the daemon had restarted, preserving
+its isolation rule. The idle daemon was then stopped for two bounded calls,
+each independently rechecking quota at 100%; native turn metadata confirmed the
+requested model and low effort. No active review was cancelled.
+
+Exact same failed-stage prompt, verified by identical SHA-256:
+
+| Model/Effort | Input, All Uncached | Output | Seconds | Dismissed Concerns |
+| --- | ---: | ---: | ---: | ---: |
+| gpt-6-luna / medium | 10,634 | 562 | 8.829 | 1 |
+| gpt-5.6-terra / low | 10,082 | 105 | 9.821 | 0 |
+| gpt-5.6-sol / low | 10,082 | 58 | 7.896 | 0 |
+
+Each returned parseable envelope and stage JSON in one completed turn. The
+Terra/Sol replies were only empty arrays; lower output volume does not establish
+equivalent evidence or improved full-review quality. These are format replays,
+not complete reviews or independent correctness checks. Do not infer prices,
+general efficiency, or permission for unrestricted Sol use from these samples.
+Artifacts remain outside the repository under the existing effort-trial folder.
+The daemon resumed on its unchanged Luna/medium default. GPT-6 Sol, GPT-6.1 Sol,
+and high-effort premium calls were not tested; no reason to spend on them was
+established by this successful format check.
 
 ### P1: Configure Model/Effort and Patch-Scaled Timeouts
 
