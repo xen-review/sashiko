@@ -19,6 +19,55 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Prioritized Work
 
+### P1: Classify Xen Staging Merges and Filter Review State
+
+Status: operator-requested follow-up on 2026-10-26; ledger only, not a change to
+the current harness implementation or active review scheduling. A targeted code
+check did not establish working Xen staging-merge classification or the requested
+human-review/status filter. Existing stored Git patch IDs and baseline resolution
+are possible foundations, not evidence this feature is already implemented.
+
+Goal: detect and display when an individual patch is already incorporated into
+the configured upstream reference. For Xen, prefer the upstream `staging` branch
+as the classification reference; `master` is the main branch and may lag staging.
+Resolve the actual upstream remote/ref explicitly rather than assuming local
+HEAD or an arbitrary remote's staging branch is authoritative. Record the checked
+ref, resolved tip SHA, check time, matched commit, and matching evidence. Missing
+or stale refs mean unknown, not unmerged; staging membership does not prove master
+membership or permanent acceptance if staging is rewritten.
+
+Investigate exact commit ancestry and stable Git patch-ID matching for mailed
+patches whose upstream commit SHA differs. Reuse existing patch-ID facilities
+where suitable, but do not infer a merge from subject similarity, an apply
+failure, or an empty diff alone. Define limitations for modified/squashed patches,
+reverts, and rewritten staging history. Test refreshed tips and changed evidence.
+
+Keep classification per patch and aggregate series as fully merged, partially
+merged, unmerged, or unknown. Preserve prior review results and human comments.
+As a later explicit scheduling policy, consider deferring already-merged patches
+until eligible non-merged patches are reviewed; do not silently mark merged work
+as reviewed, cancel an active review, or skip the unmerged part of a mixed series.
+Expose the policy and classification so operators can understand queue order.
+
+Add a view-only status dropdown beside the existing mailing-list selector,
+directly to its right and before the search box. Keep the All Lists selector,
+including Xen's xen-devel list. Proposed options: All States, Not Reviewed Yet,
+In Review, Reviewed by Sashiko, Reviewed by a Human, Merged to Staging, and relevant
+existing failure/skipped/cancelled states. Combine the filter with list selection,
+search, pagination, and clear/reset behavior; preserve usable responsive layout.
+
+Review state, human review evidence, and merge state overlap rather than forming
+one mutually exclusive status enum. Define Not Reviewed Yet precisely and show
+badges/details without losing these independent dimensions. Human-reviewed must
+have attributable evidence, such as parsed review replies or Reviewed-by trailers
+with provenance; a generic mailing-list reply is not proof of review. Unknown
+human-review evidence must not be presented as confirmed absence of human review.
+
+Done when: deterministic fixtures cover exact/upstream-rewritten patch identities,
+partial series, stale/missing refs, staging versus master, and human-review evidence;
+API and UI filters agree on counts and pagination; scheduling is separately tested
+and explicitly enabled without losing successful results or diagnostic artifacts.
+
 ### P0: Resolve Verification Failures That Lose Completed Analysis
 
 Status: prompt/retry feedback fix deployed in `3c3db2d4`; supported retry accepted.
