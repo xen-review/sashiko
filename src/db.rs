@@ -2080,7 +2080,16 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 14.");
+        if current_version < 15 {
+            info!("Applying database migration version 15 (harness checkpoints)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/015_harness_checkpoints.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 15", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 15.");
 
         Ok(())
     }
@@ -11806,6 +11815,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_schema_restricts_coverage_order_and_cleanup() -> Result<()> {
+        let db = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&db).await?;
+        let diffs = db.get_patch_diffs(patchset_id).await?;
+        let covered = vec![HarnessReviewPatch {
+            patch_id: diffs[0].0,
+            commit_id: crate::baseline::CommitId::parse(&"a".repeat(40)).unwrap(),
+        }];
+        db.update_patchset_status(patchset_id, "In Review").await?;
+        let review_id = db
+            .start_harness_review(HarnessReviewStart {
+                patchset_id,
+                provider: "codex-cli",
+                model: "gpt-6-luna",
+                baseline_id: None,
+                prompts_hash: "snapshot",
+                patches: &covered,
+            })
+            .await?
+            .unwrap();
+        db.execute("INSERT INTO harness_checkpoint_sessions (review_id, input_context, series_fingerprint, created_at) VALUES (?, 'input', ?, 1)", libsql::params![review_id, "b".repeat(64)]).await?;
+        let insert = "INSERT INTO harness_patch_checkpoints (review_id, checkpoint_index, patch_id, message_id, commit_id, reviewer_notes, reply_body, history_end, provider_calls_end, created_at) VALUES (?, 1, ?, 'message', ?, 'notes', 'reply', 2, 1, 1)";
+        assert!(
+            db.execute(
+                insert,
+                libsql::params![review_id, diffs[1].0, "a".repeat(40)]
+            )
+            .await
+            .is_err()
+        );
+        db.execute(
+            insert,
+            libsql::params![review_id, covered[0].patch_id, "a".repeat(40)],
+        )
+        .await?;
+        assert!(
+            db.execute(
+                insert,
+                libsql::params![review_id, covered[0].patch_id, "a".repeat(40)]
+            )
+            .await
+            .is_err()
+        );
+        db.execute(
+            "DELETE FROM reviews WHERE id = ?",
+            libsql::params![review_id],
+        )
+        .await?;
+        let mut rows = db.conn.query("SELECT (SELECT COUNT(*) FROM harness_checkpoint_sessions), (SELECT COUNT(*) FROM harness_patch_checkpoints)", ()).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 0);
+        assert_eq!(row.get::<i64>(1)?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn harness_completion_is_atomic_scoped_and_cancellation_safe() -> Result<()> {
         use crate::agent_harness::{
             series::{ReplyDraft, ReviewArtifacts, SeriesOutcome},
@@ -18112,7 +18177,10 @@ mod tests {
             .unwrap();
         db.conn
             .execute_batch(
-                "DROP TABLE review_patch_coverage;
+                "DROP TABLE harness_provider_calls;
+                DROP TABLE harness_patch_checkpoints;
+                DROP TABLE harness_checkpoint_sessions;
+                DROP TABLE review_patch_coverage;
                 ALTER TABLE reviews DROP COLUMN review_mode;
                 ALTER TABLE reviews DROP COLUMN independently_verified;
                 PRAGMA user_version = 3;",
@@ -22391,6 +22459,9 @@ mod tests {
                 "DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
+                 DROP TABLE harness_provider_calls;
+                 DROP TABLE harness_patch_checkpoints;
+                 DROP TABLE harness_checkpoint_sessions;
                  DROP TABLE review_patch_coverage;
                  ALTER TABLE reviews DROP COLUMN review_mode;
                  ALTER TABLE reviews DROP COLUMN independently_verified;
@@ -22420,6 +22491,9 @@ mod tests {
             .execute_batch(
                 "DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
+                 DROP TABLE harness_provider_calls;
+                 DROP TABLE harness_patch_checkpoints;
+                 DROP TABLE harness_checkpoint_sessions;
                  DROP TABLE review_patch_coverage;
                  ALTER TABLE reviews DROP COLUMN review_mode;
                  ALTER TABLE reviews DROP COLUMN independently_verified;

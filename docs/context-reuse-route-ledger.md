@@ -106,6 +106,15 @@ by default. This policy is separate from the coding assistant's model setting.
   boundaries, summed input totals, and older trace deserialization without
   invented call usage. The same full deterministic gates passed. This is a
   persistence prerequisite, not a completed database checkpoint implementation.
+  Additive migration 15 now defines sequential invocation records, ordered
+  patch checkpoints constrained to covered patches, and unique per-call
+  interaction links. Schema tests reject out-of-scope and duplicate checkpoints
+  and verify review-deletion cleanup. Historical rewind fixtures were updated
+  to remove these objects before simulating older schemas. Full gates passed
+  1,117 library, 48 main, seven CLI, and 25 integration tests, formatting, and
+  all Clippy profiles. This schema foundation is not installed in the live
+  database; atomic checkpoint writers, interruption recovery, and runtime
+  dispatch remain pending. Sequential selection still fails closed.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
