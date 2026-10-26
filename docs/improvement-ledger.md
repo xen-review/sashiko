@@ -66,16 +66,17 @@ and no synthetic score entered the live database. A checked idle database backup
 and rollback binary are retained; the installed hash matches the release build.
 Fresh live-page/API checks preserve review 48's original results and show two
 unassessed historical threads without overflow at desktop/mobile widths.
-The first missing-usage presentation slice is implemented but not deployed:
+The first missing-usage presentation slice is deployed with e813b5f2:
 cards/maps show zero-only unconfirmed legacy totals as Unavailable, preserve
 confirmed checkpoint zeros, and retain known positive/partial counters without
 defaulting missing values to zero. Stored data is unchanged and positive legacy
 totals are not claimed complete. Focused rendering, syntax, editor diagnostics,
 the diff-aware make check-pr gate, and read-only card/map browser checks at
 desktop/mobile widths pass. The fixture is stopped and the daemon resumed.
-Deployment remains pending. Backend-confirmed per-stage effort, future
-availability persistence, and live/final completeness remain open; see the report
-for browser limits.
+The live patch/map checks preserve review 48's original data and no longer
+present its unconfirmed counters as a measured zero. Backend-confirmed per-stage
+effort and complete native-call/live telemetry remain open; see the report for
+browser limits and the response-coverage scope below.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
@@ -88,8 +89,11 @@ coverage objects stay unknown. Focused contract, aggregation, serialization,
 display, and desktop/mobile card/map/stage checks pass. The full make check-pr
 gate passed 1,130 library tests (two ignored), 49 main, seven CLI, 25 integration,
 formatting, and all Clippy profiles. The fixture is stopped and the daemon
-resumed; deployment remains pending. Actual backend effort and complete native
-call/live-usage telemetry remain separate open work.
+resumed. This slice is deployed at 18:28 CET after an idle checked database
+backup, matching release/installed hashes, and fresh desktop/mobile live-page
+checks. Review 48's saved output and zero counters remain untouched; its UI says
+Unavailable with unknown coverage. No model call was needed. Actual backend
+effort and complete native-call/live telemetry remain separate open work.
 
 ### P1: Budget-Gated Premium Model Comparisons
 

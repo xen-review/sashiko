@@ -191,7 +191,7 @@ pass, along with the diff-aware make check-pr gate and editor diagnostics.
 The read-only review-48 fixture passed card/map checks at 1,280 and 390 pixels:
 Unavailable is visible, the false zero triple is absent, and there is no page
 overflow or injected image. The fixture is stopped and the daemon resumed;
-deployment of this presentation slice is pending.
+this presentation slice is deployed with e813b5f2.
 
 Backend-confirmed per-stage effort and complete native-call/live usage telemetry
 remain open. Provider-response coverage persistence is implemented below, but
@@ -218,5 +218,8 @@ make check-pr gate passed 1,130 library tests (two ignored), 49 main, seven CLI,
 25 integration, formatting, and all Clippy profiles. Synthetic card/map browser
 checks at 1,280 and 390 pixels show complete zero, partial totals, and unknown
 cache usage correctly, without overflow, injected images, or page errors. The
-fixture is stopped and the daemon resumed. Deployment remains pending.
-Historical output is unchanged, and no new model call was needed.
+fixture is stopped and the daemon resumed. The release was installed at 18:28
+CET after a checked idle database backup and matching release/installed hashes.
+Fresh live patch/map checks at both widths show unavailable usage and unknown
+coverage on review 48 with no overflow or synthetic values. Its original output
+and counters remain unchanged; no new model call was needed.

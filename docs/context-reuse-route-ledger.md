@@ -5,6 +5,40 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+Latest state at 18:28 CET: source e813b5f2 is signed, pushed, and installed,
+including the conservative legacy-usage UI fix 921be4e2 and typed provider-response
+coverage. Installed/release SHA-256:
+a360fec0d37583ac1ca9df047fe3613445dfc12680903d364e58445c093fc353.
+Private backup before-usage-coverage-20261026-182731.db passed quick_check;
+sashiko-before-usage-coverage-20261026-182731 retains the prior binary. No active
+review was interrupted. Four-job release build passed with no new OOM events.
+
+Service active, PID 1012834; API healthy, schema 15, 4,070 messages, 451 series,
+98 Reviewed and no Pending or In Review. Runtime workflow / codex-cli /
+gpt-6-luna / medium and muted/no-SMTP policy are unchanged. The queue is empty;
+no new review throughput or model call is claimed for deterministic validation.
+
+Final gate: 1,130 library tests passed, two ignored; 49 main, seven CLI, 25
+integration, formatting, and all Clippy profiles pass. Sessions retain typed
+request/response usage coverage through failures, stages, workflow branches,
+worker/local JSON, and saved review output. Legacy/custom records and unaccounted
+worker restarts stay unknown. Truncated responses retain their reported tokens.
+Coverage is not native generation count, hidden-retry accounting, or complete
+billing evidence. Cached-unknown and partial totals stay explicit. No migration,
+historical backfill, model re-review, self-review, benchmark, or public post.
+
+Synthetic card/map/stage fixtures and fresh live review-48 patch/map checks pass
+at 1,280 and 390 pixels without overflow or injected elements. The original
+findings, counters, unknown effort, and unassessed confidence remain unchanged.
+Synthetic fixture stopped; browser now shows the live patch, not a fixture.
+Latest quota reading at 18:10:16 CET remains 14% five-hour / 72% weekly,
+reset 19:01:38 CET. Premium gate is false. Fresh telemetry is still required
+before any later experiment. Next scoped ledger work: view-only review-state
+filter; staging/human evidence and any new quota controller need their own
+reviewed design, not inferred status or scheduling changes.
+
+### Earlier Resume Evidence
+
 The operator resumed the improvement loop on the Copilot Business coding-chat
 plan. At 17:50 CET on 2026-10-26 the confidence source eed4fbdd is deployed
 from source HEAD 71181008. Release/installed SHA-256:
@@ -24,7 +58,7 @@ Runtime remains workflow / codex-cli / gpt-6-luna / medium, muted with no SMTP.
 Latest authenticated quota at 17:48:55 CET: 14% five-hour and 72% weekly,
 reset 19:01:38 CET. The premium gate is false; no model experiment is planned.
 The chat plan change does not alter daemon billing or self-review restrictions.
-Next evidence-backed task: distinguish unavailable historical token usage from
+The next task at that point was to distinguish unavailable historical token usage from
 measured zero without relabeling successful reviews or inventing token counts.
 Other open work and validation constraints remain in the ledger and historical
 handoff below; its pause and undeployed-confidence statements are superseded.
