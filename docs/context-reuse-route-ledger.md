@@ -47,10 +47,14 @@ infer daemon authentication, billing, quota, or model from that switch.
   Fixed exposed integration gaps: stale toolbox HEAD cache across checkpoints;
   unfinished selected patches not marked active; rerun cleanup discarding
   checkpoint diagnostics; nondeterministic ordering of same-second reviews.
-- Next wire local sequential dispatch around SequentialReviewSession with
-  retained partial JSON/human/agent artifacts and cancellation. Inspect harness
-  scheduling coverage before enablement; ordinary per-patch review counts do
-  not yet recognize series checkpoint coverage.
+- Local sequential dispatch now retains partial JSON/human/agent artifacts and
+  graceful cancellation. Unit tests cover two ordered checkpoints, malformed
+  second output, cancellation, shared totals, and unknown terminal call usage.
+  The latest full gate passes with 1,123 library, 48 main, seven CLI, and 25
+  integration tests plus formatting and all three Clippy profiles.
+  Next inspect harness scheduling coverage and enable configuration with real
+  CLI integration fixtures; ordinary per-patch review counts do not yet
+  recognize series checkpoint coverage.
   Enable the typed strategy only when these paths and partial-result UI pass.
 - Before installing schema 15, stop at a safe boundary, verify workers exited,
   back up the database, and run required checks. Scheduled/external service

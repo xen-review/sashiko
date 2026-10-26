@@ -2,8 +2,8 @@
 
 Status: partial-completion policy approved by the operator, 2026-10-26.
 Typed strategy configuration, bounded continuation, atomic checkpoint/terminal
-persistence, daemon dispatch, and partial-result API/UI are implemented.
-Sequential execution still fails closed until local dispatch and remaining
+persistence, daemon/local dispatch, and partial-result API/UI are implemented.
+Sequential execution still fails closed until configuration enablement and remaining
 integration checks pass. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
 default change, automatic retry, public posting, or effort adaptation is proposed.
@@ -130,6 +130,13 @@ would return stale cached HEAD results after changing its virtual head, because
 tool-result cache identity uses arguments rather than the current virtual head.
 Conversation evidence and cumulative session limits remain shared across these
 toolboxes; source reads are fresh for the exact current applied commit.
+
+Local CLI execution retains completed artifacts in its final JSON, agent, or
+human output, including graceful Ctrl-C cancellation. It has no review database:
+these local output checkpoints do not claim durability after SIGKILL, host loss,
+or failure before output is written. Database-backed daemon checkpoints provide
+the process-loss durability described above. No automatic resume is added to
+either path.
 
 ## API and UI
 

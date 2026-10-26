@@ -1043,15 +1043,52 @@ async fn run_worker_in_worktree(
                 patches: selected_indexes.len(),
             },
         );
-        let outcome = crate::agent_harness::series::review(
-            provider.as_ref(),
-            &tools,
-            instructions,
-            &request,
-            &limits,
-        )
-        .await?;
-        let mut result = format_harness_result(patchset_id, baseline_arg, patch_results, outcome);
+        let cancellation = async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!("Cannot register harness cancellation handler: {error}");
+                std::future::pending::<()>().await;
+            }
+        };
+        let mut result = if limits.strategy == crate::settings::HarnessStrategy::SequentialPatches {
+            let (outcome, checkpoints) = review_local_checkpoints(
+                provider.as_ref(),
+                &tools,
+                instructions,
+                request,
+                &limits,
+                cancellation,
+            )
+            .await?;
+            let mut result =
+                format_harness_result(patchset_id, baseline_arg, patch_results, outcome);
+            result["review_strategy"] = json!("sequential_patches");
+            result["partial"] = json!(result_has_error(&result) && !checkpoints.is_empty());
+            result["checkpoint_session"] = json!({
+                "state": result["harness"]["status"]["status"],
+                "completed_count": checkpoints.len(),
+                "checkpoints": checkpoints,
+                "selected_patch_indexes": selected_indexes,
+                "remaining_patch_indexes": selected_indexes.iter().filter(|index| !result["artifacts"]["reply_drafts"].as_array().is_some_and(|drafts| drafts.iter().any(|draft| draft["patch_index"].as_i64() == Some(**index)))).collect::<Vec<_>>(),
+                "provider_calls_recorded": result["harness"]["trace"]["call_usage"].as_array().map(Vec::len),
+                "provider_calls_attempted": result["harness"]["trace"]["provider_calls"],
+                "usage_complete": result["harness"]["trace"]["call_usage"].as_array().map(Vec::len) == result["harness"]["trace"]["provider_calls"].as_u64().and_then(|calls| usize::try_from(calls).ok()),
+            });
+            result
+        } else {
+            let outcome = crate::agent_harness::series::review_with_cancellation(
+                provider.as_ref(),
+                &tools,
+                instructions,
+                &request,
+                &limits,
+                cancellation,
+            )
+            .await?;
+            let mut result =
+                format_harness_result(patchset_id, baseline_arg, patch_results, outcome);
+            result["review_strategy"] = json!("whole_series");
+            result
+        };
         result["review_attribution"] = json!({
             "provider": ai.provider,
             "model": ai.model,
@@ -1420,7 +1457,10 @@ pub fn format_agent_review_output(result: &Value) -> Value {
         return json!({
             "status": if result_has_error(result) { "error" } else { "completed_without_independent_verification" },
             "review_mode": "agent_harness",
+            "review_strategy": result["review_strategy"],
             "independently_verified": false,
+            "partial": result["partial"],
+            "checkpoint_session": result["checkpoint_session"],
             "baseline": result["baseline"],
             "patches": result["patches"],
             "artifacts": result["artifacts"],
@@ -1496,6 +1536,75 @@ pub fn format_agent_review_output(result: &Value) -> Value {
     }
 
     out
+}
+
+async fn review_local_checkpoints(
+    provider: &dyn crate::ai::AiProvider,
+    tools: &ToolBox,
+    instructions: &crate::agent_harness::InstructionSnapshot,
+    request: crate::agent_harness::series::SeriesRequest<'_>,
+    limits: &crate::settings::AgentHarnessSettings,
+    cancellation: impl std::future::Future<Output = ()>,
+) -> Result<(crate::agent_harness::series::SeriesOutcome, Vec<Value>)> {
+    use crate::agent_harness::series::{ReviewArtifacts, SequentialReviewSession, SeriesOutcome};
+    let mut session = SequentialReviewSession::new(tools, instructions, request, limits)?;
+    let mut notes = Vec::new();
+    let mut drafts = Vec::new();
+    let mut checkpoints = Vec::new();
+    tokio::pin!(cancellation);
+    for patch in request
+        .input
+        .patches
+        .iter()
+        .filter(|patch| request.selected_indexes.contains(&patch.index))
+    {
+        let mut checkpoint_tools = ToolBox::new(tools.get_worktree_path().to_path_buf(), None);
+        let Some(commit) = patch.commit_id.clone() else {
+            session.abort(format!("Patch {} has no exact applied commit", patch.index));
+            break;
+        };
+        checkpoint_tools.set_virtual_head(commit.clone());
+        let checkpoint = match session
+            .advance(provider, &checkpoint_tools, cancellation.as_mut())
+            .await
+        {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => break,
+            Err(error) => {
+                session.abort(format!("Checkpoint execution failed: {error:#}"));
+                break;
+            }
+        };
+        let Some(artifacts) = checkpoint.artifacts else {
+            break;
+        };
+        let draft = &artifacts.reply_drafts[0];
+        checkpoints.push(json!({
+            "checkpoint_index": checkpoints.len() + 1,
+            "patch_index": checkpoint.patch_index,
+            "message_id": draft.message_id,
+            "commit_id": commit,
+            "reviewer_notes": artifacts.reviewer_notes,
+            "reply_body": draft.body,
+            "provider_calls_end": session.trace().provider_calls,
+            "history_end": session.trace().history.len(),
+        }));
+        notes.push(format!(
+            "Patch {}:\n{}",
+            checkpoint.patch_index, artifacts.reviewer_notes
+        ));
+        drafts.extend(artifacts.reply_drafts);
+    }
+    Ok((
+        SeriesOutcome {
+            artifacts: (!checkpoints.is_empty()).then(|| ReviewArtifacts {
+                reviewer_notes: notes.join("\n\n"),
+                reply_drafts: drafts,
+            }),
+            execution: session.into_outcome(),
+        },
+        checkpoints,
+    ))
 }
 
 fn format_harness_result(
@@ -2460,6 +2569,155 @@ mod tests {
         result["error"] = json!("invalid artifacts");
         assert!(result_has_error(&result));
         assert_eq!(format_agent_review_output(&result)["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn local_checkpoints_retain_partial_results_and_shared_usage() -> Result<()> {
+        use crate::{
+            agent_harness::{InstructionSnapshot, series::SeriesRequest, session::HarnessStatus},
+            ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities},
+            settings::{AgentHarnessSettings, HarnessStrategy},
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Provider {
+            calls: AtomicUsize,
+            malformed: bool,
+            stall: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl AiProvider for Provider {
+            async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+                let patch_index = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let checkpoint: Value = serde_json::from_str(
+                    request.messages.last().unwrap().content.as_deref().unwrap(),
+                )?;
+                assert_eq!(checkpoint["patch_index"], patch_index);
+                if patch_index == 2 && self.stall {
+                    return std::future::pending().await;
+                }
+                Ok(AiResponse {
+                    content: Some(if patch_index == 2 && self.malformed {
+                        "Malformed second checkpoint".to_string()
+                    } else {
+                        json!({"reviewer_notes":format!("Notes {patch_index}"), "reply_drafts":[{"patch_index":patch_index,"message_id":null,"body":format!("Reply {patch_index}")}]}).to_string()
+                    }),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    truncated: false,
+                    usage: Some(AiUsage {
+                        prompt_tokens: 20,
+                        completion_tokens: 5,
+                        total_tokens: 25,
+                        cached_tokens: Some(10),
+                    }),
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake".to_string(),
+                    context_window_size: 10000,
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("agent.md"), "Review source.")?;
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )?;
+        let limits = AgentHarnessSettings {
+            strategy: HarnessStrategy::SequentialPatches,
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 2,
+            max_tool_calls: 2,
+            max_input_tokens: 1000,
+            max_output_tokens: 100,
+            timeout_seconds: 10,
+        };
+        let input = ReviewInput {
+            id: 1,
+            subject: "Series".to_string(),
+            patches: (1..=2)
+                .map(|index| PatchInput {
+                    index,
+                    diff: format!("diff {index}"),
+                    subject: None,
+                    author: None,
+                    date: None,
+                    message_id: None,
+                    commit_id: Some(format!("{index:040x}")),
+                })
+                .collect(),
+        };
+        let baseline = "a".repeat(40);
+        let request = SeriesRequest {
+            input: &input,
+            baseline: &baseline,
+            selected_indexes: &[2, 1],
+            cover_letter: None,
+            max_bytes: 10000,
+        };
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        for (malformed, stall) in [(false, false), (true, false), (false, true)] {
+            let provider = Provider {
+                calls: AtomicUsize::new(0),
+                malformed,
+                stall,
+            };
+            let cancellation = async {
+                if !stall {
+                    return std::future::pending::<()>().await;
+                }
+                while provider.calls.load(Ordering::SeqCst) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let (outcome, checkpoints) = review_local_checkpoints(
+                &provider,
+                &tools,
+                &instructions,
+                request,
+                &limits,
+                cancellation,
+            )
+            .await?;
+            let complete = !malformed && !stall;
+            assert_eq!(checkpoints.len(), if complete { 2 } else { 1 });
+            assert_eq!(checkpoints[0]["patch_index"], 1);
+            assert_eq!(
+                outcome.artifacts.as_ref().unwrap().reply_drafts.len(),
+                checkpoints.len()
+            );
+            assert_eq!(outcome.execution.trace.provider_calls, 2);
+            assert_eq!(
+                outcome.execution.trace.call_usage.len(),
+                if stall { 1 } else { 2 }
+            );
+            assert_eq!(
+                outcome.execution.trace.usage.prompt_tokens,
+                if stall { 20 } else { 40 }
+            );
+            assert_eq!(
+                matches!(outcome.execution.status, HarnessStatus::Completed { .. }),
+                complete
+            );
+            assert_eq!(
+                matches!(outcome.execution.status, HarnessStatus::Cancelled),
+                stall
+            );
+            let result = format_harness_result(1, &baseline, vec![], outcome);
+            assert_eq!(result_has_error(&result), !complete);
+            let concise = format_agent_review_output(&result);
+            assert_eq!(concise["artifacts"]["reply_drafts"][0]["body"], "Reply 1");
+            assert_eq!(concise["independently_verified"], false);
+        }
+        Ok(())
     }
 
     #[test]
