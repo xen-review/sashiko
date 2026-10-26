@@ -946,9 +946,19 @@ pub enum ReviewMode {
     AgentHarness,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessStrategy {
+    #[default]
+    WholeSeries,
+    SequentialPatches,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHarnessSettings {
+    #[serde(default)]
+    pub strategy: HarnessStrategy,
     pub instruction_files: Vec<PathBuf>,
     pub max_generations: usize,
     pub max_tool_calls: usize,
@@ -959,6 +969,9 @@ pub struct AgentHarnessSettings {
 
 impl AgentHarnessSettings {
     pub fn validate(&self) -> Result<(), String> {
+        if self.strategy != HarnessStrategy::WholeSeries {
+            return Err("[review.agent_harness] sequential_patches is not enabled yet; checkpoint continuation and persistence are required".to_string());
+        }
         if self.instruction_files.is_empty()
             || self
                 .instruction_files
@@ -1602,6 +1615,32 @@ mod tests {
                 .is_ok()
         );
         assert!(configured.validate_mode().is_ok());
+        assert_eq!(
+            configured.agent_harness.as_ref().unwrap().strategy,
+            HarnessStrategy::WholeSeries
+        );
+        for (strategy, supported) in [("whole_series", true), ("sequential_patches", false)] {
+            let selected = format!(
+                "concurrency = 1\nmode = 'agent_harness'{manifest}strategy = '{strategy}'\n"
+            );
+            let review: ReviewSettings = toml::from_str(&selected).unwrap();
+            if supported {
+                assert!(review.validate_mode().is_ok());
+            } else {
+                assert!(
+                    review
+                        .validate_mode()
+                        .unwrap_err()
+                        .contains("not enabled yet")
+                );
+            }
+        }
+        assert!(
+            toml::from_str::<ReviewSettings>(&format!(
+                "concurrency = 1\nmode = 'agent_harness'{manifest}strategy = 'typo'\n"
+            ))
+            .is_err()
+        );
         let inactive: ReviewSettings =
             toml::from_str(&format!("concurrency = 1{manifest}")).unwrap();
         assert!(inactive.validate_mode().is_err());

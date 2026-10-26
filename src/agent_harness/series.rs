@@ -266,6 +266,7 @@ mod tests {
         )
         .unwrap();
         let limits = AgentHarnessSettings {
+            strategy: Default::default(),
             instruction_files: vec!["agent.md".into()],
             max_generations: 2,
             max_tool_calls: 2,

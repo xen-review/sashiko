@@ -80,7 +80,11 @@ by default. This policy is separate from the coding assistant's model setting.
   No full/small benchmark or automatic queue refill is authorized by this plan.
 6. Sequential checkpoint design drafted in
   [DESIGN_SEQUENTIAL_HARNESS_CHECKPOINTS.md](../designs/DESIGN_SEQUENTIAL_HARNESS_CHECKPOINTS.md).
-  Approval is needed for partial-completion and recovery semantics before code.
+  The operator approved preserving completed checkpoints on later failure,
+  explicit partial-series state, and no automatic replay/session resume.
+  Typed strategy selection is implemented with whole_series as the default;
+  sequential_patches fails closed until continuation and persistence are wired.
+  Focused settings regression and all full deterministic gates passed.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

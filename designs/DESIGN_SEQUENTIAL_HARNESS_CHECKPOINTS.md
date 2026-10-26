@@ -1,6 +1,8 @@
 # Sequential Harness Checkpoints
 
-Status: proposed for operator approval, 2026-10-26. This extends the approved
+Status: partial-completion policy approved by the operator, 2026-10-26.
+Typed strategy configuration is implemented; sequential execution still fails
+closed until continuation and persistence are wired. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
 default change, automatic retry, public posting, or effort adaptation is proposed.
 
@@ -129,7 +131,8 @@ No email, forge comment, embargo delivery, or suggested source edit is enabled.
 
 ## Approval Boundary
 
-Confirm the partial-completion policy before implementation: completed patch
+The operator approved the partial-completion policy before implementation:
+completed patch
 checkpoints remain completed when a later checkpoint fails, while the series
 reports partial failure; no automatic replay or cross-process session resume.
 The alternative is all-or-nothing patch status with retained diagnostic drafts,

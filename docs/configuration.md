@@ -325,6 +325,7 @@ concurrency = 1
 mode = "agent_harness"
 
 [review.agent_harness]
+strategy = "whole_series"
 instruction_files = ["agents/reviewer.md", "skills/review/SKILL.md"]
 max_generations = 12
 max_tool_calls = 30
@@ -333,7 +334,11 @@ max_output_tokens = 20000
 timeout_seconds = 600
 ```
 
-All harness fields are required and limits must be positive. The instruction
+All limits must be positive. The strategy defaults to `whole_series` when
+omitted. The typed `sequential_patches`
+strategy is reserved for checkpoint execution and currently fails validation;
+it never silently falls back to a whole-series review. All other harness fields
+remain required. The instruction
 manifest is ordered; list all required agents, skills, style guides, and reference
 examples explicitly. Relative paths resolve against the settings file directory,
 not the repository or CLI working directory. Sashiko snapshots original contents
