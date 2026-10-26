@@ -242,6 +242,15 @@ neither option is fabricated from existing status. A targeted code
 check did not establish working Xen staging-merge classification or the requested
 human-review evidence. Existing stored Git patch IDs and baseline resolution
 are possible foundations, not evidence this feature is already implemented.
+The [staging evidence proposal](../designs/DESIGN_XEN_STAGING_EVIDENCE.md) now
+defines an explicit authoritative ref, bounded background patch-ID index, separate
+persisted evidence, unknown/stale and revert semantics, and unchanged scheduling.
+Read-only inspection confirms origin is the xen-review fork and upstream is the
+Xenbits repository, with different staging tips. Recommend explicit
+refs/remotes/upstream/staging. Approval is required for that new index/evidence
+architecture and target choice before implementation. The alternative is an
+operator-run read-only JSON report without integrated filters. No ref fetch,
+migration, new worker, history scan, model call, or live classification ran.
 
 Goal: detect and display when an individual patch is already incorporated into
 the configured upstream reference. For Xen, prefer the upstream `staging` branch

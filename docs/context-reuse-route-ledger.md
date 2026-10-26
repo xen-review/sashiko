@@ -5,6 +5,16 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+Current task boundary: staging design drafted in
+designs/DESIGN_XEN_STAGING_EVIDENCE.md. The new bounded index/persisted evidence
+architecture and explicit refs/remotes/upstream/staging target require operator
+approval. No source implementation, migration, worker, fetch, broad history
+scan, model call, or scheduling change was made for this proposal. A manual
+read-only JSON command is the lower-integration alternative. Remote inspection
+confirms origin is https://github.com/xen-review/xen.git and upstream is the
+Xenbits repository; their staging tips differ, so silently choosing origin
+would be wrong for the proposed target. Do not infer freshness from commit dates.
+
 Latest state at 19:11 CET: parser/cache fix 96ab1ae0 is signed, pushed, and
 installed; implementation clean before this documentation update. Release hash:
 ecaab14961996b13fa9db35ad7804aa6aee7cd2430b1b8c79e4caa4df645f00a.
