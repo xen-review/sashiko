@@ -80,6 +80,12 @@ separate workspace-image inspection is claimed. The fixture is stopped and the
 daemon resumed after testing; no model call or live record was changed.
 
 The full make check-pr gate passed 1,131 library tests (two ignored), 49 main,
-seven CLI, 26 integration, formatting, and all Clippy profiles. Deployment is
-pending. Human-review and staging evidence remain independent follow-up work;
+seven CLI, 26 integration, formatting, and all Clippy profiles. Source 44094e87
+was deployed at 18:58 CET on 2026-10-26 after a four-job release build, an idle
+database backup that passed quick_check, and matching installed/release hashes.
+Live API totals match read-only database counts: Reviewed 98, not currently
+Reviewed 353, Failed To Apply 191, In Review zero; unknown filters return 400.
+The live dropdown at both widths shows 98 Reviewed across two pages without
+page/control overflow. The daemon is healthy, schema 15 unchanged, and no active
+review was interrupted. Human-review and staging evidence remain independent follow-up work;
 this filter does not establish either classification or alter queue scheduling.

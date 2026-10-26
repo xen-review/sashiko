@@ -5,6 +5,40 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+Latest state at 18:58 CET: view-only filter source 44094e87 is signed, pushed,
+and installed. Implementation checkout clean before this documentation update;
+main's unrelated user-owned files remain untouched. Installed/release SHA-256:
+0f97890d61fbe2e24bae2f6fff61e2b103b3e976f267db4a94dc431411106970.
+Private backup before-state-filter-20261026-185746.db passed quick_check, with
+sashiko-before-state-filter-20261026-185746 rollback binary. Four-job release
+build passed without new OOM events. No active review was interrupted.
+
+Service active, PID 1024593; API healthy version 0.6.3, schema 15, 4,070 messages,
+451 series, 98 Reviewed, no Pending/In Review. Runtime remains workflow / Codex
+gpt-6-luna / medium, mute_all/no SMTP. The live filter matches database totals:
+Reviewed 98, not currently Reviewed 353, Failed To Apply 191, In Review zero.
+Unknown filters return 400; both live widths show the expected two Reviewed
+pages with no page/control overflow. Synthetic fixture 8094 is stopped and the
+shared browser now shows the live Reviewed list.
+
+The filter is view-only and uses typed states plus shared row/count predicates
+before pagination, with default-cache isolation and unchanged embargo/access
+redaction. URL restoration, mode isolation, Clear, page reset, and mobile
+container scrolling passed. The full gate passed 1,131 library tests (two
+ignored), 49 main, seven CLI, 26 integration, formatting, and all Clippy profiles.
+Human-review evidence and staging membership are still separate unimplemented
+dimensions, not guessed options or new scheduler behavior. See the incremental
+filter design and general ledger for remaining work.
+
+The operator switched coding chat back to Codex and asked to conserve its
+remaining allowance until reset. Fresh daemon-account telemetry at 18:57:31 CET:
+9% five-hour / 71% weekly, reset 19:01:38 CET. Do not infer chat quota from daemon
+account telemetry or assume reset without a fresh reading. No sleeps, model
+experiments, premium calls, self-review, benchmark, or public post were used.
+Continue only useful authorized work; do not repeat checks just to consume time.
+
+### Usage Rollout Evidence
+
 Latest state at 18:28 CET: source e813b5f2 is signed, pushed, and installed,
 including the conservative legacy-usage UI fix 921be4e2 and typed provider-response
 coverage. Installed/release SHA-256:

@@ -205,8 +205,8 @@ full request and native response before attributing the error to a prompt bug.
 
 ### P1: Classify Xen Staging Merges and Filter Review State
 
-Status: view-only recorded review-state filter implemented and validated in
-source; deployment pending. See
+Status: view-only recorded review-state filter deployed as 44094e87 at 18:58 CET
+on 2026-10-26. See
 [the incremental filter design](../designs/DESIGN_PATCHSET_REVIEW_STATE_FILTER.md).
 The dropdown sits directly right of All Lists, before search, with typed
 server-side predicates shared by list/count queries before pagination. It
@@ -218,6 +218,10 @@ scheduling are unchanged. Focused database/API/permissions/URL checks and
 desktop/mobile workflows pass. The full gate passed 1,131 library tests (two
 ignored), 49 main, seven CLI, 26 integration, formatting, and all Clippy profiles.
 The fixture is stopped and the daemon resumed. No model call was needed.
+The release build passed with no new OOM events. An idle checked database backup
+and rollback binary are retained. Live API totals match database counts and the
+live desktop/mobile dropdown correctly shows 98 Reviewed across two pages with
+no page/control overflow. Schema 15 and muted delivery remain unchanged.
 
 Staging membership and attributable human-review classification remain open;
 neither option is fabricated from existing status. A targeted code
