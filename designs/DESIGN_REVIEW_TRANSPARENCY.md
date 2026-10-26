@@ -92,6 +92,13 @@ is silently promoted to actual backend attribution. Unknown old records remain
 unknown after restart or a settings edit. This first step does not implement
 per-stage effective-effort telemetry or confidence calibration.
 
+Incremental confidence contract: verification items may carry confidence with
+score in [0, 1] or null, plus a non-empty evidence/uncertainty rationale. Omission
+remains valid for old records and uncertain assessments. The application, not
+the model, labels provenance as model-reported and uncalibrated. No score changes
+severity, reporting eligibility, verification lineage, or scheduling. Do not
+inherit another candidate's confidence or synthesize it from model identity.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final
@@ -139,8 +146,24 @@ Cards/maps distinguish configured from effective effort; old review 48 displays
 Unknown for both. Tests cover snapshot immutability, supported provider routing,
 proxy replacement, malformed result shape, explicit none, missing values, and
 escaped text. Full make check-pr and desktop/mobile effort-label layout checks
-pass. Backend-confirmed per-stage effort, confidence provenance, and missing-usage
-presentation remain open. Review 48's public API and saved prompt do not contain
-effort; the stored token totals are zero but
-do not establish that its Copilot invocation actually used no tokens. This first
-slice does not invent either missing attribution or confidence.
+pass. This attribution slice was installed on 2026-10-26 at 17:21 CET with
+matching release/installed hashes and a private stopped-database backup.
+
+Optional confidence validation, map projection, and presentation are implemented
+and validated in source, but not yet deployed at the context-switch handoff.
+Verification accepts absent or null confidence; a supplied assessment requires
+a bounded numeric or unknown score and an evidence rationale. The map supplies
+model/stage provenance and labels scores uncalibrated. Old or invalid assessments
+remain unassessed, and raw candidate scores are not inherited. A fake workflow
+test retains a 1% assessment as a final finding with unchanged severity/lineage.
+Focused contract, projection, workflow, and escaping checks pass, as does the
+full make check-pr gate. The final synthetic-confidence browser check passed at
+1,280 and 390 pixels: no page overflow or injected image elements, visible scored
+and historical-unassessed cases, and visible escaped rationale. The temporary
+fixture is stopped; its synthetic score was never written to the live database.
+
+Backend-confirmed per-stage effort and missing-usage presentation remain open.
+Review 48's public API and saved prompt do not contain effort; its stored zero
+token totals do not establish that its Copilot invocation used no tokens. No
+historical effort or confidence was invented, and no new model review was run
+for the transparency/confidence changes.

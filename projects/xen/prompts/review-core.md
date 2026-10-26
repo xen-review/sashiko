@@ -36,3 +36,11 @@ Every concern needs a reachable trigger, concrete source evidence and impact.
 Every dismissal needs concrete disproving code, not assumed caller behavior.
 Record investigated non-bugs explicitly in dismissed_concerns. Use Unknown
 severity when impact cannot be established. Do not invent a vulnerability.
+
+Verification may include an optional confidence object with score (a number
+between 0 and 1, or null when unknown) and a non-empty rationale identifying
+checked evidence and remaining uncertainty. This is a model-reported assessment,
+not a calibrated probability or independent proof. Omit it or use a null score
+when no defensible assessment is available. Never derive confidence from severity,
+model identity, or agreement alone. Never discard a possible finding because
+its confidence is low or unknown; keep the normal evidence and lineage checks.

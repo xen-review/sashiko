@@ -27,6 +27,46 @@ use crate::workflows::guard::sanitize_prompt_relpath;
 use crate::workflows::linux_patch_review::{self, LinuxPatchReviewState};
 use crate::workflows::sashiko_patch_review;
 
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ModelConfidence {
+    pub score: Option<f64>,
+    pub rationale: String,
+}
+
+pub(crate) fn model_confidence(item: &Value) -> Result<Option<ModelConfidence>, String> {
+    let Some(value) = item.get("confidence").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let confidence: ModelConfidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("must contain score (0..1 or null) and rationale: {error}"))?;
+    if confidence
+        .score
+        .is_some_and(|score| !score.is_finite() || !(0.0..=1.0).contains(&score))
+    {
+        return Err("score must be between 0 and 1, or null for unknown".to_string());
+    }
+    if confidence.rationale.trim().is_empty() {
+        return Err(
+            "rationale must be non-empty; state evidence and remaining uncertainty".to_string(),
+        );
+    }
+    Ok(Some(confidence))
+}
+
+fn confidence_metadata(item: &Value, stage: &str) -> Value {
+    match model_confidence(item) {
+        Ok(Some(confidence)) => json!({
+            "score": confidence.score,
+            "rationale": confidence.rationale,
+            "source": "model_reported",
+            "stage": stage,
+            "calibrated": false,
+        }),
+        _ => Value::Null,
+    }
+}
+
 fn push_unique(list: &mut Vec<String>, val: &str) {
     let trimmed = val.trim();
     if !trimmed.is_empty() && !list.iter().any(|existing| existing == trimmed) {
@@ -420,6 +460,7 @@ fn build_threads(state: &LinuxPatchReviewState) -> Vec<Value> {
         threads.push(json!({
             "outcome": outcome,
             "title": item_title(vf),
+            "confidence": confidence_metadata(vf, "verification"),
             "type": item_type(vf, state),
             "severity": item_severity(vf, &state.hard_cases),
             "preexisting": preexisting,
@@ -471,6 +512,7 @@ fn build_threads(state: &LinuxPatchReviewState) -> Vec<Value> {
         threads.push(json!({
             "outcome": outcome,
             "title": item_title(pvf),
+            "confidence": confidence_metadata(pvf, pv_stage.unwrap_or("post-verification")),
             "type": item_type(pvf, state),
             "severity": item_severity(pvf, &state.hard_cases),
             "preexisting": preexisting,
@@ -509,6 +551,7 @@ fn build_threads(state: &LinuxPatchReviewState) -> Vec<Value> {
         threads.push(json!({
             "outcome": "refuted_hard_case",
             "title": item_title(pvd),
+            "confidence": confidence_metadata(pvd, pv_stage.unwrap_or("post-verification")),
             "type": item_type(pvd, state),
             "severity": item_severity(pvd, &state.hard_cases),
             "preexisting": false,
@@ -541,6 +584,7 @@ fn build_threads(state: &LinuxPatchReviewState) -> Vec<Value> {
         threads.push(json!({
             "outcome": "unresolved_hard_case",
             "title": item_title(hc),
+            "confidence": confidence_metadata(hc, "verification"),
             "type": item_type(hc, state),
             "severity": item_severity(hc, &state.hard_cases),
             "preexisting": hc.get("preexisting").and_then(Value::as_bool).unwrap_or(false),
@@ -568,6 +612,7 @@ fn build_threads(state: &LinuxPatchReviewState) -> Vec<Value> {
         threads.push(json!({
             "outcome": "dismissed_1b",
             "title": item_title(vd),
+            "confidence": confidence_metadata(vd, "verification"),
             "type": item_type(vd, state),
             "severity": "",
             "preexisting": false,
@@ -715,6 +760,56 @@ pub fn build_review_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_confidence_retains_unknown_and_rejects_invented_provenance() {
+        assert_eq!(model_confidence(&json!({})).unwrap(), None);
+        assert_eq!(model_confidence(&json!({"confidence":null})).unwrap(), None);
+        let unknown = model_confidence(&json!({"confidence":{"score":null,"rationale":"The build configuration is not established."}})).unwrap().unwrap();
+        assert_eq!(unknown.score, None);
+        for score in [0.0, 0.25, 1.0] {
+            assert_eq!(model_confidence(&json!({"confidence":{"score":score,"rationale":"Checked the active macro and caller."}})).unwrap().unwrap().score, Some(score));
+        }
+        for value in [
+            json!({"score":1.1,"rationale":"Checked."}),
+            json!({"score":-0.1,"rationale":"Checked."}),
+            json!({"score":"high","rationale":"Checked."}),
+            json!({"score":0.5,"rationale":" "}),
+            json!({"score":0.5,"rationale":"Checked.","source":"human_verified"}),
+        ] {
+            assert!(model_confidence(&json!({"confidence":value})).is_err());
+        }
+    }
+
+    #[test]
+    fn confidence_projection_preserves_low_scores_without_inheriting_raw_assessments() {
+        let mut state = LinuxPatchReviewState {
+            all_concerns: vec![
+                json!({"id":"C1", "confidence":{"score":1.0,"rationale":"Initial assumption."}}),
+            ],
+            verification_findings: vec![json!({
+                "id":"VF1", "source_ids":["C1"], "problem":"A reachable candidate.", "preexisting":true,
+                "confidence":{"score":0.01,"rationale":"The exact configuration remains uncertain."},
+            })],
+            ..Default::default()
+        };
+        let threads = build_threads(&state);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0]["outcome"], "preexisting_concern");
+        assert_eq!(threads[0]["confidence"]["score"], 0.01);
+        assert_eq!(threads[0]["confidence"]["source"], "model_reported");
+        assert_eq!(threads[0]["confidence"]["stage"], "verification");
+        assert_eq!(threads[0]["confidence"]["calibrated"], false);
+        state.verification_findings[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("confidence");
+        assert!(build_threads(&state)[0]["confidence"].is_null());
+        state.verification_findings[0]["confidence"] =
+            json!({"score":2.0,"rationale":"Invalid legacy value."});
+        assert!(build_threads(&state)[0]["confidence"].is_null());
+        assert_eq!(build_threads(&state)[0]["outcome"], "preexisting_concern");
+    }
 
     #[test]
     fn test_build_review_map_sorts_threads_and_computes_stage_bounds() {

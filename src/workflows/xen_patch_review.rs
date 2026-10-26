@@ -152,6 +152,8 @@ fn validate_verified(output: &VerifiedOutput, state: &LinuxPatchReviewState) -> 
                     "{collection}[{index}] must include concrete proving locations"
                 ));
             }
+            crate::workflows::review_map::model_confidence(item)
+                .map_err(|error| format!("{collection}[{index}].confidence {error}"))?;
             let locations = item["locations"]
                 .as_array()
                 .ok_or("locations must be an array")?;
@@ -479,7 +481,7 @@ mod tests {
                         .is_some_and(|text| text.contains("Independently verify every input"))
                 });
                 let content = if verifying {
-                    json!({"findings": [{"source_ids": ["C1"], "problem": "common: unchecked value", "severity": "Medium", "severity_explanation": "Guest input reaches the unchecked operation.", "preexisting": false, "locations": [location]}], "dismissed_concerns": []})
+                    json!({"findings": [{"source_ids": ["C1"], "problem": "common: unchecked value", "severity": "Medium", "severity_explanation": "Guest input reaches the unchecked operation.", "preexisting": false, "locations": [location], "confidence":{"score":0.01,"rationale":"Reachability still needs an executable configuration check."}}], "dismissed_concerns": []})
                 } else {
                     json!({"concerns": [{"type": "bounds", "description": "Unchecked guest value", "reasoning": "The guest controls value.", "preexisting": false, "locations": [location]}], "dismissed_concerns": []})
                 };
@@ -531,5 +533,25 @@ mod tests {
         assert_eq!(state.findings[0]["stage_item_id"], "VF1");
         assert_eq!(state.project, "xen");
         assert_eq!(state.findings[0]["source_ids"], json!(["C1"]));
+        assert_eq!(state.findings[0]["confidence"]["score"], 0.01);
+        let map = crate::workflows::review_map::build_review_map(
+            crate::project::ProjectId::Xen,
+            &state,
+            &[],
+            0,
+        );
+        assert_eq!(map["threads"][0]["outcome"], "finding");
+        assert_eq!(map["threads"][0]["confidence"]["score"], 0.01);
+        assert_eq!(map["threads"][0]["confidence"]["calibrated"], false);
+        let mut invalid = VerifiedOutput {
+            findings: state.verification_findings.clone(),
+            dismissed_concerns: vec![],
+        };
+        invalid.findings[0]["confidence"]["score"] = json!(2.0);
+        assert!(
+            validate_verified(&invalid, &state)
+                .unwrap_err()
+                .contains("confidence")
+        );
     }
 }

@@ -56,8 +56,14 @@ provider/model/configured effort in workflow output at the real parent backend,
 not its stdio worker proxy, and shows configured versus effective effort in
 cards/maps. Historical missing effort and unconfirmed effective effort remain
 Unknown. Snapshot/proxy/provider/escaping tests, full make check-pr, and narrow
-desktop/mobile label checks pass. Backend-confirmed per-stage effort, confidence,
-and missing usage remain open; see the report for browser limits.
+desktop/mobile label checks pass. This configured-effort slice is deployed.
+Optional model confidence with score/rationale, application-owned provenance,
+uncalibrated labels, and historical-unassessed fallback is validated in source
+but not deployed at the context-switch handoff. Contract, projection, fake
+workflow, escaping, full make check-pr, and final desktop/mobile fixture checks
+pass; even a 1% assessment remains a finding, not a filter. The fixture is stopped
+and no synthetic score entered the live database. Backend-confirmed per-stage
+effort and missing usage remain open; see the report for browser limits.
 
 ### P1: Budget-Gated Premium Model Comparisons
 
