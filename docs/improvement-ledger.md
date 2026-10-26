@@ -258,10 +258,16 @@ and all Clippy profiles. Schema-16 atomic evidence storage is now implemented
 in source, with a subsequent full gate passing 1,138 library tests (two ignored)
 and the same main/CLI/integration counts. It bounds mailed-patch publication,
 retains immutable cache identities and historical snapshots, invalidates stale,
-failed, or changed-source evidence, and never changes review state. Sync
-integration and classification UI/filtering remain pending. No live ref fetch,
-migration, history scan, model
-call, or live classification ran; ordinary reviews and scheduling are unchanged.
+failed, or changed-source evidence, and never changes review state. Optional
+integration now uses the existing GitSyncWorker only, requiring a real successful
+covering fetch and invalidating failed/skipped refreshes or moved tips. Batched
+saved-evidence retrieval and a per-patch provenance disclosure are implemented
+for both detail routes. The current full gate passes 1,139 library tests (two
+ignored), 49 main, seven CLI and 27 integration tests plus formatting and all
+Clippy profiles. Synthetic API and escaping checks pass; browser layout, series
+aggregation, paginated staging filters and exact ancestry remain pending. The
+installed runtime remains on schema 15, with no live staging scan, migration or
+feature-specific model call. Ordinary scheduling and muted delivery are unchanged.
 
 Goal: detect and display when an individual patch is already incorporated into
 the configured upstream reference. For Xen, prefer the upstream `staging` branch

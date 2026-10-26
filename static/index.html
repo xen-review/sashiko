@@ -4027,6 +4027,7 @@
                         <h3 style="display:flex; justify-content:space-between;">
                             <span>${header}</span>
                         </h3>
+                        ${renderStagingEvidence(patch?.staging_evidence)}
                         ${statusHtml}
                         ${listHtml}
                     </div>
@@ -4436,6 +4437,25 @@
                     <div class="log-block" style="max-height: none;">${escapeHtml(logContent)}</div>
                 </div>
             `;
+        }
+
+        function renderStagingEvidence(evidence) {
+            if (!evidence || typeof evidence !== 'object') return '';
+            const labels = {matched_history: 'Patch-ID match in staging history', no_match_in_checked_range: 'No match in checked range', stale: 'Stale staging evidence', unknown: 'Staging membership unknown'};
+            const label = labels[evidence.state] || labels.unknown;
+            const commits = Array.isArray(evidence.matched_commits) ? evidence.matched_commits : [];
+            return `<details style="margin:8px 0;overflow-wrap:anywhere;min-width:0;">
+                <summary>${escapeHtml(label)}</summary>
+                <div class="text-muted-sm" style="margin-top:6px;overflow-wrap:anywhere;">
+                    <div>Target: <code>${escapeHtml(evidence.target_ref || 'Unknown')}</code></div>
+                    <div>Tip: <code>${escapeHtml(evidence.tip || 'Unknown')}</code></div>
+                    <div>Refreshed: ${evidence.refreshed_at ? escapeHtml(formatDate(evidence.refreshed_at)) : 'Unknown'} &middot; Checked: ${evidence.checked_at ? escapeHtml(formatDate(evidence.checked_at)) : 'Unknown'}</div>
+                    <div>History scope: ${evidence.scope_complete === true ? 'All reachable commits enumerated' : 'Bounded or unknown'}</div>
+                    ${evidence.match_kind === 'stable_patch_id' ? '<div>Evidence: stable Git patch-ID equivalence</div>' : ''}
+                    ${commits.length ? `<div>Matching commits: ${commits.map(commit => `<code>${escapeHtml(String(commit))}</code>`).join(', ')}</div>` : ''}
+                    <div>${escapeHtml(evidence.reason || 'No current evidence')}</div>
+                </div>
+            </details>`;
         }
 
         function renderReviewConfidence(confidence, showRationale = false) {

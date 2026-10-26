@@ -152,7 +152,22 @@ The full integration gate passed 1,139 library tests (two ignored), 49 main,
 seven CLI, 26 integration, formatting, and all Clippy profiles. The installed
 daemon was resumed; schema 16 and this hook have not been deployed.
 
-Exact-ancestry matching, batched API retrieval, and UI/filter classification
-remain pending. The runtime is unchanged; there has been no live
-repository scan, fetch, migration, or model call for this feature. Do not infer
-feature rollout from the configuration or storage types alone.
+Batched read-only retrieval and per-patch provenance UI are now implemented in
+source. Both full details and the lightweight paginated summary attach at most
+100 requested patches in one evidence query, without Git work in HTTP handlers.
+Disabled configuration leaves responses unchanged. Optional loading failures
+retain the detail response with typed Unknown evidence, and public output omits
+the canonical repository path. A real-router test covers both routes, pagination,
+fresh/stale/invalidated/changed-source evidence, unavailable paths, and unchanged
+Reviewed status. The UI uses a compact escaped disclosure with target, tip,
+refresh/check times, scope, matching commits and limitations. Inline scripts parse,
+and all four state labels and hostile-value escaping pass. The full gate passed
+1,139 library tests (two ignored), 49 main, seven CLI, 27 integration, formatting,
+and all Clippy profiles. Browser layout verification has not yet run.
+
+Exact-ancestry matching, series aggregation and paginated classification filters
+remain pending. The installed runtime is unchanged on schema 15; there has been
+no live staging scan, feature-specific fetch, migration or model call. Do not
+infer rollout from source types or the synthetic API fixture. The normal daemon
+was resumed after the full gate and started a newly ingested bzimage review;
+leave that active review undisturbed.

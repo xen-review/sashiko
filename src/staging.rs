@@ -234,6 +234,26 @@ pub struct PatchEvidence {
     pub reason: Option<String>,
 }
 
+impl PatchEvidence {
+    pub fn unknown(patch_id: i64, settings: &StagingSettings, reason: &str) -> Self {
+        Self {
+            patch_id,
+            state: MembershipState::Unknown,
+            target_ref: settings.target_ref.clone(),
+            remote: settings.remote.clone(),
+            algorithm_version: INDEX_VERSION,
+            source_identity: None,
+            match_kind: None,
+            tip: None,
+            refreshed_at: None,
+            checked_at: None,
+            scope_complete: false,
+            matched_commits: Vec::new(),
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
@@ -338,73 +358,90 @@ impl crate::db::Database {
         patch_id: i64,
         now: i64,
     ) -> Result<PatchEvidence> {
-        let mut result = PatchEvidence {
-            patch_id,
-            state: MembershipState::Unknown,
-            target_ref: settings.target_ref.clone(),
-            remote: settings.remote.clone(),
-            algorithm_version: INDEX_VERSION,
-            source_identity: None,
-            match_kind: None,
-            tip: None,
-            refreshed_at: None,
-            checked_at: None,
-            scope_complete: false,
-            matched_commits: Vec::new(),
-            reason: Some("No current evidence".to_string()),
-        };
-        let mut rows = self.conn.query("SELECT s.id, s.tip, s.refreshed_at, s.checked_at, s.scope_complete, t.last_failure, e.source_identity, p.git_patch_id, e.patch_id, s.algorithm_version FROM staging_targets t LEFT JOIN staging_snapshots s ON s.id = t.snapshot_id LEFT JOIN staging_patch_evidence e ON e.snapshot_id = s.id AND e.patch_id = ? LEFT JOIN patches p ON p.id = e.patch_id WHERE t.repository = ? AND t.remote = ? AND t.target_ref = ?",
-            libsql::params![patch_id, repository, settings.remote.as_str(), settings.target_ref.as_str()]).await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(result);
-        };
-        result.tip = row.get(1)?;
-        result.refreshed_at = row.get(2)?;
-        result.checked_at = row.get(3)?;
-        result.scope_complete = row.get::<Option<i64>>(4)?.is_some_and(|value| value != 0);
-        if let Some(reason) = row.get::<Option<String>>(5)? {
-            result.reason = Some(reason);
-            return Ok(result);
-        }
-        if row.get::<Option<i64>>(9)? != Some(i64::from(INDEX_VERSION)) {
-            return Ok(result);
-        }
-        let Some(refreshed) = result.refreshed_at else {
-            return Ok(result);
-        };
-        if now < refreshed
-            || now.saturating_sub(refreshed) > i64::try_from(settings.freshness_seconds)?
-        {
-            result.state = MembershipState::Stale;
-            result.reason =
-                Some("Successful refresh is stale or the clock moved backwards".to_string());
-            return Ok(result);
-        }
-        let source: Option<String> = row.get(6)?;
-        result.source_identity = source.clone();
-        if source.is_none() || source != row.get::<Option<String>>(7)? {
-            result.reason =
-                Some("Patch identity is unavailable or changed since this check".to_string());
-            return Ok(result);
-        }
-        let mut matches = self.conn.query("SELECT commit_id FROM staging_snapshot_commits WHERE snapshot_id = ? AND patch_identity = ? ORDER BY commit_id",
-            libsql::params![row.get::<i64>(0)?, source]).await?;
-        while let Some(matched) = matches.next().await? {
-            result.matched_commits.push(matched.get(0)?);
-        }
-        if result.matched_commits.is_empty() {
-            result.state = MembershipState::NoMatchInCheckedRange;
-            result.reason = Some("No textual patch-ID match in the checked range; not proof of absence or an effective change".to_string());
-        } else {
-            result.state = MembershipState::MatchedHistory;
-            result.match_kind = Some(MatchKind::StablePatchId);
-            result.reason = Some(
-                "Diff-equivalent commit reachable at the checked tip; may have been reverted"
-                    .to_string(),
-            );
-        }
-        Ok(result)
+        self.staging_patch_evidence_batch(repository, settings, &[patch_id], now)
+            .await?
+            .pop()
+            .context("staging evidence batch omitted a requested patch")
     }
+
+    pub async fn staging_patch_evidence_batch(
+        &self,
+        repository: &str,
+        settings: &StagingSettings,
+        patch_ids: &[i64],
+        now: i64,
+    ) -> Result<Vec<PatchEvidence>> {
+        ensure!(
+            patch_ids.len() <= 100,
+            "staging evidence pages are limited to 100 patches"
+        );
+        if patch_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let requested = serde_json::to_string(patch_ids)?;
+        let mut rows = self.conn.query("SELECT requested.value, s.id, s.tip, s.refreshed_at, s.checked_at, s.scope_complete, t.last_failure, e.source_identity, p.git_patch_id, s.algorithm_version,
+            (SELECT json_group_array(commit_id) FROM staging_snapshot_commits c WHERE c.snapshot_id = s.id AND c.patch_identity = e.source_identity)
+            FROM json_each(?) requested
+            LEFT JOIN staging_targets t ON t.repository = ? AND t.remote = ? AND t.target_ref = ?
+            LEFT JOIN staging_snapshots s ON s.id = t.snapshot_id
+            LEFT JOIN staging_patch_evidence e ON e.snapshot_id = s.id AND e.patch_id = requested.value
+            LEFT JOIN patches p ON p.id = requested.value ORDER BY requested.key",
+            libsql::params![requested, repository, settings.remote.as_str(), settings.target_ref.as_str()]).await?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().await? {
+            results.push(project_evidence(&row, settings, now)?);
+        }
+        Ok(results)
+    }
+}
+
+fn project_evidence(
+    row: &libsql::Row,
+    settings: &StagingSettings,
+    now: i64,
+) -> Result<PatchEvidence> {
+    let mut result = PatchEvidence::unknown(row.get(0)?, settings, "No current evidence");
+    result.tip = row.get(2)?;
+    result.refreshed_at = row.get(3)?;
+    result.checked_at = row.get(4)?;
+    result.scope_complete = row.get::<Option<i64>>(5)?.is_some_and(|value| value != 0);
+    if let Some(reason) = row.get::<Option<String>>(6)? {
+        result.reason = Some(reason);
+        return Ok(result);
+    }
+    if row.get::<Option<i64>>(9)? != Some(i64::from(INDEX_VERSION)) {
+        return Ok(result);
+    }
+    let Some(refreshed) = result.refreshed_at else {
+        return Ok(result);
+    };
+    if now < refreshed || now.saturating_sub(refreshed) > i64::try_from(settings.freshness_seconds)?
+    {
+        result.state = MembershipState::Stale;
+        result.reason =
+            Some("Successful refresh is stale or the clock moved backwards".to_string());
+        return Ok(result);
+    }
+    let source: Option<String> = row.get(7)?;
+    result.source_identity = source.clone();
+    if source.is_none() || source != row.get::<Option<String>>(8)? {
+        result.reason =
+            Some("Patch identity is unavailable or changed since this check".to_string());
+        return Ok(result);
+    }
+    result.matched_commits = serde_json::from_str(&row.get::<String>(10)?)?;
+    if result.matched_commits.is_empty() {
+        result.state = MembershipState::NoMatchInCheckedRange;
+        result.reason = Some("No textual patch-ID match in the checked range; not proof of absence or an effective change".to_string());
+    } else {
+        result.state = MembershipState::MatchedHistory;
+        result.match_kind = Some(MatchKind::StablePatchId);
+        result.reason = Some(
+            "Diff-equivalent commit reachable at the checked tip; may have been reverted"
+                .to_string(),
+        );
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -483,6 +520,14 @@ mod tests {
         let first = db
             .publish_staging_snapshot("repo", &settings, &snapshot, 90, 100)
             .await?;
+        let batch = db
+            .staging_patch_evidence_batch("repo", &settings, &[1, 999], 100)
+            .await?;
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].patch_id, 1);
+        assert_eq!(batch[0].state, MembershipState::MatchedHistory);
+        assert_eq!(batch[1].patch_id, 999);
+        assert_eq!(batch[1].state, MembershipState::Unknown);
         assert_eq!(
             db.staging_patch_evidence("repo", &settings, 1, 100)
                 .await?

@@ -72,6 +72,10 @@ struct TestServer {
 /// [`TestServer`] goes out of scope (the task is detached, so cleanup is
 /// automatic when the tokio runtime shuts down).
 async fn spawn_test_server(read_only: bool) -> TestServer {
+    spawn_test_server_with_settings(test_settings(read_only)).await
+}
+
+async fn spawn_test_server_with_settings(settings: Settings) -> TestServer {
     let db_settings = DatabaseSettings {
         url: ":memory:".to_string(),
         token: String::new(),
@@ -82,7 +86,7 @@ async fn spawn_test_server(read_only: bool) -> TestServer {
     let (event_tx, event_rx) = mpsc::channel::<Event>(100);
     let (fetch_tx, _fetch_rx) = mpsc::channel::<FetchRequest>(100);
 
-    let settings = Arc::new(test_settings(read_only));
+    let settings = Arc::new(settings);
     let app = build_router(
         settings,
         Arc::clone(&db),
@@ -492,6 +496,145 @@ async fn test_patchset_review_state_filter_counts_pages_and_cache_isolation() {
     let restored: Value = get("").await.json().await.unwrap();
     assert_eq!(restored["total"], 4);
     assert_eq!(restored["items"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn test_patchset_staging_evidence_is_batched_paginated_and_read_only() {
+    use sashiko::staging::{CommitIdentity, INDEX_VERSION, IndexEntry, StagingSnapshot};
+    let repo = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(false);
+    settings.git.repository_path = repo.path().to_string_lossy().into_owned();
+    let staging: sashiko::settings::StagingSettings =
+        toml::from_str("remote='upstream'\ntarget_ref='refs/remotes/upstream/staging'").unwrap();
+    settings.git.staging = Some(staging.clone());
+    let server = spawn_test_server_with_settings(settings).await;
+    server.db.conn.execute_batch("INSERT INTO patchsets (id, status, subject, date, total_parts, received_parts) VALUES (1, 'Reviewed', 'saved series', 100, 2, 2);
+        INSERT INTO messages (message_id, subject) VALUES ('evidence-1@example.invalid', 'first'), ('evidence-2@example.invalid', 'second');
+        INSERT INTO patches (id, patchset_id, message_id, part_index, git_patch_id) VALUES (1,1,'evidence-1@example.invalid',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), (2,1,'evidence-2@example.invalid',2,NULL);").await.unwrap();
+    let repository = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let now = chrono::Utc::now().timestamp();
+    let snapshot = StagingSnapshot {
+        target_ref: staging.target_ref.clone(),
+        tip: "b".repeat(40),
+        algorithm_version: INDEX_VERSION,
+        scope_complete: false,
+        diff_bytes: 0,
+        entries: vec![IndexEntry {
+            commit: "c".repeat(40),
+            identity: CommitIdentity::Text {
+                patch_id: "a".repeat(40),
+            },
+        }],
+    };
+    server
+        .db
+        .publish_staging_snapshot(&repository, &staging, &snapshot, now, now)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let get = |page: u32| {
+        let client = client.clone();
+        let url = format!(
+            "{}/api/patchset?id=1&per_page=1&page={page}",
+            server.base_url
+        );
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let first = get(1).await;
+    assert_eq!(first["status"], "Reviewed");
+    assert_eq!(first["patches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        first["patches"][0]["staging_evidence"]["state"],
+        "matched_history"
+    );
+    assert_eq!(
+        first["patches"][0]["staging_evidence"]["match_kind"],
+        "stable_patch_id"
+    );
+    assert_eq!(
+        first["patches"][0]["staging_evidence"]["tip"],
+        "b".repeat(40)
+    );
+    assert_eq!(first["staging"]["page_only"], true);
+    let full: serde_json::Value = client
+        .get(format!("{}/api/patch?id=1&per_page=1", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        full["patches"][0]["staging_evidence"]["state"],
+        "matched_history"
+    );
+    let second = get(2).await;
+    assert_eq!(second["patches"][0]["id"], 2);
+    assert_eq!(second["patches"][0]["staging_evidence"]["state"], "unknown");
+    let old = now - i64::try_from(staging.freshness_seconds).unwrap() - 10;
+    server
+        .db
+        .publish_staging_snapshot(&repository, &staging, &snapshot, old, old)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(1).await["patches"][0]["staging_evidence"]["state"],
+        "stale"
+    );
+    server
+        .db
+        .publish_staging_snapshot(&repository, &staging, &snapshot, now, now)
+        .await
+        .unwrap();
+    server
+        .db
+        .conn
+        .execute(
+            "UPDATE patches SET git_patch_id = ? WHERE id = 1",
+            libsql::params!["d".repeat(40)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        get(1).await["patches"][0]["staging_evidence"]["state"],
+        "unknown"
+    );
+    server
+        .db
+        .invalidate_staging_target(&repository, &staging, "Refresh failed", now)
+        .await
+        .unwrap();
+    let invalidated = get(1).await;
+    assert_eq!(
+        invalidated["patches"][0]["staging_evidence"]["state"],
+        "unknown"
+    );
+    assert_eq!(invalidated["status"], "Reviewed");
+    assert!(!first.to_string().contains(&repository));
+    assert!(!repo.path().join(".git").exists());
+    std::fs::remove_dir(repo.path()).unwrap();
+    let unavailable = get(1).await;
+    assert_eq!(unavailable["status"], "Reviewed");
+    assert_eq!(
+        unavailable["patches"][0]["staging_evidence"]["state"],
+        "unknown"
+    );
+    assert_eq!(
+        unavailable["patches"][0]["staging_evidence"]["reason"],
+        "Saved staging evidence unavailable"
+    );
 }
 
 #[tokio::test]

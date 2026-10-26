@@ -1040,6 +1040,56 @@ async fn attach_patchset_flags(
     Ok(())
 }
 
+async fn attach_staging_evidence(
+    state: &AppState,
+    details: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(settings) = &state.settings.git.staging else {
+        return Ok(());
+    };
+    details["staging"] = serde_json::json!({"target_ref": settings.target_ref, "remote": settings.remote, "page_only": true});
+    if let Some(patches) = details["patches"].as_array_mut() {
+        for patch in patches {
+            if let Some(id) = patch["id"].as_i64() {
+                patch["staging_evidence"] =
+                    serde_json::to_value(crate::staging::PatchEvidence::unknown(
+                        id,
+                        settings,
+                        "Saved staging evidence unavailable",
+                    ))?;
+            }
+        }
+    }
+    let repository = tokio::fs::canonicalize(&state.settings.git.repository_path)
+        .await?
+        .to_string_lossy()
+        .into_owned();
+    let patch_ids = details["patches"]
+        .as_array()
+        .map(|patches| {
+            patches
+                .iter()
+                .filter_map(|patch| patch["id"].as_i64())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let evidence = state
+        .db
+        .staging_patch_evidence_batch(
+            &repository,
+            settings,
+            &patch_ids,
+            chrono::Utc::now().timestamp(),
+        )
+        .await?;
+    if let Some(patches) = details["patches"].as_array_mut() {
+        for (patch, item) in patches.iter_mut().zip(evidence) {
+            patch["staging_evidence"] = serde_json::to_value(item)?;
+        }
+    }
+    Ok(())
+}
+
 async fn get_patchset(
     auth: crate::auth::OptionalAuthUser,
     OptionalPrincipal(principal): OptionalPrincipal,
@@ -1081,6 +1131,12 @@ async fn get_patchset(
             )
             .await?;
             redact_embedded_bugs(&state, &principal, &mut details).await?;
+            if let Err(error) = attach_staging_evidence(&state, &mut details).await {
+                warn!(
+                    "Optional staging evidence unavailable: {}",
+                    crate::utils::redact_secret(&error.to_string())
+                );
+            }
             Ok(Json(details))
         }
         Ok(None) => {
@@ -1192,6 +1248,12 @@ async fn get_patchset_summary(
             )
             .await?;
             attach_active_review_progress(&mut details, &state.review_progress);
+            if let Err(error) = attach_staging_evidence(&state, &mut details).await {
+                warn!(
+                    "Optional staging evidence unavailable: {}",
+                    crate::utils::redact_secret(&error.to_string())
+                );
+            }
             Ok(Json(details))
         }
         Ok(None) => {

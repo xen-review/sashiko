@@ -21,10 +21,20 @@ in source using the existing GitSyncWorker only. It requires an actual successfu
 fetch and a covering refspec, records the fetch time, bounds indexing/publication,
 and invalidates failed/skipped refreshes or moved tips. Its gate passed 1,139
 library tests (two ignored), 49 main, seven CLI, 26 integration, formatting, and
-all Clippy profiles. The daemon is resumed on the unchanged schema-15 binary.
-Batched API retrieval and UI/filter wiring remain pending; no live migration,
-fetch/history scan,
-model call, or scheduling change has been made. Remote inspection
+all Clippy profiles. Batched API retrieval and per-patch provenance UI are also
+implemented in source. Both summary/full routes use one bounded saved-evidence
+query, leave disabled responses unchanged, preserve Unknown on optional failures,
+and expose no canonical repository path. The real-router regression covers
+pagination, stale/changed/failed evidence and preserved review state. The full
+API gate passed 1,139 library tests (two ignored), 49 main, seven CLI and 27
+integration tests, formatting and all Clippy profiles. Inline script parsing,
+state labels and hostile-value escaping pass; browser layout remains unverified.
+Series aggregation, paginated classification filters and exact ancestry remain
+pending. At 23:15 CET the daemon is resumed on the unchanged schema-15 binary
+and actively reviewing the newly ingested v2 bzimage payload-boundary patch;
+implementation/security finished. Do not interrupt that review for deployment.
+No live staging migration, feature-specific fetch/history scan, model call, or
+scheduling change has been made. Remote inspection
 confirms origin is https://github.com/xen-review/xen.git and upstream is the
 Xenbits repository; their staging tips differ, so silently choosing origin
 would be wrong for the proposed target. Do not infer freshness from commit dates.
