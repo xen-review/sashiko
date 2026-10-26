@@ -5,20 +5,24 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Handoff
 
-Authoritative resume summary at 15:36 CET on 2026-10-26. Older milestone and
+Authoritative resume summary at 16:05 CET on 2026-10-26. Older milestone and
 resume entries below are historical evidence, not current quota readings or
 deployment claims. The user switched the coding chat provider; do not
 infer daemon authentication, billing, quota, or model from that switch.
 
-- Last delivered UI commit: 4cbed0e1, signed and pushed to
+- Last code commit: 63649823 (supported sequential opt-in), following 738d5be3
+  local dispatch, 5ddb8d3f daemon dispatch, and 4cbed0e1 UI, signed and pushed to
   origin/add-xen-support. Work in the clean detached implementation worktree
   /tmp/sashiko-improvements-20261026. Main contains unrelated untracked user
   agents/skills/CI files; preserve them and never stage or revert them.
-- Installed binary remains 82905979, with timeout profiles. Live database schema
-  is 14; checkpoint migration 15 and subsequent source changes are not deployed.
-  Runtime uses Codex gpt-6-luna/medium with muted outbound delivery. The service
-  was stopped at an idle boundary for required checks and must be resumed after
-  delivery. Latest check: 95 Reviewed, no Pending or In Review series.
+- Installed release now matches 63649823; SHA-256
+  8c6f53b96a39c67e0f8a2a75ab950ea6f8b4293b7d3cd0784db9b3de47e6c9c0.
+  Live schema 15 migrated successfully, quick_check passed, API healthy, and
+  service active (PID 952894). No checkpoint session was inserted by rollout.
+  Runtime remains workflow, Codex gpt-6-luna/medium, muted delivery/no SMTP.
+  Latest check: 95 Reviewed, no Pending or In Review series. Message ingestion
+  advanced to 4,045; no new post-deployment review throughput is claimed while
+  the queue is empty.
   Do not cancel a later active review just to repeat checks.
 - Completed source: migration 15; atomic invocation snapshots, ordered checkpoint
   artifacts and disjoint call interactions; terminal success/failure/cancellation;
@@ -58,11 +62,14 @@ infer daemon authentication, billing, quota, or model from that switch.
   bypasses independent per-patch worker counts. Leave those counts unchanged
   rather than conflate unverified harness artifacts with independently verified
   workflow completion or embargo-clean classification. Next finish enablement
-  gates, then back up and deploy schema 15 without changing runtime mode.
-- Before installing schema 15, stop at a safe boundary, verify workers exited,
-  back up the database, and run required checks. Scheduled/external service
-  starts have occurred during previous maintenance; recheck actual processes.
-  Do not deploy an unfinished sequential feature or claim source is installed.
+  gates and deployment are complete. Next run a bounded real comparison only
+  after fresh authenticated quota and no-AI input preparation.
+- Stopped private backups are outside git under the Xen data directory's backups:
+  before-checkpoints-20261026-1604.db (quick_check passed) and rollback binary
+  sashiko-before-checkpoints-20261026-1557. A previous 15:57 database snapshot is
+  also retained. Scheduled/external starts occurred during build preparation;
+  stop only at an idle boundary and verify actual processes before foreground
+  tests/reviews. No active model call was cancelled for this rollout.
 - Workspace search tools search main by default. For uncommitted implementation
   code, read its absolute path or run targeted rg in the implementation worktree;
   otherwise line numbers and content can misleadingly reflect the older checkout.
@@ -80,11 +87,21 @@ subscription trials require a fresh authenticated strictly-above-50% five-hour
 reading before every new call, verified exact models, sufficient weekly/time
 reserve, low/medium starts, and a high effort cap. No metered billing or paid
 overages. Last trial readings at 14:01 CET were 100%/86% with reset near 19:01
-CET; they are stale now. Re-read rather than assuming a reset or allowance.
+CET; they are historical. A fresh subscription-backed account reading at
+16:05:34 CET reports 72% five-hour and 81% weekly remaining, five-hour reset
+19:01:38 CET. These are shared-account percentages, not exact remaining token
+counts or isolated Sashiko consumption. Re-read before later calls as needed.
 Terra/low and GPT-5.6 Sol/low exact-prompt format replays passed, but returned
 empty arrays versus Luna/medium's evidence-backed dismissal. Lower output is
 not equivalent review quality or justification for broad Sol use. Artifacts
 remain under /tmp/sashiko-effort-trial-20261026; daemon default was not changed.
+
+Recommended comparison route: reuse an already-reviewed three-patch libxenstat
+series and its saved baseline, original message identities, identical instruction
+snapshot, Luna/medium model, and explicit cumulative limits. Prepare with no AI
+first; do not requeue the live series, ingest more work, post drafts, or modify
+the daemon's workflow default. The first comparison is exploratory evidence,
+not proof of equal quality, cost reduction, or justification for switching modes.
 
 Other ledger work remains: staging merge/status filtering, live/final usage,
 configurable quota hysteresis, and durable subscription-exhaustion deferral.
