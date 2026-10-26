@@ -74,6 +74,12 @@ by default. This policy is separate from the coding assistant's model setting.
 
 ## Cache and Correctness Gates
 
+- Implemented: harness tool definitions and response instructions now live in
+  the fixed system prefix, before append-only conversation history. A fake
+  provider checks that the complete serialized prompt from one tool turn is an
+  exact prefix of the next, with one copy of the tool catalog. Existing workflow
+  CLI prompts retain their ordering. This establishes input stability only;
+  actual provider cache hits and review quality still require measurement.
 - Retained history is not free input. Cached tokens still count in reported
   input thresholds; provider cache availability and retention are not guaranteed.
 - Keep system instructions, tool declarations, and prior messages byte-stable
@@ -92,6 +98,21 @@ by default. This policy is separate from the coding assistant's model setting.
   model generations when the backend may perform internal turns.
 
 ## Resume Notes
+
+Deployment: f6213600 installed with four build jobs after deterministic checks.
+The stopped database was backed up outside the repository before migration to
+schema 14. API health returned 200 and a normal Luna/low workflow completed
+patch 2 of the nospec always_inline series. Patch 3 began preparation before
+the stop completed, so it was interrupted rather than untouched. A separate
+12:00 service start resumed normal workflow; it was not an automatic crash
+restart. The later test stop used another completed-patch boundary. Runtime
+harness mode has not been enabled and no real harness trial has run.
+
+Quota observations (CET): 63% remaining at 10:32, 54% at 10:52, 44% at 11:22,
+29% at 11:48, and 25% at 11:57; reset reported for 14:00. Coding and daemon
+reviews share the account, so these samples do not isolate either consumer's
+cost. Pause new review work to retain a debugging reserve, re-read quota before
+resuming, and do not assume a reset or promise an unattended resume watcher.
 
 Work in the clean detached implementation worktree
 /tmp/sashiko-improvements-20261026. The main checkout contains unrelated user

@@ -37,7 +37,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ai::{
-    AiErrorClass, AiProvider, AiRequest, AiResponse, AiRole, AiUsage, ClassifyAiError,
+    AiErrorClass, AiProvider, AiRequest, AiResponse, AiRole, AiTool, AiUsage, ClassifyAiError,
     ProviderCapabilities, ToolCall, cache_identity_with,
 };
 use crate::utils::{redact_secret, utf8_prefix};
@@ -375,21 +375,7 @@ pub fn build_prompt(request: &AiRequest) -> String {
     if let Some(tools) = &request.tools
         && !tools.is_empty()
     {
-        out.push_str("<available_tools>\n");
-        for tool in tools {
-            out.push_str(&format!(
-                "- name: {}\n  description: {}\n  parameters: {}\n\n",
-                tool.name, tool.description, tool.parameters
-            ));
-        }
-        out.push_str("</available_tools>\n\n");
-        out.push_str(
-            "RESPONSE FORMAT: You MUST respond with a SINGLE valid JSON object only (no markdown, no explanation).\n\
-             To call tools: {\"tool_calls\": [{\"id\": \"c1\", \"function_name\": \"TOOL_NAME\", \"arguments\": {ARGS}}, {\"id\": \"c2\", \"function_name\": \"OTHER_TOOL\", \"arguments\": {ARGS2}}]}\n\
-             Put ALL tool calls in ONE tool_calls array. Do NOT output multiple JSON objects.\n\
-             For your final answer: {\"content\": \"YOUR RESPONSE\"}\n\
-             Do not mix both. Output exactly one JSON object.\n",
-        );
+        out.push_str(&tool_instructions(tools));
     } else if let Some(instruction) = request
         .response_format
         .as_ref()
@@ -399,6 +385,25 @@ pub fn build_prompt(request: &AiRequest) -> String {
         out.push('\n');
     }
 
+    out
+}
+
+pub(crate) fn tool_instructions(tools: &[AiTool]) -> String {
+    let mut out = String::from("<available_tools>\n");
+    for tool in tools {
+        out.push_str(&format!(
+            "- name: {}\n  description: {}\n  parameters: {}\n\n",
+            tool.name, tool.description, tool.parameters
+        ));
+    }
+    out.push_str("</available_tools>\n\n");
+    out.push_str(
+        "RESPONSE FORMAT: You MUST respond with a SINGLE valid JSON object only (no markdown, no explanation).\n\
+         To call tools: {\"tool_calls\": [{\"id\": \"c1\", \"function_name\": \"TOOL_NAME\", \"arguments\": {ARGS}}, {\"id\": \"c2\", \"function_name\": \"OTHER_TOOL\", \"arguments\": {ARGS2}}]}\n\
+         Put ALL tool calls in ONE tool_calls array. Do NOT output multiple JSON objects.\n\
+         For your final answer: {\"content\": \"YOUR RESPONSE\"}\n\
+         Do not mix both. Output exactly one JSON object.\n",
+    );
     out
 }
 
@@ -674,6 +679,8 @@ mod tests {
         assert!(prompt.contains("RESPONSE FORMAT"));
         assert!(prompt.contains("tool_calls"));
         assert!(prompt.contains("<available_tools>"));
+        assert!(prompt.find("</user>").unwrap() < prompt.find("<available_tools>").unwrap());
+        assert_eq!(prompt.matches("- name: git_log\n").count(), 1);
     }
 
     #[test]

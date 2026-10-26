@@ -376,6 +376,9 @@ The smaller positive whole-review timeout also applies; Codex retains its
 600-second per-call timeout. MAX effort requires separate timeout support and is
 not authorized by this example. Completed-response caching is disabled for this
 mode; provider-side prefix caching may still apply but is not guaranteed.
+Harness tool instructions precede conversation history so completed tool turns
+append to a stable serialized prompt prefix rather than moving the tool catalog.
+This improves cache eligibility, not a guarantee of provider cache hits or cost.
 
 ### `[linux_bug]`
 
