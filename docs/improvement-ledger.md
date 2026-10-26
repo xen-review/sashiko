@@ -328,6 +328,13 @@ badges/details without losing these independent dimensions. Human-reviewed must
 have attributable evidence, such as parsed review replies or Reviewed-by trailers
 with provenance; a generic mailing-list reply is not proof of review. Unknown
 human-review evidence must not be presented as confirmed absence of human review.
+The [human-review evidence proposal](../designs/DESIGN_HUMAN_REVIEW_EVIDENCE.md)
+grounds an opt-in, separately versioned provenance store in existing parsed mail
+and exact reply links. Recommended first positive filter: direct replies with
+unquoted Reviewed-by matching the parsed From mailbox, not quoted or author-carried
+claims. It distinguishes recorded attribution from authenticated identity and
+keeps partial/unknown/withdrawal limitations explicit. Store/policy approval and
+bounded historical-backfill approval are pending; no human classifier is enabled.
 
 Done when: deterministic fixtures cover exact/upstream-rewritten patch identities,
 partial series, stale/missing refs, staging versus master, and human-review evidence;
