@@ -100,6 +100,17 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   CLI gpt-6.1-sol at high effort; medium and low are allowed to conserve budget.
   Never silently switch provider or model. The chat model is not evidence of
   the daemon's actual provider configuration.
+- The current overnight policy is gpt-6.1-sol at LOW effort, reserving shared
+  quota for daemon improvements. Recheck quota before any necessary or
+  opportune restart. A fresh five-hour reading below 30 percent remaining
+  authorizes switching daemon reviews to Copilot CLI gpt-6-luna at LOW effort
+  with default context. Announce and record the provider/model change, arrange
+  a safe review boundary, and verify the effective invocation after restart.
+  Never change an in-flight request's effort. Disable response caching if its
+  identity cannot distinguish the fallback model and wrapper effort. Verify
+  any proposed GPT 5.6 Luna alternative's exact model name and availability;
+  do not guess an identifier or silently substitute it. This threshold does
+  not authorize self-review, paid overages, or work beyond the agreed window.
 - Read shared five-hour and weekly usage and reset times using the authenticated
   Codex app-server account/rateLimits/read endpoint when available. Querying
   quota must not start a model turn. Do not access or print raw auth tokens.
