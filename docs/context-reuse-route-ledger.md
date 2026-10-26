@@ -58,7 +58,7 @@ by default. This policy is separate from the coding assistant's model setting.
   without a review-map claim. Browser checks at 1280px and 390px covered raw-log
   access, text injection, long source lines, overflow, and header wrapping.
   Final deterministic gates passed the same complete test and lint profiles.
-5. Next, subject to fresh budget and trial authorization: establish one bounded
+5. Next, authorized on 2026-10-26: establish one bounded
   Luna evaluation with retained artifacts and measured
    cached input, uncached input, output, provider calls, tools, and review quality.
    No full/small benchmark or automatic queue refill is authorized by this plan.
@@ -119,8 +119,14 @@ The fresh 12:10 reading was 15% five-hour remaining and 87% weekly. The daemon
 was already stopped at a completed-patch boundary; leave it stopped to preserve
 the reserve. This pauses the API/UI too, since there is no separate reviewer-only
 pause control yet. No watcher remains and no automatic resume has been scheduled.
-Re-read quota after reset and require more than 30% remaining before resuming
-new reviews. The configurable 20%/30% hysteresis remains a future ledger task,
+These reserve-stop instructions were superseded by the user's subsequent
+authorization to use the remaining Codex allowance for Sashiko testing. A fresh
+12:35 CET account reading showed 12% five-hour and 86% weekly remaining, with
+reset at 14:00:02 CET. The daemon was already active with Luna at low effort;
+leave its active review intact. Temporary Copilot CLI fallback is authorized
+only if Codex reaches zero before reset, subject to verified Luna availability
+and billing. This does not authorize Sashiko self-review or a Sol substitution.
+The configurable 20%/30% hysteresis remains a future ledger task,
 not an implemented automatic feature. Next work is a separately bounded Luna
 harness evaluation when authorized and budget permits, then design of sequential
 patch checkpoints; neither was claimed complete by these deterministic checks.
