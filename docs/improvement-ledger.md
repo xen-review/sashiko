@@ -119,14 +119,13 @@ Implemented foundations:
 - Latest full gate passed 1,096 library, 47 main, seven CLI, and 24 integration
   tests, plus formatting and all Clippy profiles. Two library tests are ignored.
 
-Execution capability decision remains open: the installed Codex normal-turn
-schema has no per-generation output-token ceiling. Goal token budgets and an
-experimental rollout-budget feature exist, but their hard-stop behavior has not
-been established. Sashiko's provider interface reports usage after completion,
-not during generation. Do not enable the new mode claiming strict token bounds
-without evidence. Ask whether an explicitly documented between-turn budget,
-which can overshoot by one generation, is acceptable under the subscription plan;
-otherwise retain the strict gate until an enforceable backend is available.
+Execution budget decision approved: for subscription-backed Codex, enforce
+token thresholds between model turns, permitting one-generation overshoot.
+Keep hard time and tool-call limits, report actual usage and overshoot, and
+never start another generation after reaching a threshold. Missing usage is an
+error, not zero. Do not claim a hard per-generation output-token ceiling or
+extend this approval to metered billing. The installed normal-turn schema does
+not expose such a verified ceiling.
 
 Goal: allow configuration to bypass Sashiko's entire multiphase review procedure
 and replace it with one explicitly selected agent/skill prompt for a whole Xen
@@ -166,6 +165,55 @@ Design decisions and implementation gates:
   default-mode compatibility, errors, cancellation, and persistence.
 - Implement and deploy incrementally after the design is reviewed. Any paid
   trial must remain on the authorized Luna configuration with bounded usage.
+
+### P2: Plan Codex Account Quota and Pause/Resume Hysteresis
+
+Status: future task requested on 2026-10-26; not implemented or enabled.
+
+Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
+plan review allocations over the remaining window, retaining a debugging reserve.
+Start with Codex subscription-backed accounts only, not generic assumptions
+about every provider's billing or quota model. Account percentages are not exact
+token counts; estimates need observed history and confidence bounds.
+
+Make thresholds configurable without recompilation, initially in a simple
+Codex-specific settings section. Defaults requested by the operator: pause new
+automatic reviews below 20% remaining; resume only above 30%. Respect strict
+inequalities. Wait until the reported reset time, then re-read quota before
+resuming; never assume a reset happened or sufficient quota returned. If delayed,
+still require the upper threshold. Use a scheduled wakeup with bounded refreshes,
+not a busy poll or unconditional restart. Preserve active reviews and completed
+results, and expose paused state, reason, and next check time.
+
+Later scope: key state and policy by provider account, since several processes
+can share an allowance. Plan fair estimated per-review budgets from remaining
+capacity and time to reset without spending quota simply to exhaust it. Unknown
+or stale telemetry must not authorize more expensive models, credits, metered
+billing, or automatic effort adaptation.
+
+Done when: fake-clock and fake-quota tests cover threshold edges, hysteresis,
+reset changes, late wakeups, telemetry errors, other account consumers, restart
+recovery, cancellation, and unchanged behavior when disabled. Review the design
+before implementation; this ledger entry is not an installed quota controller.
+
+### P2: Expose Live and Final Review Usage
+
+Status: future task requested on 2026-10-26; not implemented.
+
+Show model/provider/actual effort, completed and active turns, tool calls,
+input/output/cached tokens, elapsed time, and budget consumption in the web UI's
+status/progress surface. Preserve final totals on completed, failed, timed-out,
+and cancelled reviews. Differentiate Sashiko turns, harness invocations, and
+backend generations; do not imply those counts are interchangeable.
+
+Use provider-reported counters, state whether usage is cumulative or incremental,
+and label unavailable or in-flight usage honestly. A currently running generation
+may not report tokens until completion. Keep access controls, avoid double
+counting cached tokens or retried events, and do not duplicate whole-series
+usage across per-patch rows. Keep daemon progress independent of UI polling.
+
+Done when: API and UI tests cover live updates, terminal persistence, absent
+telemetry, reconnects, cancelled reviews, and whole-series attribution.
 
 ### P3: Keep Remaining Operational Problems Evidence-Based
 

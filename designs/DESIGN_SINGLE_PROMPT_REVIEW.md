@@ -120,9 +120,14 @@ rather than falling back to unrestricted shell access. Existing completion-only
 providers retain their restrictions.
 
 Require explicit positive generation, token, wall-time, and tool-call budgets
-before enabling the mode. Check backend support for enforcing and reporting
-each limit before the first paid call; reject unsupported limits rather than
-pretending a timeout alone bounds spending. Record internal model generations
+before enabling the mode. The operator approved between-turn token thresholds
+for subscription-backed Codex on 2026-10-26: account for cached and uncached
+input and all reported output, and do not start another generation once either
+cumulative token threshold is reached. One generation can exceed a threshold;
+report that overshoot explicitly rather than advertising a hard token ceiling.
+Keep time, invocation, and tool-call bounds hard. Check backend support for
+reporting usage; reject absent accounting rather than treating it as zero.
+Record internal model generations
 and usage, terminate the complete process group on cancellation or limit breach,
 and retain partial output as diagnostics, not a successful review. Do not use a
 session helper that silently retries invalid output or starts another harness.
@@ -168,17 +173,16 @@ Implemented: typed settings and fail-closed selection (`76439f00`), plus bounded
 immutable instruction snapshots (`ad34e99f`). Enabled harness execution is still
 rejected; no existing configuration changes its review procedure.
 
-Backend budget gap: the installed Codex app-server normal-turn schema does not
-offer a per-generation output-token ceiling. Its goal-budget API and experimental
-rollout tracking do not yet provide verified hard-stop guarantees. The current
-provider trait exposes completed-call usage only. The strict budget requirement
-above remains in force until supported enforcement is proven or the operator
-approves explicitly weaker between-turn accounting with one-generation overshoot.
-Do not silently reinterpret a token ceiling as a post-call threshold.
+Backend limitation: the installed Codex app-server normal-turn schema does not
+offer a verified per-generation output-token ceiling. The operator explicitly
+approved between-turn accounting with one-generation overshoot, as described
+above. Its goal-budget API and experimental rollout tracking are not relied on
+for hard-stop guarantees. Future metered-backend support must not silently inherit
+subscription-specific spending authorization.
 
 1. Add typed config and startup validation for the approved `agent_harness`
    mode, keeping defaults unchanged and rejecting invalid combinations or
-   absent enforceable limits.
+   absent enforceable limits and required usage reporting.
 2. Add deterministic instruction/input loading and a fake-harness runner test
    proving exactly one harness invocation for a multi-patch series. Test
    internal-turn and tool limits, zero calls on unsupported capabilities,
