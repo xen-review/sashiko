@@ -233,7 +233,9 @@ parser version in response-cache identity prevents pre-fix synthesized counters
 being reused. The introducing provider commit is 6fb16bc02bb6. Focused backend
 and fake-CLI tests pass; the full gate passed 1,132 library tests (two ignored),
 49 main, seven CLI, 26 integration, formatting, and all Clippy profiles. Editor
-diagnostics are clear. The daemon resumed; deployment remains pending. No model call
-or historical record edit was needed. This does not add native-generation or
+diagnostics are clear. Source 96ab1ae0 was deployed at 19:11 CET after a checked
+idle database backup and matching release/installed hashes. The daemon is healthy;
+review 48's output, unknown metadata, and stored counters remain unchanged. No
+model call or historical record edit was needed. This does not add native-generation or
 backend-confirmed effort telemetry: the current completion event stream provides
 usage and text, not a trustworthy effective-effort field.

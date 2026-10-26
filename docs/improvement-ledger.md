@@ -102,8 +102,10 @@ rejects inconsistent/overflowed counts as unavailable. Response-cache identity
 now separates the corrected parser profile from pre-fix synthesized totals.
 Backend/fake-CLI tests pass; the full gate passed 1,132 library tests (two ignored),
 49 main, seven CLI, 26 integration, formatting, and all Clippy profiles. The
-daemon resumed; deployment remains pending. No model call
-or historical backfill was used. The completion stream does not supply a
+fix is deployed as 96ab1ae0 at 19:11 CET after a checked idle database backup,
+four-job release build, matching installed/release hashes, and a healthy API
+check with unchanged review 48 data. No active review was interrupted. No model
+call or historical backfill was used. The completion stream does not supply a
 trustworthy effective-effort field, so the UI must retain Unknown rather than
 promoting configured effort into backend confirmation.
 

@@ -5,6 +5,31 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+Latest state at 19:11 CET: parser/cache fix 96ab1ae0 is signed, pushed, and
+installed; implementation clean before this documentation update. Release hash:
+ecaab14961996b13fa9db35ad7804aa6aee7cd2430b1b8c79e4caa4df645f00a.
+Backup before-codex-usage-20261026-191039.db passed quick_check; matching
+sashiko-before-codex-usage-20261026-191039 rollback binary retained privately.
+The four-job build added no OOM events. Service active PID 1031277, API healthy,
+schema 15, 4,070 messages/451 series/98 Reviewed, no Pending or In Review.
+No active review was interrupted and no model call was needed for validation.
+
+Codex usage now requires measured input/output counters, preserves explicit
+cached zero versus unknown, and rejects invalid/overflowed counts. A cache parser
+profile excludes pre-fix synthesized usage. Ten focused backend tests and the
+full gate passed: 1,132 library (two ignored), 49 main, seven CLI, 26 integration,
+formatting, all Clippy profiles. Historical review 48 data is unchanged. Actual
+effort remains Unknown: this completion stream supplies text and usage, not a
+trustworthy backend-effective effort field. Do not promote configured effort.
+
+Fresh authenticated quota at 19:03:02 CET confirms the reset: 99% five-hour and
+71% weekly, next five-hour reset 00:01:44 CET on 2026-10-27. Coding-chat and
+daemon-account quotas remain distinct. No provider/model/effort switch, premium
+experiment, sleep, benchmark, self-review, public post, or queue refill occurred.
+Continue useful authorized ledger work without spending just because reset.
+
+### Status-Filter Rollout Evidence
+
 Latest state at 18:58 CET: view-only filter source 44094e87 is signed, pushed,
 and installed. Implementation checkout clean before this documentation update;
 main's unrelated user-owned files remain untouched. Installed/release SHA-256:
