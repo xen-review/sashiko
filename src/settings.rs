@@ -938,10 +938,58 @@ impl Default for GitSettings {
     }
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    #[default]
+    Workflow,
+    AgentHarness,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHarnessSettings {
+    pub instruction_files: Vec<PathBuf>,
+    pub max_generations: usize,
+    pub max_tool_calls: usize,
+    pub max_input_tokens: usize,
+    pub max_output_tokens: usize,
+    pub timeout_seconds: u64,
+}
+
+impl AgentHarnessSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.instruction_files.is_empty()
+            || self
+                .instruction_files
+                .iter()
+                .any(|path| path.as_os_str().is_empty())
+        {
+            return Err(
+                "[review.agent_harness] instruction_files must name at least one instruction file"
+                    .to_string(),
+            );
+        }
+        if self.max_generations == 0
+            || self.max_tool_calls == 0
+            || self.max_input_tokens == 0
+            || self.max_output_tokens == 0
+            || self.timeout_seconds == 0
+        {
+            return Err("[review.agent_harness] max_generations, max_tool_calls, max_input_tokens, max_output_tokens, and timeout_seconds must all be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 #[allow(unused)]
 pub struct ReviewSettings {
+    #[serde(default)]
+    pub mode: ReviewMode,
+    #[serde(default)]
+    pub agent_harness: Option<AgentHarnessSettings>,
     pub concurrency: usize,
     /// Parent directory for the worktrees a review worker checks patches out
     /// into, or None for one under the system temporary directory.
@@ -983,6 +1031,22 @@ pub struct ReviewSettings {
 }
 
 impl ReviewSettings {
+    fn validate_mode(&self) -> Result<(), String> {
+        match (self.mode, &self.agent_harness) {
+            (ReviewMode::Workflow, None) => Ok(()),
+            (ReviewMode::Workflow, Some(_)) => {
+                Err("[review.agent_harness] requires [review] mode = \"agent_harness\"".to_string())
+            }
+            (ReviewMode::AgentHarness, None) => {
+                Err("[review] mode = \"agent_harness\" requires [review.agent_harness]".to_string())
+            }
+            (ReviewMode::AgentHarness, Some(harness)) => {
+                harness.validate()?;
+                Err("[review] agent_harness execution is not implemented yet; refusing to fall back to workflow mode".to_string())
+            }
+        }
+    }
+
     /// Resolves the effective reasoning effort mode for `model`.
     ///
     /// Returns `None` when `model` does not support configurable effort levels
@@ -1399,6 +1463,10 @@ impl Settings {
             .build()?;
 
         let settings: Self = s.try_deserialize()?;
+        settings
+            .review
+            .validate_mode()
+            .map_err(ConfigError::Message)?;
         if let Some(smtp) = &settings.smtp {
             smtp.validate().map_err(ConfigError::Message)?;
         }
@@ -1462,6 +1530,80 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_mode_defaults_and_limits_are_fail_closed() {
+        let review: ReviewSettings = toml::from_str("concurrency = 1").unwrap();
+        assert_eq!(review.mode, ReviewMode::Workflow);
+        assert!(review.validate_mode().is_ok());
+        assert!(toml::from_str::<ReviewSettings>("concurrency = 1\nmode = 'typo'").is_err());
+
+        let missing: ReviewSettings =
+            toml::from_str("concurrency = 1\nmode = 'agent_harness'").unwrap();
+        assert!(missing.validate_mode().unwrap_err().contains("requires"));
+        let manifest = "\n[agent_harness]\ninstruction_files = ['agent.md']\nmax_generations = 5\nmax_tool_calls = 10\nmax_input_tokens = 10000\nmax_output_tokens = 2000\ntimeout_seconds = 60\n";
+        for limit in [
+            "max_generations",
+            "max_tool_calls",
+            "max_input_tokens",
+            "max_output_tokens",
+            "timeout_seconds",
+        ] {
+            let mut review: ReviewSettings = toml::from_str(&format!(
+                "concurrency = 1\nmode = 'agent_harness'{manifest}"
+            ))
+            .unwrap();
+            let harness = review.agent_harness.as_mut().unwrap();
+            match limit {
+                "max_generations" => harness.max_generations = 0,
+                "max_tool_calls" => harness.max_tool_calls = 0,
+                "max_input_tokens" => harness.max_input_tokens = 0,
+                "max_output_tokens" => harness.max_output_tokens = 0,
+                "timeout_seconds" => harness.timeout_seconds = 0,
+                _ => unreachable!(),
+            }
+            assert!(review.validate_mode().unwrap_err().contains("positive"));
+        }
+        let configured: ReviewSettings = toml::from_str(&format!(
+            "concurrency = 1\nmode = 'agent_harness'{manifest}"
+        ))
+        .unwrap();
+        assert!(
+            configured
+                .agent_harness
+                .as_ref()
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            configured
+                .validate_mode()
+                .unwrap_err()
+                .contains("not implemented")
+        );
+        let inactive: ReviewSettings =
+            toml::from_str(&format!("concurrency = 1{manifest}")).unwrap();
+        assert!(inactive.validate_mode().is_err());
+    }
+
+    #[test]
+    fn settings_loader_rejects_unimplemented_harness_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Settings.toml");
+        let base =
+            "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[review]\nconcurrency = 1\n";
+        std::fs::write(&path, base).unwrap();
+        assert_eq!(
+            Settings::from_file(&path).unwrap().review.mode,
+            ReviewMode::Workflow
+        );
+        let harness = "mode = 'agent_harness'\n[review.agent_harness]\ninstruction_files = ['agent.md']\nmax_generations = 5\nmax_tool_calls = 10\nmax_input_tokens = 10000\nmax_output_tokens = 2000\ntimeout_seconds = 60\n";
+        std::fs::write(&path, format!("{base}{harness}")).unwrap();
+        let error = Settings::from_file(&path).unwrap_err().to_string();
+        assert!(error.contains("not implemented"), "{error}");
+        assert!(error.contains("refusing to fall back"), "{error}");
+    }
 
     #[test]
     fn test_production_settings_is_valid() {
