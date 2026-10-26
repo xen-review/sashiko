@@ -2525,7 +2525,7 @@
                  state.selectedList = route.query.list;
             }
             if (route.view === 'list') {
-                state.reviewState = route.query?.review_state || '';
+                state.reviewState = route.query?.staging_state ? `staging:${route.query.staging_state}` : (route.query?.review_state || '');
             }
 
             // Clear ECharts cache if navigating to stats from elsewhere
@@ -3188,26 +3188,30 @@
             });
         }
 
+        function setStateFilterParams(params, value) {
+            params.delete('review_state');
+            params.delete('staging_state');
+            if (value.startsWith('staging:')) params.set('staging_state', value.slice(8));
+            else if (value) params.set('review_state', value);
+        }
+
         function updateUrlWithList() {
             const url = new URL(window.location.href);
             const queryIndex = url.hash.indexOf('?');
             const hash = (queryIndex === -1 ? url.hash : url.hash.substring(0, queryIndex)) || '#/';
             const hashParams = new URLSearchParams(queryIndex === -1 ? '' : url.hash.substring(queryIndex + 1));
-            const useSearch = url.searchParams.has('list') || url.searchParams.has('review_state');
+            const useSearch = url.searchParams.has('list') || url.searchParams.has('review_state') || url.searchParams.has('staging_state');
             const params = useSearch ? url.searchParams : hashParams;
             if (state.selectedList) {
                 params.set('list', state.selectedList);
             } else {
                 params.delete('list');
             }
-            if (state.reviewState) {
-                params.set('review_state', state.reviewState);
-            } else {
-                params.delete('review_state');
-            }
+            setStateFilterParams(params, state.reviewState);
             if (useSearch) {
                 hashParams.delete('list');
                 hashParams.delete('review_state');
+                hashParams.delete('staging_state');
             }
             url.hash = hash + (hashParams.size ? '?' + hashParams.toString() : '');
             window.history.replaceState(null, null, url.pathname + url.search + url.hash);
@@ -3264,6 +3268,9 @@
                     </select>
                     <select id="reviewStateSelector" aria-label="Review state" title="Recorded review state" onchange="setReviewState(this.value)" style="${state.listMode === 'patchsets' ? '' : 'display:none;'}max-width:100%;">
                         ${reviewStateOptions}
+                        <optgroup id="stagingStateOptions" label="Staging history" hidden>
+                            ${[['all_matched', 'All Patches Matched in Staging History'], ['partially_matched', 'Some Patches Matched in Staging History'], ['no_match_in_checked_range', 'No Match in Checked Staging Range'], ['unknown', 'Staging Evidence Unknown']].map(([value, label]) => `<option value="staging:${value}" ${state.reviewState === `staging:${value}` ? 'selected' : ''}>${label}</option>`).join('')}
+                        </optgroup>
                     </select>
 
                     <div id="bugFilters" style="display: ${state.listMode === 'bugs' ? 'flex' : 'none'}; gap: 8px; align-items: center; position: relative;">
@@ -3391,7 +3398,9 @@
                 url += `&mailing_list=${encodeURIComponent(state.selectedList)}`;
             }
             if (state.listMode === 'patchsets' && state.reviewState) {
-                url += `&review_state=${encodeURIComponent(state.reviewState)}`;
+                const params = new URLSearchParams();
+                setStateFilterParams(params, state.reviewState);
+                url += `&${params}`;
             }
             if (state.listMode === 'bugs') {
                 if (state.selectedSubsystems !== null) {
@@ -3457,6 +3466,8 @@
 
                 const items = data.items || [];
                 const total = data.total || 0;
+                const stagingOptions = document.getElementById('stagingStateOptions');
+                if (stagingOptions && state.listMode === 'patchsets') stagingOptions.hidden = !data.staging;
 
                 state.totalPages = Math.ceil(total / state.perPage) || 1;
 
@@ -3494,7 +3505,7 @@
                             : `${p.received_parts || 0}/${p.total_parts || 0}`;
 
                         const clickHandler = (e) => {
-                            if (e.target.closest('.copy-btn')) return;
+                            if (e.target.closest('.copy-btn, details')) return;
                             const target = `#/patchset/${encodeURIComponent(p.slug || p.message_id || p.id)}`;
                             if (e.button === 1 || e.ctrlKey || e.metaKey) {
                                 window.open(target, '_blank');
@@ -3524,7 +3535,7 @@
                         }
 
                         row.innerHTML = `
-                            <td><div>${escapeHtml(p.subject) || '(no subject)'}</div>${tagsHtml}</td>
+                            <td><div>${escapeHtml(p.subject) || '(no subject)'}</div>${tagsHtml}${data.staging ? renderStagingSeriesEvidence(data.staging.series?.[p.id], data.staging) : ''}</td>
                             <td style="line-height:1.2;">${authorHtml}</td>
                             <td style="line-height:1.2;">${dateHtml}</td>
                             <td>${parts}</td>
@@ -4439,6 +4450,25 @@
             `;
         }
 
+        function formatEvidenceTime(timestamp) {
+            if (!Number.isFinite(timestamp)) return 'Unknown';
+            const date = new Date(timestamp * 1000);
+            return Number.isNaN(date.getTime()) ? 'Unknown' : date.toISOString();
+        }
+
+        function renderStagingSeriesEvidence(evidence, provenance) {
+            const labels = {all_matched: 'All patches matched', partially_matched: 'Some patches matched', no_match_in_checked_range: 'No match in checked range', unknown: 'Unknown'};
+            const label = labels[evidence?.state] || labels.unknown;
+            return `<details class="text-muted-sm" style="margin-top:4px;overflow-wrap:anywhere;">
+                <summary>Staging history: ${label}${evidence ? ` (${escapeHtml(String(evidence.matched_parts))}/${escapeHtml(String(evidence.expected_parts ?? '?'))})` : ''}</summary>
+                <div>Target: <code>${escapeHtml(provenance.target_ref || 'Unknown')}</code></div>
+                <div>Tip: <code>${escapeHtml(provenance.tip || 'Unknown')}</code></div>
+                <div>Refreshed: ${escapeHtml(formatEvidenceTime(provenance.refreshed_at))}; checked: ${escapeHtml(formatEvidenceTime(provenance.checked_at))}</div>
+                <div>Parts: ${evidence?.complete ? 'Complete' : 'Incomplete or unknown'}; history: ${provenance.scope_complete ? 'All reachable commits enumerated' : 'Bounded or unknown'}</div>
+                <div>Diff-equivalent history is not proof of a currently effective change.</div>
+            </details>`;
+        }
+
         function renderStagingEvidence(evidence) {
             if (!evidence || typeof evidence !== 'object') return '';
             const labels = {matched_history: 'Patch-ID match in staging history', no_match_in_checked_range: 'No match in checked range', stale: 'Stale staging evidence', unknown: 'Staging membership unknown'};
@@ -4449,7 +4479,7 @@
                 <div class="text-muted-sm" style="margin-top:6px;overflow-wrap:anywhere;">
                     <div>Target: <code>${escapeHtml(evidence.target_ref || 'Unknown')}</code></div>
                     <div>Tip: <code>${escapeHtml(evidence.tip || 'Unknown')}</code></div>
-                    <div>Refreshed: ${evidence.refreshed_at ? escapeHtml(formatDate(evidence.refreshed_at)) : 'Unknown'} &middot; Checked: ${evidence.checked_at ? escapeHtml(formatDate(evidence.checked_at)) : 'Unknown'}</div>
+                    <div>Refreshed: ${escapeHtml(formatEvidenceTime(evidence.refreshed_at))} &middot; Checked: ${escapeHtml(formatEvidenceTime(evidence.checked_at))}</div>
                     <div>History scope: ${evidence.scope_complete === true ? 'All reachable commits enumerated' : 'Bounded or unknown'}</div>
                     ${evidence.match_kind === 'stable_patch_id' ? '<div>Evidence: stable Git patch-ID equivalence</div>' : ''}
                     ${commits.length ? `<div>Matching commits: ${commits.map(commit => `<code>${escapeHtml(String(commit))}</code>`).join(', ')}</div>` : ''}

@@ -568,6 +568,46 @@ async fn test_patchset_staging_evidence_is_batched_paginated_and_read_only() {
         "b".repeat(40)
     );
     assert_eq!(first["staging"]["page_only"], true);
+    let listing: serde_json::Value = client
+        .get(format!(
+            "{}/api/patchsets?staging_state=partially_matched&per_page=1",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listing["total"], 1);
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listing["staging"]["series"]["1"]["state"],
+        "partially_matched"
+    );
+    assert_eq!(listing["staging"]["series"]["1"]["present_parts"], 2);
+    assert_eq!(listing["staging"]["series"]["1"]["matched_parts"], 1);
+    let no_match: serde_json::Value = client
+        .get(format!(
+            "{}/api/patchsets?staging_state=all_matched",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(no_match["total"], 0);
+    let invalid = client
+        .get(format!(
+            "{}/api/patchsets?staging_state=merged",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 400);
     let full: serde_json::Value = client
         .get(format!("{}/api/patch?id=1&per_page=1", server.base_url))
         .send()
@@ -635,6 +675,41 @@ async fn test_patchset_staging_evidence_is_batched_paginated_and_read_only() {
         unavailable["patches"][0]["staging_evidence"]["reason"],
         "Saved staging evidence unavailable"
     );
+    let unknown: serde_json::Value = client
+        .get(format!(
+            "{}/api/patchsets?staging_state=unknown",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unknown["total"], 1);
+    assert_eq!(unknown["staging"]["tip"], serde_json::Value::Null);
+    let disabled = spawn_test_server(false).await;
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/api/patchsets?staging_state=unknown",
+                disabled.base_url
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let unchanged: serde_json::Value = client
+        .get(format!("{}/api/patchsets", disabled.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(unchanged.get("staging").is_none());
 }
 
 #[tokio::test]

@@ -704,9 +704,35 @@ async fn list_patchsets(
     let per_page = pagination.per_page.unwrap_or(50).clamp(1, 100);
     let offset = (page - 1) * per_page;
 
+    if pagination.staging_state.is_some() && state.settings.git.staging.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let staging = if let Some(settings) = &state.settings.git.staging {
+        let snapshot = match tokio::fs::canonicalize(&state.settings.git.repository_path).await {
+            Ok(repository) => state
+                .db
+                .current_staging_snapshot(
+                    &repository.to_string_lossy(),
+                    settings,
+                    chrono::Utc::now().timestamp(),
+                )
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        Some(crate::staging::StagingQuery {
+            snapshot,
+            state: pagination.staging_state,
+        })
+    } else {
+        None
+    };
+
     let mut items = if pagination.q.is_none()
         && pagination.mailing_list.is_none()
         && pagination.review_state.is_none()
+        && staging.is_none()
         && page == 1
         && per_page == 50
     {
@@ -723,12 +749,13 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .get_patchsets_filtered(
+            .get_patchsets_classified(
                 per_page,
                 offset,
                 pagination.q.clone(),
                 pagination.mailing_list.clone(),
                 pagination.review_state,
+                staging.as_ref(),
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -739,6 +766,7 @@ async fn list_patchsets(
     let total = if pagination.q.is_none()
         && pagination.mailing_list.is_none()
         && pagination.review_state.is_none()
+        && staging.is_none()
     {
         state
             .patchsets_count_cache
@@ -753,20 +781,58 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .count_patchsets_filtered(
+            .count_patchsets_classified(
                 pagination.q.clone(),
                 pagination.mailing_list.clone(),
                 pagination.review_state,
+                staging.as_ref(),
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    let evidence = if let Some(query) = staging {
+        let series = if let Some(snapshot) = &query.snapshot {
+            state
+                .db
+                .staging_series_evidence(
+                    snapshot,
+                    &items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            Default::default()
+        };
+        Some(crate::api::StagingPageEvidence {
+            target_ref: state
+                .settings
+                .git
+                .staging
+                .as_ref()
+                .map(|settings| settings.target_ref.clone())
+                .unwrap_or_default(),
+            tip: query.snapshot.as_ref().map(|snapshot| snapshot.tip.clone()),
+            refreshed_at: query
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.refreshed_at),
+            checked_at: query.snapshot.as_ref().map(|snapshot| snapshot.checked_at),
+            scope_complete: query
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.scope_complete),
+            series,
+        })
+    } else {
+        None
+    };
     Ok(Json(PatchsetsResponse {
         items,
         total,
         page,
         per_page,
+        staging: evidence,
     }))
 }
 
@@ -5833,6 +5899,7 @@ F:	*
             q: None,
             mailing_list: None,
             review_state: None,
+            staging_state: None,
         };
 
         // 1. Anonymous caller sees Embargoed with empty reviews, zeroed list counts,

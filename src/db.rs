@@ -8182,6 +8182,7 @@ impl Database {
         query: Option<String>,
         mailing_list: Option<String>,
         review_state: Option<crate::api::PatchsetReviewFilter>,
+        staging: Option<&crate::staging::StagingQuery>,
     ) -> (String, Vec<String>) {
         let (mut clause, mut params) = self.build_search(query, mailing_list, "patchset");
         if let Some(filter) = review_state {
@@ -8201,6 +8202,23 @@ impl Database {
                 }
             };
             params.push(state.as_str().to_string());
+        }
+        if let Some(staging) = staging
+            && let Some(filter) = staging.state
+        {
+            clause.push_str(if clause.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            let evidence = staging.snapshot.as_ref().map_or_else(
+                || "NULL".to_string(),
+                |snapshot| snapshot.series_evidence_sql(),
+            );
+            clause.push_str(&format!(
+                "COALESCE(json_extract({evidence}, '$.state'), 'unknown') = ?"
+            ));
+            params.push(filter.as_str().to_string());
         }
         (clause, params)
     }
@@ -8224,7 +8242,21 @@ impl Database {
         mailing_list: Option<String>,
         review_state: Option<crate::api::PatchsetReviewFilter>,
     ) -> Result<Vec<PatchsetRow>> {
-        let (where_clause, params) = self.build_patchset_search(query, mailing_list, review_state);
+        self.get_patchsets_classified(limit, offset, query, mailing_list, review_state, None)
+            .await
+    }
+
+    pub async fn get_patchsets_classified(
+        &self,
+        limit: usize,
+        offset: usize,
+        query: Option<String>,
+        mailing_list: Option<String>,
+        review_state: Option<crate::api::PatchsetReviewFilter>,
+        staging: Option<&crate::staging::StagingQuery>,
+    ) -> Result<Vec<PatchsetRow>> {
+        let (where_clause, params) =
+            self.build_patchset_search(query, mailing_list, review_state, staging);
         // We use p.* alias implicitely by using unqualified names in WHERE which is fine given no collisions.
         // But for clarity/safety we should alias in FROM.
         // build_search returns "WHERE author ...".
@@ -8408,7 +8440,19 @@ impl Database {
         mailing_list: Option<String>,
         review_state: Option<crate::api::PatchsetReviewFilter>,
     ) -> Result<usize> {
-        let (where_clause, params) = self.build_patchset_search(query, mailing_list, review_state);
+        self.count_patchsets_classified(query, mailing_list, review_state, None)
+            .await
+    }
+
+    pub async fn count_patchsets_classified(
+        &self,
+        query: Option<String>,
+        mailing_list: Option<String>,
+        review_state: Option<crate::api::PatchsetReviewFilter>,
+        staging: Option<&crate::staging::StagingQuery>,
+    ) -> Result<usize> {
+        let (where_clause, params) =
+            self.build_patchset_search(query, mailing_list, review_state, staging);
         // We must alias patchsets as p because build_search uses p.id for filters
         let sql = format!("SELECT COUNT(*) FROM patchsets p {}", where_clause);
 

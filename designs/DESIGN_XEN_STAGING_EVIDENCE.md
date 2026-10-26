@@ -165,9 +165,28 @@ and all four state labels and hostile-value escaping pass. The full gate passed
 1,139 library tests (two ignored), 49 main, seven CLI, 27 integration, formatting,
 and all Clippy profiles. Browser layout verification has not yet run.
 
-Exact-ancestry matching, series aggregation and paginated classification filters
-remain pending. The installed runtime is unchanged on schema 15; there has been
-no live staging scan, feature-specific fetch, migration or model call. Do not
-infer rollout from source types or the synthetic API fixture. The normal daemon
-was resumed after the full gate and started a newly ingested bzimage review;
-leave that active review undisturbed.
+Typed series aggregation and a separate staging_state API filter are implemented
+in source. Classification examines all saved patch records, not only the displayed
+page. All-matched requires every distinct expected part and a current matching
+source identity. Missing/duplicate parts and changed identities cannot prove
+completeness. Partial matches retain uncertainty; no-match is explicitly limited
+to the checked range. One fresh snapshot is pinned for the request, and the same
+expression filters rows and totals before pagination. Review states, search and
+mailing-list selection remain independent. Disabled requests are unchanged and
+reject staging-only filters; configured but unavailable evidence is Unknown.
+The full gate passes 1,140 library tests (two ignored), 49 main, seven CLI and
+27 integration tests, formatting and all Clippy profiles. The duplicate-part
+regression passes separately after the final browser timestamp correction.
+
+The existing state dropdown now offers opt-in staging-history choices. Synthetic
+browser checks at 1,280 and 390 pixels verify filter selection/restoration,
+mailing-list combination, Messages request isolation, native provenance clicks,
+precise UTC timestamps and no page/control/evidence overflow. Screenshots were
+captured; their browser-host resources are not directly inspectable here, so no
+independent visual inspection is claimed. Node checks cover escaping, all states,
+clear behavior and invalid timestamps. No fixture result is a live classification.
+
+Exact ancestry and attributable human-review evidence remain pending. The
+installed runtime is unchanged on schema 15; live staging rollout has not run.
+The normal daemon completed the newly ingested v2 bzimage payload-boundary review
+without new findings or outbound email. Its review artifacts are preserved.

@@ -283,10 +283,13 @@ SASHIKO__SERVER__ACL__ADMINS="first@example.org,second@example.org"
 #### `[git.staging]`
 
 The optional Xen-only `[git.staging]` section is an opt-in for read-only staging
-membership evidence. Its matching foundation is implemented; background
-publication is integrated in source, but API/UI integration and rollout are not
-complete yet. Omission preserves
-existing behavior and does not guess a target from local HEAD or origin.
+membership evidence. Bounded background publication, per-patch provenance,
+full-series aggregation and view-only API/UI filters are implemented. Back up the
+database before enabling schema-16 deployments. Omission preserves existing
+behavior and does not guess a target from local HEAD or origin. Staging history
+matches prove diff equivalence at a checked tip, not that a change remains
+effective. Missing, stale or unsupported evidence remains Unknown; an unmatched
+bounded scan is only No match in checked range, never an Unmerged assertion.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

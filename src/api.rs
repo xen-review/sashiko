@@ -40,6 +40,36 @@ impl TryFrom<String> for PatchsetReviewFilter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesState {
+    AllMatched,
+    PartiallyMatched,
+    NoMatchInCheckedRange,
+    Unknown,
+}
+
+impl SeriesState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllMatched => "all_matched",
+            Self::PartiallyMatched => "partially_matched",
+            Self::NoMatchInCheckedRange => "no_match_in_checked_range",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesEvidence {
+    pub state: SeriesState,
+    pub present_parts: u64,
+    pub expected_parts: Option<u64>,
+    pub checked_parts: u64,
+    pub matched_parts: u64,
+    pub complete: bool,
+}
+
 #[derive(Deserialize)]
 pub struct Pagination {
     pub page: Option<usize>,
@@ -47,6 +77,17 @@ pub struct Pagination {
     pub q: Option<String>,
     pub mailing_list: Option<String>,
     pub review_state: Option<PatchsetReviewFilter>,
+    pub staging_state: Option<SeriesState>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StagingPageEvidence {
+    pub target_ref: String,
+    pub tip: Option<String>,
+    pub refreshed_at: Option<i64>,
+    pub checked_at: Option<i64>,
+    pub scope_complete: bool,
+    pub series: std::collections::BTreeMap<i64, SeriesEvidence>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,6 +96,8 @@ pub struct PatchsetsResponse {
     pub total: usize,
     pub page: usize,
     pub per_page: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging: Option<StagingPageEvidence>,
 }
 
 #[derive(Serialize, Deserialize)]

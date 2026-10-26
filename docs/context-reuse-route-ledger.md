@@ -1,6 +1,6 @@
 # Context Reuse Route Ledger
 
-Updated: 2026-10-26. This is the execution ledger for the selected route;
+Updated: 2026-10-27. This is the execution ledger for the selected route;
 the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
@@ -28,11 +28,23 @@ and expose no canonical repository path. The real-router regression covers
 pagination, stale/changed/failed evidence and preserved review state. The full
 API gate passed 1,139 library tests (two ignored), 49 main, seven CLI and 27
 integration tests, formatting and all Clippy profiles. Inline script parsing,
-state labels and hostile-value escaping pass; browser layout remains unverified.
-Series aggregation, paginated classification filters and exact ancestry remain
-pending. At 23:15 CET the daemon is resumed on the unchanged schema-15 binary
-and actively reviewing the newly ingested v2 bzimage payload-boundary patch;
-implementation/security finished. Do not interrupt that review for deployment.
+state labels and hostile-value escaping pass. The provenance commit is 3fb5cef4;
+its code tree equals superseded 03ccb0fd. The operator explicitly approved a
+one-time exact-lease message-only rewrite to repair literal newline escapes.
+No broader force-push permission exists.
+Series aggregation and paginated staging_state filters are implemented in source.
+They use every saved part, distinct expected part numbers and current identities,
+pin one fresh snapshot, and share the row/count predicate before pagination.
+Typed API metadata preserves the independent review dimension. The full gate
+passes 1,140 library tests (two ignored), 49 main, seven CLI and 27 integration
+tests, formatting and all Clippy profiles; duplicate-part coverage also passes.
+Synthetic browser checks at 1,280/390 pixels verify native disclosures, filters,
+list combination, Messages parameter isolation, UTC times and no page/control
+overflow. Screenshots are captured, not independently visually inspected here.
+Exact ancestry and human-review evidence remain open. Schema-16 rollout remains
+pending. The normal v2 bzimage review completed without new issues or email;
+there are 99 Reviewed series. At 00:02 CET the unchanged schema-15 daemon is
+stopped at an idle validation boundary. Resume it promptly after the final gate.
 No live staging migration, feature-specific fetch/history scan, model call, or
 scheduling change has been made. Remote inspection
 confirms origin is https://github.com/xen-review/xen.git and upstream is the

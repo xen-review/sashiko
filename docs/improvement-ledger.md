@@ -264,10 +264,17 @@ covering fetch and invalidating failed/skipped refreshes or moved tips. Batched
 saved-evidence retrieval and a per-patch provenance disclosure are implemented
 for both detail routes. The current full gate passes 1,139 library tests (two
 ignored), 49 main, seven CLI and 27 integration tests plus formatting and all
-Clippy profiles. Synthetic API and escaping checks pass; browser layout, series
-aggregation, paginated staging filters and exact ancestry remain pending. The
-installed runtime remains on schema 15, with no live staging scan, migration or
-feature-specific model call. Ordinary scheduling and muted delivery are unchanged.
+Clippy profiles. Typed series aggregation and separate staging_state filters are
+also implemented in source: one fresh pinned snapshot, full saved parts, distinct
+expected part numbers, unchanged review states, and one row/count predicate
+before pagination. The latest full gate passes 1,140 library tests (two ignored),
+49 main, seven CLI and 27 integration tests, formatting and all Clippy profiles.
+Synthetic desktop/mobile interaction and DOM bounds checks pass at 1,280/390
+pixels, with screenshots captured and no independent visual-inspection claim.
+Exact ancestry, human-review evidence and backed-up schema-16 rollout remain
+pending. No live staging scan or feature-specific model call has run. Ordinary
+scheduling and muted delivery are unchanged; the normal bzimage review completed
+without new issues or email, bringing Reviewed series to 99.
 
 Goal: detect and display when an individual patch is already incorporated into
 the configured upstream reference. For Xen, prefer the upstream `staging` branch

@@ -260,7 +260,82 @@ pub enum MatchKind {
     StablePatchId,
 }
 
+pub use crate::api::{SeriesEvidence, SeriesState};
+
+pub struct StagingQuery {
+    pub snapshot: Option<CurrentSnapshot>,
+    pub state: Option<SeriesState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CurrentSnapshot {
+    pub id: i64,
+    pub target_ref: String,
+    pub tip: String,
+    pub refreshed_at: i64,
+    pub checked_at: i64,
+    pub scope_complete: bool,
+}
+
+impl CurrentSnapshot {
+    pub fn series_evidence_sql(&self) -> String {
+        format!("(SELECT json_object('state', CASE WHEN total_parts > 0 AND present = total_parts AND valid = total_parts AND matched = total_parts THEN 'all_matched' WHEN matched > 0 THEN 'partially_matched' WHEN total_parts > 0 AND present = total_parts AND valid = total_parts AND checked = total_parts THEN 'no_match_in_checked_range' ELSE 'unknown' END, 'present_parts', present, 'expected_parts', total_parts, 'checked_parts', checked, 'matched_parts', matched, 'complete', json(CASE WHEN total_parts > 0 AND present = total_parts AND valid = total_parts THEN 'true' ELSE 'false' END))
+            FROM (SELECT p.total_parts AS total_parts, COUNT(*) AS present,
+                COUNT(DISTINCT CASE WHEN q.part_index BETWEEN 1 AND p.total_parts THEN q.part_index END) AS valid,
+                COALESCE(SUM(CASE WHEN e.source_identity IS NOT NULL AND e.source_identity = q.git_patch_id THEN 1 ELSE 0 END), 0) AS checked,
+                COALESCE(SUM(CASE WHEN e.source_identity IS NOT NULL AND e.source_identity = q.git_patch_id AND EXISTS (SELECT 1 FROM staging_snapshot_commits c WHERE c.snapshot_id = e.snapshot_id AND c.patch_identity = e.source_identity) THEN 1 ELSE 0 END), 0) AS matched
+                FROM patches q LEFT JOIN staging_patch_evidence e ON e.patch_id = q.id AND e.snapshot_id = {} WHERE q.patchset_id = p.id))", self.id)
+    }
+}
+
 impl crate::db::Database {
+    pub async fn current_staging_snapshot(
+        &self,
+        repository: &str,
+        settings: &StagingSettings,
+        now: i64,
+    ) -> Result<Option<CurrentSnapshot>> {
+        let oldest = now.saturating_sub(i64::try_from(settings.freshness_seconds)?);
+        let mut rows = self.conn.query("SELECT s.id, s.target_ref, s.tip, s.refreshed_at, s.checked_at, s.scope_complete FROM staging_targets t JOIN staging_snapshots s ON s.id = t.snapshot_id
+            WHERE t.repository = ? AND t.remote = ? AND t.target_ref = ? AND t.last_failure IS NULL AND s.algorithm_version = ? AND s.refreshed_at BETWEEN ? AND ?",
+            libsql::params![repository, settings.remote.as_str(), settings.target_ref.as_str(), i64::from(INDEX_VERSION), oldest, now]).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(CurrentSnapshot {
+            id: row.get(0)?,
+            target_ref: row.get(1)?,
+            tip: row.get(2)?,
+            refreshed_at: row.get(3)?,
+            checked_at: row.get(4)?,
+            scope_complete: row.get::<i64>(5)? != 0,
+        }))
+    }
+
+    pub async fn staging_series_evidence(
+        &self,
+        snapshot: &CurrentSnapshot,
+        patchset_ids: &[i64],
+    ) -> Result<BTreeMap<i64, SeriesEvidence>> {
+        ensure!(
+            patchset_ids.len() <= 100,
+            "staging series pages are limited to 100 items"
+        );
+        let sql = format!(
+            "SELECT p.id, {} FROM patchsets p JOIN json_each(?) requested ON requested.value = p.id",
+            snapshot.series_evidence_sql()
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, libsql::params![serde_json::to_string(patchset_ids)?])
+            .await?;
+        let mut results = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            results.insert(row.get(0)?, serde_json::from_str(&row.get::<String>(1)?)?);
+        }
+        Ok(results)
+    }
+
     pub async fn load_staging_index(
         &self,
         repository: &str,
@@ -447,6 +522,170 @@ fn project_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn series_evidence_uses_all_parts_and_a_fresh_pinned_snapshot() -> Result<()> {
+        let db = crate::db::Database::new(&crate::settings::DatabaseSettings {
+            url: ":memory:".into(),
+            token: String::new(),
+        })
+        .await?;
+        db.migrate().await?;
+        db.execute("INSERT INTO patchsets(id, total_parts, received_parts, status) VALUES (1,2,2,'Reviewed'), (2,2,1,'Failed'), (3,1,1,'Reviewed'), (4,1,1,'Reviewed'), (5,1,0,'Incomplete')", ()).await?;
+        db.execute(
+            "UPDATE patchsets SET subject = 'saved series', date = id",
+            (),
+        )
+        .await?;
+        for (id, series, part, identity) in [
+            (1, 1, 1, Some("a")),
+            (2, 1, 2, Some("a")),
+            (3, 2, 1, Some("a")),
+            (4, 3, 1, Some("d")),
+            (5, 4, 1, None),
+        ] {
+            let message = format!("aggregate-{id}@example.invalid");
+            db.execute(
+                "INSERT INTO messages(message_id) VALUES (?)",
+                libsql::params![message.as_str()],
+            )
+            .await?;
+            db.execute("INSERT INTO patches(id,patchset_id,message_id,part_index,git_patch_id) VALUES (?,?,?,?,?)",libsql::params![id,series,message,part,identity.map(|s|s.repeat(40))]).await?;
+        }
+        let (_, settings) = fixture();
+        let snapshot = StagingSnapshot {
+            target_ref: settings.target_ref.clone(),
+            tip: "b".repeat(40),
+            algorithm_version: INDEX_VERSION,
+            scope_complete: false,
+            diff_bytes: 1,
+            entries: vec![IndexEntry {
+                commit: "c".repeat(40),
+                identity: CommitIdentity::Text {
+                    patch_id: "a".repeat(40),
+                },
+            }],
+        };
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 90, 100)
+            .await?;
+        let pinned = db
+            .current_staging_snapshot("repo", &settings, 100)
+            .await?
+            .unwrap();
+        let result = db
+            .staging_series_evidence(&pinned, &[1, 2, 3, 4, 5])
+            .await?;
+        assert_eq!(result[&1].state, SeriesState::AllMatched);
+        assert!(result[&1].complete);
+        assert_eq!(result[&2].state, SeriesState::PartiallyMatched);
+        assert!(!result[&2].complete);
+        assert_eq!(result[&3].state, SeriesState::NoMatchInCheckedRange);
+        assert_eq!(result[&4].state, SeriesState::Unknown);
+        assert_eq!(result[&5].state, SeriesState::Unknown);
+        for (state, expected) in [
+            (SeriesState::AllMatched, vec![1]),
+            (SeriesState::PartiallyMatched, vec![2]),
+            (SeriesState::NoMatchInCheckedRange, vec![3]),
+            (SeriesState::Unknown, vec![4, 5]),
+        ] {
+            let query = StagingQuery {
+                snapshot: Some(pinned.clone()),
+                state: Some(state),
+            };
+            let mut actual = db
+                .get_patchsets_classified(100, 0, None, None, None, Some(&query))
+                .await?
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                db.count_patchsets_classified(None, None, None, Some(&query))
+                    .await?,
+                expected.len()
+            );
+            if expected.len() == 2 {
+                assert_eq!(
+                    db.get_patchsets_classified(1, 1, None, None, None, Some(&query))
+                        .await?
+                        .len(),
+                    1
+                );
+            }
+        }
+        let query = StagingQuery {
+            snapshot: None,
+            state: Some(SeriesState::AllMatched),
+        };
+        assert_eq!(
+            db.count_patchsets_classified(None, None, None, Some(&query))
+                .await?,
+            0
+        );
+        let query = StagingQuery {
+            snapshot: None,
+            state: Some(SeriesState::Unknown),
+        };
+        assert_eq!(
+            db.count_patchsets_classified(None, None, None, Some(&query))
+                .await?,
+            5
+        );
+        let query = StagingQuery {
+            snapshot: Some(pinned.clone()),
+            state: Some(SeriesState::PartiallyMatched),
+        };
+        let reviewed = Some(crate::api::PatchsetReviewFilter::State(
+            crate::ReviewStatus::Reviewed,
+        ));
+        assert_eq!(
+            db.count_patchsets_classified(None, None, reviewed, Some(&query))
+                .await?,
+            0
+        );
+        db.execute("UPDATE patches SET part_index = 1 WHERE id = 2", ())
+            .await?;
+        let duplicate = db.staging_series_evidence(&pinned, &[1]).await?;
+        assert!(!duplicate[&1].complete);
+        assert_eq!(duplicate[&1].state, SeriesState::PartiallyMatched);
+        db.execute("UPDATE patches SET part_index = 2 WHERE id = 2", ())
+            .await?;
+        db.execute("UPDATE patches SET git_patch_id = NULL WHERE id = 2", ())
+            .await?;
+        assert_eq!(
+            db.staging_series_evidence(&pinned, &[1]).await?[&1].state,
+            SeriesState::PartiallyMatched
+        );
+        db.invalidate_staging_target("repo", &settings, "Refresh failed", 101)
+            .await?;
+        assert!(
+            db.current_staging_snapshot("repo", &settings, 102)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            db.staging_series_evidence(&pinned, &[1]).await?[&1].matched_parts,
+            1
+        );
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 90, 100)
+            .await?;
+        assert!(
+            db.current_staging_snapshot(
+                "repo",
+                &settings,
+                90 + i64::try_from(settings.freshness_seconds)? + 1
+            )
+            .await?
+            .is_none()
+        );
+        assert!(
+            db.current_staging_snapshot("repo", &settings, 89)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let output = crate::git_cmd::in_dir(repo).args(args).output().unwrap();
