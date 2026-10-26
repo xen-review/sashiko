@@ -1,0 +1,95 @@
+# Review Transparency and Configuration-Sensitive Evidence
+
+Status: operator-reported improvement and false-positive regression case,
+2026-10-26. Recording this report does not relabel historical results, authorize
+another model review, or replace recall-oriented review with score filtering.
+
+## Reproduction
+
+Submission: [PATCH v2] xen/vcpu: ensure no write when runstate handler is NULL.
+Original message ID: 20261023161742.67329-1-roger@xenproject.org.
+
+- Patch page:
+  http://127.0.0.1:8080/#/patchset/20261023161742.67329-1-roger%40xenproject.org
+- Review map: http://127.0.0.1:8080/#/map/48
+
+The operator reports that a one-line "No issues found" result requires opening
+the inline-review disclosure, while the map appears to contain additional issues.
+Inspection confirms the patch card says "No regressions" and collapses its inline
+review. The map contains two threads: one Low pre-existing compat concern and
+one dismissed statement that the native path skips the initial write. They must
+not be described as two outstanding verified regressions.
+
+Stored attribution and both pages identify copilot-cli/gpt-6-luna. Historical
+thinking effort has not yet been established from invocation evidence. Do not
+infer low effort from the model name or copy the current daemon's medium setting
+onto this older review. Both pages display zero tokens; verify whether the
+provider reported real zeros or usage was unavailable before interpreting them.
+
+## False-Positive Evidence
+
+The operator supplied a GPT-6.1 Sol re-review transcript and the Xen Patch
+Reviewer and Improver agent text. Both attachments are readable. This is supplied
+external review evidence, not a new model call or independently repeated build.
+
+The reported compat finding relies on the inactive constant-zero definition of
+compat_handle_is_null(). In xen/include/xen/compat.h, the CONFIG_COMPAT branch
+uses ((hnd).c == 0); xen/arch/x86/x86_64/Makefile builds domain.o only under
+CONFIG_COMPAT. The supplied re-review reports actual preprocessing of the handler
+as `if ( ((area.addr.h).c == 0) ) break;`, plus focused x86 compilation. If those
+conditions match the reviewed tree, the constant-zero claim is a false positive.
+Verify the exact submitted revision and surrounding conditional/build rules
+before treating a macro definition as reachable evidence.
+
+Keep a separate issue separate: the supplied mailing-list review found an agreed
+native deregistration adjustment that bypasses guest_handle_okay() for NULL.
+That portability hardening and the commit-message corrections do not validate
+the compat claim. The transcript reports no all-architecture or guest-runtime
+test, and this report does not claim those gates passed or apply its Xen edits.
+
+## Recommended Route
+
+1. Show a meaningful one-line final result without opening a disclosure. Keep
+   genuinely long reports collapsible and preserve escaped output and mobile
+   layout. "No regressions" must not imply that no pre-existing concerns exist.
+2. Explain map dispositions with counts and links: candidate, verified regression,
+   verified pre-existing concern, dismissed, and unresolved/unknown. Explain why
+   each item is absent from final patch replies, using stored pipeline evidence
+   rather than a guessed explanation. Preserve raw artifacts and lineage.
+3. Persist and expose provider, exact model, and actual thinking effort for each
+   review/stage, distinguishing requested and effective effort if they differ.
+   Historical missing effort is "Unknown", never reconstructed from live config.
+   Likewise distinguish unavailable token usage from measured zero.
+4. Add confidence evidence in the map, separate from severity and pre-existing
+   status. Prefer an evidence rationale and optional explicitly model-reported
+   score/level with Unknown support. An uncalibrated percentage is not a measured
+   probability; do not fabricate scores for historical findings or hide possible
+   bugs using a confidence threshold. The operator prefers a false positive to
+   a missed finding, while still wanting this avoidable mistake reduced.
+5. Strengthen configuration-sensitive review guidance and a deterministic
+   regression fixture: inspecting a fallback macro alone cannot prove a reachable
+   defect. Establish active #if conditions, architecture, object build selection,
+   and relevant caller before reporting. Unknown configuration remains explicit;
+   do not suppress a real bug affecting a supported non-default configuration.
+
+These are conservative implementation recommendations, not evidence that the
+features already exist. Inspect the current API, final-result selection, map
+lineage, and effort propagation locally before choosing a schema change. Do not
+start a high-level confidence-calibration or review-policy redesign implicitly.
+
+## Acceptance Checks
+
+- An isolated fixture reproduces this page/map combination and the final
+  one-line result is immediately visible on desktop and mobile.
+- The map clearly separates its one pre-existing concern from the dismissed
+  item and explains omission from the regression-only final response.
+- Exact stored/native invocation evidence establishes effort or the UI says
+  Unknown. Mixed effort stages retain their own attribution after restart.
+- Missing usage is unavailable, not an apparent zero-token completed review.
+- Confidence has explicit provenance and uncertainty; severity and recall
+  behavior are unchanged. Historical records do not receive invented scores.
+- Configuration fixtures distinguish active CONFIG_COMPAT from an unreachable
+  fallback and retain a genuine alternative-configuration counterexample.
+- Successful results, original false-positive artifacts, human replies, access
+  controls, and muted outbound delivery remain intact. No automatic rerun or
+  public posting is part of this report.

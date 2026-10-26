@@ -21,6 +21,27 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Prioritized Work
 
+### P1: Explain Review Results, Effort, and Confidence
+
+Status: operator feedback recorded on 2026-10-26; implementation pending.
+See [the concrete report and acceptance checks](../designs/DESIGN_REVIEW_TRANSPARENCY.md).
+The runstate-NULL v2 patch page hides a one-line inline result, while review map
+48 retains one Low pre-existing compat concern and one dismissed native-path
+item. Do not describe these as two final regressions or erase the original data.
+The supplied GPT-6.1 Sol re-review identifies a likely false positive: the
+constant-zero compat macro fallback is inactive where the x86 compat handler
+is built. Confirm exact revision, CONFIG_COMPAT, and the object build rule.
+
+Show concise final results immediately; explain map candidates, verification,
+pre-existing status, dismissal and final-reply omission. Display actual thinking
+effort as well as provider/model, with Unknown for missing historical evidence.
+Separate missing token usage from zero. Add confidence rationale and optional
+provenanced score/level without inventing calibrated probabilities, backfilling
+historical guesses, or hiding low-confidence possible bugs. Preserve the
+operator's recall preference. First inspect stored output and invocation evidence;
+do not assume Luna means low effort or that current runtime settings applied.
+No new premium review or source modification is authorized by this report.
+
 ### P1: Budget-Gated Premium Model Comparisons
 
 Status: agent policy updated in 02453527 with the operator's authorization.
