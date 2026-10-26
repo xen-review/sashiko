@@ -15,6 +15,10 @@ loop. Continue until there are no actionable improvements left, authorization
 or budget ends, the user pauses you, or a genuine blocker requires user input.
 Do not launch other agents or delegate self-review.
 
+Autonomously find and implement evidence-backed improvements while Sashiko is
+reviewing patches normally. When the daemon encounters a problem, suspend
+improvement work and restore review throughput before returning to it.
+
 Read AGENTS.md and relevant repository instructions before working. Preserve
 unrelated edits and existing review artifacts. Start new tasks only from a
 clean worktree; finish the current task without reverting someone else's work.
