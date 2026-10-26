@@ -1341,6 +1341,10 @@ async fn run_worker_in_worktree(
         "tokens_out": total_tokens_out,
         "tokens_cached": total_tokens_cached
     });
+    settings
+        .ai
+        .record_review_attribution(&mut combined_result)
+        .map_err(anyhow::Error::msg)?;
 
     if !review_errors.is_empty()
         && let Some(fields) = combined_result.as_object_mut()
@@ -1525,6 +1529,9 @@ pub fn format_agent_review_output(result: &Value) -> Value {
     });
 
     if let Some(obj) = out.as_object_mut() {
+        if let Some(attribution) = result.get("review_attribution") {
+            obj.insert("review_attribution".into(), attribution.clone());
+        }
         if let Some(partial) = result.get("partial") {
             obj.insert("partial".into(), partial.clone());
         }
@@ -2722,10 +2729,16 @@ mod tests {
 
     #[test]
     fn test_format_agent_review_output_clean_and_issues_and_error() {
+        let attribution = json!({"provider":"codex-cli", "model":"gpt-6-luna", "configured_effort":"medium", "effective_effort":null});
+        assert_eq!(
+            format_agent_review_output(&json!({"review":{}, "review_attribution":attribution}))["review_attribution"],
+            attribution,
+        );
         let clean = json!({
             "patchset_id": 0,
             "baseline": "abc1234",
             "patches": [{"index": 1, "status": "applied", "sha": "def5678", "subject": "feat: x"}],
+            "review_attribution": {"provider":"codex-cli", "model":"gpt-6-luna", "configured_effort":"medium", "effective_effort":null},
             "review": {
                 "summary": "",
                 "findings": [],

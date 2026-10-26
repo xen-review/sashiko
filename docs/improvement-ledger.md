@@ -51,8 +51,13 @@ The saved baseline independently confirms the inactive compat fallback, and the
 submitted patch leaves the header/build rule unchanged. Shared Xen guidance now
 requires active-branch/object-build evidence and retains real non-default-build
 findings; its prompt contract and full make check-pr gates pass. This is not
-proof of universal false-positive elimination. Actual-effort attribution,
-confidence, and missing usage remain open; see the report for browser limits.
+proof of universal false-positive elimination. The first attribution slice saves
+provider/model/configured effort in workflow output at the real parent backend,
+not its stdio worker proxy, and shows configured versus effective effort in
+cards/maps. Historical missing effort and unconfirmed effective effort remain
+Unknown. Snapshot/proxy/provider/escaping tests, full make check-pr, and narrow
+desktop/mobile label checks pass. Backend-confirmed per-stage effort, confidence,
+and missing usage remain open; see the report for browser limits.
 
 ### P1: Budget-Gated Premium Model Comparisons
 

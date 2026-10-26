@@ -83,6 +83,15 @@ features already exist. Inspect the current API, final-result selection, map
 lineage, and effort propagation locally before choosing a schema change. Do not
 start a high-level confidence-calibration or review-policy redesign implicitly.
 
+Incremental attribution decision: use the existing serialized review result for
+a provider/model/configured-effort snapshot; no database migration or new store
+is needed. A configured CLI effort is not backend-confirmed effective effort.
+Keep the latter null unless the provider supplies trustworthy confirmation.
+Per-stage request budgets can differ from a CLI's configured effort, so neither
+is silently promoted to actual backend attribution. Unknown old records remain
+unknown after restart or a settings edit. This first step does not implement
+per-stage effective-effort telemetry or confidence calibration.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final
@@ -123,8 +132,15 @@ findings affecting supported non-default configurations. A deterministic prompt
 contract check and the full make check-pr gate pass. This checks the supplied
 guidance, not a guarantee that future model reviews cannot repeat the mistake.
 
-Effort persistence, confidence provenance, and missing-usage presentation
-remain open. Review 48's public
-API and saved prompt do not contain effort; the stored token totals are zero but
+The first attribution slice stores provider/model/configured effort in existing
+workflow result JSON, including concise local output. The daemon stamps its
+parent-side snapshot before persistence, replacing a worker's stdio proxy label.
+Cards/maps distinguish configured from effective effort; old review 48 displays
+Unknown for both. Tests cover snapshot immutability, supported provider routing,
+proxy replacement, malformed result shape, explicit none, missing values, and
+escaped text. Full make check-pr and desktop/mobile effort-label layout checks
+pass. Backend-confirmed per-stage effort, confidence provenance, and missing-usage
+presentation remain open. Review 48's public API and saved prompt do not contain
+effort; the stored token totals are zero but
 do not establish that its Copilot invocation actually used no tokens. This first
 slice does not invent either missing attribution or confidence.

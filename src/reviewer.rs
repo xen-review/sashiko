@@ -2283,7 +2283,11 @@ impl Reviewer {
             }
 
             match result {
-                Ok(json_output) => {
+                Ok(mut json_output) => {
+                    ctx.settings
+                        .ai
+                        .record_review_attribution(&mut json_output)
+                        .map_err(anyhow::Error::msg)?;
                     let patches_status = json_output["patches"].as_array();
                     let target_applied = patches_status
                         .and_then(|arr| arr.iter().find(|p| p["index"] == index))

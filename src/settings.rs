@@ -756,6 +756,49 @@ pub struct AiSettings {
 }
 
 impl AiSettings {
+    pub fn configured_review_attribution(&self) -> serde_json::Value {
+        let effort = match self.provider.as_str() {
+            "codex-cli" => self
+                .codex_cli
+                .as_ref()
+                .and_then(|settings| settings.effort.as_deref()),
+            "claude-cli" => self
+                .claude_cli
+                .as_ref()
+                .and_then(|settings| settings.effort.as_deref()),
+            "openai" | "openai-compatible" => self
+                .openai_compat
+                .as_ref()
+                .and_then(|settings| settings.effort.as_deref()),
+            _ => None,
+        }
+        .filter(|effort| !effort.trim().is_empty());
+        serde_json::json!({
+            "provider": self.provider,
+            "model": self.model,
+            "configured_effort": effort,
+            "effective_effort": null,
+        })
+    }
+
+    pub(crate) fn record_review_attribution(
+        &self,
+        result: &mut serde_json::Value,
+    ) -> Result<(), String> {
+        let object = result
+            .as_object_mut()
+            .ok_or("Review result must be an object")?;
+        let attribution = self.configured_review_attribution();
+        if let Some(review) = object
+            .get_mut("review")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            review.insert("review_attribution".to_string(), attribution.clone());
+        }
+        object.insert("review_attribution".to_string(), attribution);
+        Ok(())
+    }
+
     pub fn harness_timeout_seconds(
         &self,
         patch_count: usize,
@@ -1837,6 +1880,62 @@ mod tests {
         let inactive: ReviewSettings =
             toml::from_str(&format!("concurrency = 1{manifest}")).unwrap();
         assert!(inactive.validate_mode().is_err());
+    }
+
+    #[test]
+    fn review_attribution_preserves_configured_effort_without_inventing_effective_effort() {
+        let mut ai: AiSettings = toml::from_str(
+            "provider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[codex_cli]\neffort = 'medium'\n",
+        )
+        .unwrap();
+        let snapshot = ai.configured_review_attribution();
+        assert_eq!(snapshot["configured_effort"], "medium");
+        assert!(snapshot["effective_effort"].is_null());
+        ai.codex_cli.as_mut().unwrap().effort = Some("low".to_string());
+        assert_eq!(snapshot["configured_effort"], "medium");
+        assert_eq!(
+            ai.configured_review_attribution()["configured_effort"],
+            "low"
+        );
+        ai.provider = "copilot-cli".to_string();
+        assert!(ai.configured_review_attribution()["configured_effort"].is_null());
+        ai.provider = "codex-cli".to_string();
+        ai.codex_cli.as_mut().unwrap().effort = None;
+        assert!(ai.configured_review_attribution()["configured_effort"].is_null());
+        ai.openai_compat = Some(toml::from_str("effort = 'high'").unwrap());
+        for provider in ["openai", "openai-compatible"] {
+            ai.provider = provider.to_string();
+            assert_eq!(
+                ai.configured_review_attribution()["configured_effort"],
+                "high"
+            );
+        }
+        let mut result = serde_json::json!({"review":{"findings":[]}});
+        ai.provider = "stdio-claude".to_string();
+        ai.record_review_attribution(&mut result).unwrap();
+        assert_eq!(
+            result["review"]["review_attribution"]["provider"],
+            "stdio-claude"
+        );
+        ai.provider = "codex-cli".to_string();
+        ai.codex_cli.as_mut().unwrap().effort = Some("medium".to_string());
+        ai.record_review_attribution(&mut result).unwrap();
+        assert_eq!(
+            result["review"]["review_attribution"]["provider"],
+            "codex-cli"
+        );
+        assert_eq!(
+            result["review"]["review_attribution"]["configured_effort"],
+            "medium"
+        );
+        assert_eq!(
+            result["review"]["review_attribution"],
+            result["review_attribution"]
+        );
+        assert!(
+            ai.record_review_attribution(&mut serde_json::json!([]))
+                .is_err()
+        );
     }
 
     #[test]
