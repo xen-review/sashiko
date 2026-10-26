@@ -58,10 +58,26 @@ by default. This policy is separate from the coding assistant's model setting.
   without a review-map claim. Browser checks at 1280px and 390px covered raw-log
   access, text injection, long source lines, overflow, and header wrapping.
   Final deterministic gates passed the same complete test and lint profiles.
-5. Next, authorized on 2026-10-26: establish one bounded
-  Luna evaluation with retained artifacts and measured
-   cached input, uncached input, output, provider calls, tools, and review quality.
-   No full/small benchmark or automatic queue refill is authorized by this plan.
+5. Initial bounded Luna evaluation completed on 2026-10-26; broader quality
+  comparison remains pending. Two runs on exact Xen commit
+  9a6cc49b44b458c2ce4cac36ea6c411d06850ac5 retained full JSON and stderr under
+  /tmp/sashiko-harness-luna-trial-20261026, outside the repository. Both used
+  Luna/low, nine explicit instruction files, no response cache, and no delivery.
+  The first completed with one provider call, zero tools, 70,223 input tokens
+  (38,656 cached; 31,567 uncached), and 474 output tokens. Its honest diff-only
+  caveat exposed confusion between disabled native tools and caller-executed
+  source-tool JSON. A trial-only clarification produced two provider calls,
+  three source calls, 62,986 input tokens (25,600 cached; 37,386 uncached), and
+  631 output tokens. It inspected the exact changed function, parent, nearby
+  caller, and ARM page declarations and reported no remaining concern. This is
+  limited inspection, not independent verification or a quality benchmark.
+  The second run used more uncached input despite less total input; neither
+  run establishes savings or sequential cache reuse. The harness system prefix
+  now explicitly explains caller-executed JSON source access, with the existing
+  tool-continuation and serialized-prefix regression extended accordingly.
+  Full deterministic gates passed: 1,112 library, 48 main, seven CLI, and
+  25 integration tests, formatting, and all three Clippy profiles.
+  No full/small benchmark or automatic queue refill is authorized by this plan.
 6. Design sequential checkpoints on this engine before implementation. Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
