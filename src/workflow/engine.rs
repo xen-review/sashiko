@@ -17,7 +17,7 @@
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::ai::AiMessage;
+use crate::ai::{AiMessage, SessionUsageCoverage};
 
 use super::events::WorkflowEvent;
 use super::graph::{Workflow, WorkflowStep};
@@ -33,6 +33,8 @@ pub struct StageRunRecord {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cached: u32,
+    #[serde(default)]
+    pub usage_coverage: Option<SessionUsageCoverage>,
     pub prompts_read: Vec<String>,
     pub history_start: usize,
     pub history_end: usize,
@@ -44,6 +46,7 @@ pub struct WorkflowOutcome {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cached: u32,
+    pub usage_coverage: Option<SessionUsageCoverage>,
     pub history: Vec<AiMessage>,
     pub stage_runs: Vec<StageRunRecord>,
     pub early_exit: bool,
@@ -74,6 +77,7 @@ fn stage_outcome_from_error(err: &anyhow::Error) -> StageOutcome {
             tokens_out: u32::try_from(failure.usage.completion_tokens).unwrap_or(u32::MAX),
             tokens_cached: u32::try_from(failure.usage.cached_tokens.unwrap_or(0))
                 .unwrap_or(u32::MAX),
+            usage_coverage: Some(failure.usage_coverage),
             history: failure.history.clone(),
             skipped: false,
         }
@@ -99,6 +103,15 @@ fn record_stage_outcome(
     outcome.tokens_cached = outcome
         .tokens_cached
         .saturating_add(stage_outcome.tokens_cached);
+    if !skipped {
+        outcome.usage_coverage = outcome
+            .usage_coverage
+            .zip(stage_outcome.usage_coverage)
+            .map(|(mut total, coverage)| {
+                total.merge(coverage);
+                total
+            });
+    }
     outcome.history.extend(stage_outcome.history);
     let history_end = outcome.history.len();
     outcome.stage_runs.push(StageRunRecord {
@@ -108,6 +121,7 @@ fn record_stage_outcome(
         tokens_in: stage_outcome.tokens_in,
         tokens_out: stage_outcome.tokens_out,
         tokens_cached: stage_outcome.tokens_cached,
+        usage_coverage: stage_outcome.usage_coverage,
         prompts_read,
         history_start,
         history_end,
@@ -121,6 +135,13 @@ fn merge_workflow_outcome(outcome: &mut WorkflowOutcome, branch_outcome: Workflo
     outcome.tokens_cached = outcome
         .tokens_cached
         .saturating_add(branch_outcome.tokens_cached);
+    outcome.usage_coverage = outcome
+        .usage_coverage
+        .zip(branch_outcome.usage_coverage)
+        .map(|(mut total, coverage)| {
+            total.merge(coverage);
+            total
+        });
     outcome.history.extend(branch_outcome.history);
     for mut rec in branch_outcome.stage_runs {
         rec.history_start = rec.history_start.saturating_add(base_history_len);
@@ -146,7 +167,10 @@ impl WorkflowEngine {
             });
         }
 
-        let mut outcome = WorkflowOutcome::default();
+        let mut outcome = WorkflowOutcome {
+            usage_coverage: Some(SessionUsageCoverage::default()),
+            ..Default::default()
+        };
         if let Err(err) = Self::execute_steps(workflow, env, state, event_cb, &mut outcome).await {
             let message = err.to_string();
             return Err(err.context(WorkflowFailure { message, outcome }));
@@ -634,6 +658,10 @@ mod tests {
         assert!(!outcome.stage_runs[1].skipped);
         assert_eq!(outcome.stage_runs[1].history_start, 1);
         assert_eq!(outcome.stage_runs[1].history_end, 3);
+        let coverage = outcome.usage_coverage.unwrap();
+        assert_eq!(coverage.requests, 2);
+        assert_eq!(coverage.responses_with_usage, 1);
+        assert!(!coverage.is_complete());
     }
 
     #[tokio::test]
@@ -752,6 +780,15 @@ mod tests {
         assert_eq!(outcome.stage_runs[2].history_start, 2);
         assert_eq!(outcome.stage_runs[2].history_end, 4);
         assert_eq!(outcome.history.len(), 4);
+        let coverage = outcome.usage_coverage.unwrap();
+        assert_eq!(coverage.requests, 2);
+        assert_eq!(coverage.responses_with_usage, 2);
+        assert!(coverage.is_complete());
+        assert!(outcome.stage_runs[1].usage_coverage.is_none());
+        let mut legacy = serde_json::to_value(&outcome.stage_runs[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("usage_coverage");
+        let restored: StageRunRecord = serde_json::from_value(legacy).unwrap();
+        assert!(restored.usage_coverage.is_none());
     }
 
     #[tokio::test]
@@ -805,6 +842,10 @@ mod tests {
         assert_eq!(wf.outcome.tokens_in, 40);
         assert_eq!(wf.outcome.tokens_out, 20);
         assert!(!wf.outcome.history.is_empty());
+        let coverage = wf.outcome.usage_coverage.unwrap();
+        assert_eq!(coverage.requests, 4);
+        assert_eq!(coverage.responses_with_usage, 4);
+        assert!(coverage.is_complete());
     }
 
     #[tokio::test]
@@ -866,5 +907,35 @@ mod tests {
         assert_eq!(wf.outcome.stage_runs[1].name, "stage_fail");
         assert_eq!(wf.outcome.tokens_in, 40);
         assert_eq!(wf.outcome.tokens_out, 20);
+        assert_eq!(wf.outcome.usage_coverage.unwrap().requests, 4);
+    }
+
+    #[test]
+    fn unknown_stage_and_branch_coverage_remains_unknown() {
+        let known = SessionUsageCoverage {
+            requests: 1,
+            responses_with_usage: 1,
+            ..Default::default()
+        };
+        let mut outcome = WorkflowOutcome {
+            usage_coverage: Some(SessionUsageCoverage::default()),
+            ..Default::default()
+        };
+        record_stage_outcome(&mut outcome, "unknown", StageOutcome::default());
+        record_stage_outcome(
+            &mut outcome,
+            "known",
+            StageOutcome {
+                usage_coverage: Some(known),
+                ..Default::default()
+            },
+        );
+        assert!(outcome.usage_coverage.is_none());
+        let mut branch = WorkflowOutcome {
+            usage_coverage: Some(known),
+            ..Default::default()
+        };
+        merge_workflow_outcome(&mut branch, outcome);
+        assert!(branch.usage_coverage.is_none());
     }
 }

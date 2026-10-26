@@ -4436,15 +4436,23 @@
             return `<div class="text-muted-sm" style="overflow-wrap:anywhere;">Model confidence: ${assessment} (uncalibrated)</div>${showRationale ? `<div class="log-inline-block">${escapeHtml(confidence.rationale)}</div>` : ''}`;
         }
 
-        function renderReviewTokens(record) {
+        function renderReviewTokens(record, coverage = record?.usage_coverage) {
             const valid = value => Number.isSafeInteger(value) && value >= 0;
             const values = [record?.tokens_in, record?.tokens_cached, record?.tokens_out];
             const session = record?.checkpoint_session;
+            const fields = ['requests', 'responses_with_usage', 'responses_without_usage', 'responses_without_cached_usage'];
+            const hasCoverage = coverage && fields.every(field => valid(coverage[field])) && coverage.responses_with_usage + coverage.responses_without_usage <= coverage.requests && coverage.responses_without_cached_usage <= coverage.responses_with_usage;
+            const positive = values.some(value => valid(value) && value > 0);
+            if (hasCoverage && coverage.requests === 0 && !positive) return 'No provider requests recorded';
+            const complete = hasCoverage && coverage.requests > 0 && coverage.responses_with_usage === coverage.requests && coverage.responses_without_usage === 0;
+            const cachedUnknown = hasCoverage && coverage.responses_without_cached_usage > 0;
+            const status = hasCoverage ? `<br><span class="text-muted-sm">Requests with reported usage: ${coverage.responses_with_usage} / ${coverage.requests}${complete ? '' : ' (incomplete)'}${cachedUnknown ? '; cached usage incomplete' : ''}</span>` : session ? '' : '<br><span class="text-muted-sm">Usage coverage: Unknown</span>';
             const confirmedZero = session?.usage_complete === true && session.provider_calls_recorded > 0;
-            if (!values.some(value => valid(value) && value > 0) && !confirmedZero) return 'Unavailable (not recorded or unconfirmed)';
-            const uncached = valid(record?.tokens_in) && valid(record?.tokens_cached) && record.tokens_in >= record.tokens_cached ? record.tokens_in - record.tokens_cached : null;
+            if (!positive && !confirmedZero && !(hasCoverage && coverage.responses_with_usage > 0)) return `Unavailable (not recorded or unconfirmed)${status}`;
+            const uncached = !cachedUnknown && valid(record?.tokens_in) && valid(record?.tokens_cached) && record.tokens_in >= record.tokens_cached ? record.tokens_in - record.tokens_cached : null;
             const format = value => valid(value) ? formatTokenCount(value) : 'Unknown';
-            return `In: ${format(uncached)} &middot; Cached: ${format(record?.tokens_cached)} &middot; Out: ${format(record?.tokens_out)}`;
+            const cached = cachedUnknown ? valid(record?.tokens_cached) && record.tokens_cached > 0 ? `${format(record.tokens_cached)} (partial)` : 'Unknown' : format(record?.tokens_cached);
+            return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${format(record?.tokens_out)}${status}`;
         }
 
         function renderReviewEffort(attribution) {
@@ -4586,7 +4594,7 @@
                 displayResult = `<span>${checkpointSession ? 'Sequential harness' : 'Agent harness'} &middot; Not independently verified</span>`;
             }
 
-            const tokenStr = renderReviewTokens(r);
+            const tokenStr = renderReviewTokens(r, outputJson?.usage_coverage || r.usage_coverage);
 
             const summaryText = (r.summary || (isHarness ? outputJson?.artifacts?.reviewer_notes : outputJson?.summary) || '').trim();
             let summaryHtml = '';
@@ -6275,10 +6283,6 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
             let stagesSectionHtml = '';
             if (stages.length > 0) {
                 const stageRowsHtml = activeStages.map(({ s, idx }) => {
-                    const tokensIn = Math.max(0, (s.tokens_in || 0) - (s.tokens_cached || 0));
-                    const tokensCached = s.tokens_cached || 0;
-                    const tokensOut = s.tokens_out || 0;
-
                     const staticGuides = Array.isArray(stageGuidesObj[s.name]) ? stageGuidesObj[s.name] : [];
                     const readGuides = Array.isArray(s.prompts_read) ? s.prompts_read : [];
                     const allStageGuides = [...new Set([...staticGuides, ...readGuides])];
@@ -6320,7 +6324,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                         <tr id="rm-stage-row-${idx}" onclick="toggleReviewMapStageLog(${idx})">
                             <td><span id="rm-stage-chevron-${idx}" style="color:var(--text-dim); font-size:0.85em; width:12px; display:inline-block;">▶</span><strong>${escapeHtml(String(stageDisplayName))}</strong>${showCodeName ? `<span class="text-muted-sm"> (<code>${escapeHtml(String(s.name))}</code>)</span>` : ''}</td>
                             <td>${s.turns || 0}</td>
-                            <td class="text-muted-sm">${formatTokenCount(tokensIn)} / ${formatTokenCount(tokensCached)} / ${formatTokenCount(tokensOut)}</td>
+                            <td class="text-muted-sm">${renderReviewTokens(s)}</td>
                             <td>${promptsCellHtml}</td>
                             <td>${outputCellHtml}</td>
                         </tr>
@@ -6384,7 +6388,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                     <div class="kv"><div class="label">Review:</div><div>#${escapeHtml(String(data.id || id))}${reviewMap.legacy ? ' <span class="text-muted-sm">(synthesized from final review output)</span>' : ''}</div></div>
                     <div class="kv"><div class="label">Model:</div><div>${escapeHtml(providerModel)}</div></div>
                     <div class="kv"><div class="label">Thinking effort:</div><div style="overflow-wrap:anywhere;">${renderReviewEffort(outputObj?.review_attribution || data.review_attribution)}</div></div>
-                    <div class="kv"><div class="label">Reported tokens:</div><div>${renderReviewTokens(data)}</div></div>
+                    <div class="kv"><div class="label">Reported tokens:</div><div>${renderReviewTokens(data, outputObj?.usage_coverage || data.usage_coverage)}</div></div>
                     ${promptsHash ? `<div class="kv"><div class="label">Sashiko ver.:</div><div>${escapeHtml(promptsHash)}</div></div>` : ''}
                 </div>
 

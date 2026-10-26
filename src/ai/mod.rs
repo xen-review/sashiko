@@ -889,7 +889,9 @@ pub mod vector_search;
 #[cfg(feature = "vertex")]
 pub mod vertex;
 pub mod vllm;
-pub use session::{ErrorAction, LlmSession, SessionFailure, SessionRunner, ValidationError};
+pub use session::{
+    ErrorAction, LlmSession, SessionFailure, SessionRunner, SessionUsageCoverage, ValidationError,
+};
 
 /// Recursively removes `thought_signature` and `thoughtSignature` fields from a JSON value.
 pub fn scrub_thought_signatures(val: &mut serde_json::Value) {

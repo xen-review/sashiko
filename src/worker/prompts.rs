@@ -133,6 +133,7 @@ pub struct WorkerResult {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cached: u32,
+    pub usage_coverage: Option<crate::ai::SessionUsageCoverage>,
 }
 
 pub struct PromptRegistry {
@@ -546,6 +547,7 @@ impl Worker {
             "concerns_count": concerns_count,
             "dismissed_concerns_count": dismissed_concerns_count,
             "review_map": review_map,
+            "usage_coverage": outcome.usage_coverage,
         });
 
         Ok(WorkerResult {
@@ -558,6 +560,7 @@ impl Worker {
             tokens_in: outcome.tokens_in,
             tokens_out: outcome.tokens_out,
             tokens_cached: outcome.tokens_cached,
+            usage_coverage: outcome.usage_coverage,
         })
     }
 }

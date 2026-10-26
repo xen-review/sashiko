@@ -692,14 +692,20 @@ async fn review_single_patch(
                     "history": result.history,
                     "tokens_in": result.tokens_in,
                     "tokens_out": result.tokens_out,
-                    "tokens_cached": result.tokens_cached
+                    "tokens_cached": result.tokens_cached,
+                    "usage_coverage": if attempt == 1 { result.usage_coverage } else { None },
                 }));
             }
-            Err(e) => {
+            Err(mut e) => {
                 error!(
                     "AI review for patch {} failed with exception: {}",
                     p.index, e
                 );
+                if attempt > 1
+                    && let Some(failure) = e.downcast_mut::<crate::workflow::WorkflowFailure>()
+                {
+                    failure.outcome.usage_coverage = None;
+                }
                 last_error = Some(e);
             }
         }
@@ -1211,10 +1217,15 @@ async fn run_worker_in_worktree(
     let mut total_tokens_in: u64 = 0;
     let mut total_tokens_out: u64 = 0;
     let mut total_tokens_cached: u64 = 0;
+    let mut usage_coverages = Vec::new();
+    if review_errors.len() != failed_outcomes.len() {
+        usage_coverages.push(None);
+    }
     let mut total_concerns_count: u64 = 0;
     let mut total_dismissed_concerns_count: u64 = 0;
 
     for (_idx, failed) in failed_outcomes {
+        usage_coverages.push(failed.usage_coverage);
         total_tokens_in = total_tokens_in.saturating_add(u64::from(failed.tokens_in));
         total_tokens_out = total_tokens_out.saturating_add(u64::from(failed.tokens_out));
         total_tokens_cached = total_tokens_cached.saturating_add(u64::from(failed.tokens_cached));
@@ -1226,6 +1237,11 @@ async fn run_worker_in_worktree(
     }
 
     for res in results {
+        let coverage: Option<crate::ai::SessionUsageCoverage> =
+            serde_json::from_value(res["usage_coverage"].clone())
+                .ok()
+                .flatten();
+        usage_coverages.push(coverage);
         let p_idx = res["patch_index"].as_i64().unwrap_or(0);
         let history_offset = combined_history.len();
         let patch_subject = patches_to_review
@@ -1313,7 +1329,14 @@ async fn run_worker_in_worktree(
             total_tokens_cached.saturating_add(res["tokens_cached"].as_u64().unwrap_or(0));
     }
 
-    let review_output = build_review_output(
+    let usage_coverage = usage_coverages.into_iter().try_fold(
+        crate::ai::SessionUsageCoverage::default(),
+        |mut total, coverage| {
+            total.merge(coverage?);
+            Some(total)
+        },
+    );
+    let mut review_output = build_review_output(
         combined_summary,
         combined_findings,
         combined_concerns,
@@ -1322,6 +1345,7 @@ async fn run_worker_in_worktree(
         total_dismissed_concerns_count,
         single_review_map,
     );
+    review_output["usage_coverage"] = json!(usage_coverage);
 
     let mut combined_result = json!({
         "patchset_id": patchset_id,
@@ -1339,7 +1363,8 @@ async fn run_worker_in_worktree(
         "input_context": combined_input_context,
         "tokens_in": total_tokens_in,
         "tokens_out": total_tokens_out,
-        "tokens_cached": total_tokens_cached
+        "tokens_cached": total_tokens_cached,
+        "usage_coverage": usage_coverage,
     });
     settings
         .ai
@@ -1526,6 +1551,7 @@ pub fn format_agent_review_output(result: &Value) -> Value {
         "tokens_in": result.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
         "tokens_out": result.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
         "tokens_cached": result.get("tokens_cached").and_then(|v| v.as_u64()).unwrap_or(0),
+        "usage_coverage": result.get("usage_coverage").cloned().unwrap_or(Value::Null),
     });
 
     if let Some(obj) = out.as_object_mut() {
@@ -2750,7 +2776,8 @@ mod tests {
             "input_context": "Multi-stage execution completed",
             "tokens_in": 1200,
             "tokens_out": 300,
-            "tokens_cached": 800
+            "tokens_cached": 800,
+            "usage_coverage": {"requests": 2, "responses_with_usage": 1, "responses_without_usage": 1, "responses_without_cached_usage": 0},
         });
         let formatted_clean = format_agent_review_output(&clean);
         assert_eq!(formatted_clean["status"], "clean");
@@ -2760,6 +2787,8 @@ mod tests {
         assert_eq!(formatted_clean["tokens_in"], 1200);
         assert_eq!(formatted_clean["tokens_out"], 300);
         assert_eq!(formatted_clean["tokens_cached"], 800);
+        assert_eq!(formatted_clean["usage_coverage"], clean["usage_coverage"]);
+        assert!(format_agent_review_output(&json!({}))["usage_coverage"].is_null());
         assert!(formatted_clean.get("history").is_none());
         assert!(formatted_clean.get("input_context").is_none());
         assert!(formatted_clean.get("inline_review").is_none());

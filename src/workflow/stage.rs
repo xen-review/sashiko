@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::ai::{
     AiMessage, AiProvider, AiResponse, AiResponseFormat, AiTool, ErrorAction, LlmSession,
-    ReasoningEffort, SessionRunner, ToolCall, ValidationError,
+    ReasoningEffort, SessionRunner, SessionUsageCoverage, ToolCall, ValidationError,
 };
 use crate::toolbox::ToolBox;
 
@@ -37,6 +37,7 @@ pub struct StageOutcome {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cached: u32,
+    pub usage_coverage: Option<SessionUsageCoverage>,
     pub history: Vec<AiMessage>,
     pub skipped: bool,
 }
@@ -517,6 +518,7 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
                     tokens_in: 0,
                     tokens_out: 0,
                     tokens_cached: 0,
+                    usage_coverage: None,
                     skipped: true,
                 },
                 Box::new(|_| {}),
@@ -589,6 +591,7 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
             tokens_in,
             tokens_out,
             tokens_cached,
+            usage_coverage: Some(result.usage_coverage),
             history: result.history,
             skipped: false,
         };

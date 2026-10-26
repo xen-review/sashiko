@@ -99,6 +99,19 @@ the model, labels provenance as model-reported and uncalibrated. No score change
 severity, reporting eligibility, verification lineage, or scheduling. Do not
 inherit another candidate's confidence or synthesize it from model identity.
 
+Incremental usage-availability contract: retain existing numeric totals and add
+typed coverage alongside them. Count Sashiko provider requests, responses with
+usage, responses without usage, and reported responses missing cached usage.
+These are not native model-generation counts. Only complete reported coverage
+can establish a measured zero; missing old metadata stays unknown. A failed or
+unfinished request must not silently make partial totals complete. Carry this
+metadata through session failures, workflow stages, local output, and existing
+serialized review results without a schema migration or historical backfill.
+Known positive partial totals remain useful but must be labeled incomplete;
+unknown cached usage must not be relabeled measured zero. No scheduling or
+billing policy changes are implied. Start with fake-provider discrimination of
+missing versus measured-zero responses, then propagate the proven contract.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final
@@ -180,9 +193,30 @@ Unavailable is visible, the false zero triple is absent, and there is no page
 overflow or injected image. The fixture is stopped and the daemon resumed;
 deployment of this presentation slice is pending.
 
-Backend-confirmed per-stage effort, future usage-availability persistence, and
-live/final usage completeness remain open.
+Backend-confirmed per-stage effort and complete native-call/live usage telemetry
+remain open. Provider-response coverage persistence is implemented below, but
+does not reconstruct missing historical measurements.
 Review 48's public API and saved prompt do not contain effort; its stored zero
 token totals do not establish that its Copilot invocation used no tokens. No
 historical effort or confidence was invented, and no new model review was run
 for the transparency/confidence changes.
+
+Typed provider-response coverage is now implemented in source through shared
+sessions, session failures, stage records, sequential/parallel workflow outcomes,
+worker results, per-stage maps, and full/concise local JSON. The existing nested
+review result retains it for daemon persistence, without a migration. Skipped
+stages add no requests; old/custom records and unaccounted whole-worker restarts
+stay unknown. Reported truncated-response tokens survive output rejection.
+Cards, maps, and human CLI output distinguish confirmed zero, unavailable usage,
+partial reported totals, and missing cached usage. Coverage counts Sashiko
+provider-request responses, not native generations, billing, or hidden retries
+inside a provider wrapper. It does not prove every backend generation was metered.
+Coverage objects require explicit counters; malformed partial objects cannot
+silently become zero-request snapshots. Focused session, workflow, worker, map,
+local JSON, human output, syntax, and rendering checks pass. The final full
+make check-pr gate passed 1,130 library tests (two ignored), 49 main, seven CLI,
+25 integration, formatting, and all Clippy profiles. Synthetic card/map browser
+checks at 1,280 and 390 pixels show complete zero, partial totals, and unknown
+cache usage correctly, without overflow, injected images, or page errors. The
+fixture is stopped and the daemon resumed. Deployment remains pending.
+Historical output is unchanged, and no new model call was needed.

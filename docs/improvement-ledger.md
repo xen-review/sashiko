@@ -77,6 +77,20 @@ Deployment remains pending. Backend-confirmed per-stage effort, future
 availability persistence, and live/final completeness remain open; see the report
 for browser limits.
 
+The adjacent availability-persistence slice now carries typed provider-response
+coverage through success/failure sessions, stage/workflow aggregation, worker
+results, maps, and full/concise local JSON, including the nested result used for
+daemon persistence. It needs no migration or historical backfill. Unknown stages
+and unaccounted worker restarts stay unknown, and truncation retains reported
+usage. The UI and human output consume this metadata without calling response
+counts native generations or claiming billing completeness. Malformed partial
+coverage objects stay unknown. Focused contract, aggregation, serialization,
+display, and desktop/mobile card/map/stage checks pass. The full make check-pr
+gate passed 1,130 library tests (two ignored), 49 main, seven CLI, 25 integration,
+formatting, and all Clippy profiles. The fixture is stopped and the daemon
+resumed; deployment remains pending. Actual backend effort and complete native
+call/live-usage telemetry remain separate open work.
+
 ### P1: Budget-Gated Premium Model Comparisons
 
 Status: agent policy updated in 02453527 with the operator's authorization.

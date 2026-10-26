@@ -726,6 +726,7 @@ pub fn build_review_map(
                 "tokens_in": r.tokens_in,
                 "tokens_out": r.tokens_out,
                 "tokens_cached": r.tokens_cached,
+                "usage_coverage": r.usage_coverage,
                 "prompts_read": r.prompts_read,
                 "concerns_count": concerns_count,
                 "dismissed_count": dismissed_count,
@@ -894,6 +895,7 @@ mod tests {
                 tokens_in: 100,
                 tokens_out: 50,
                 tokens_cached: 0,
+                usage_coverage: None,
                 prompts_read: vec![],
                 history_start: 0,
                 history_end: 2,
@@ -905,6 +907,11 @@ mod tests {
                 tokens_in: 200,
                 tokens_out: 80,
                 tokens_cached: 0,
+                usage_coverage: Some(crate::ai::SessionUsageCoverage {
+                    requests: 2,
+                    responses_with_usage: 2,
+                    ..Default::default()
+                }),
                 prompts_read: vec!["subsystem/bpf.md".to_string()],
                 history_start: 2,
                 history_end: 6,
@@ -914,6 +921,8 @@ mod tests {
         let map = build_review_map(ProjectId::Linux, &state, &stage_runs, 1);
         assert_eq!(map["version"], 1);
         assert_eq!(map["project"], "linux");
+        assert!(map["stages"][0]["usage_coverage"].is_null());
+        assert_eq!(map["stages"][1]["usage_coverage"]["requests"], 2);
         assert_eq!(map["stages"][0]["log_start"], 1);
         assert_eq!(map["stages"][0]["log_end"], 3);
         assert_eq!(map["stages"][0]["concerns_count"], 1);

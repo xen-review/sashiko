@@ -21,6 +21,36 @@ use super::{
     AiUsage, ReasoningEffort, ToolCall, classify_ai_error,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionUsageCoverage {
+    pub requests: usize,
+    pub responses_with_usage: usize,
+    pub responses_without_usage: usize,
+    pub responses_without_cached_usage: usize,
+}
+
+impl SessionUsageCoverage {
+    pub fn is_complete(self) -> bool {
+        self.requests > 0
+            && self.responses_with_usage == self.requests
+            && self.responses_without_usage == 0
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.requests = self.requests.saturating_add(other.requests);
+        self.responses_with_usage = self
+            .responses_with_usage
+            .saturating_add(other.responses_with_usage);
+        self.responses_without_usage = self
+            .responses_without_usage
+            .saturating_add(other.responses_without_usage);
+        self.responses_without_cached_usage = self
+            .responses_without_cached_usage
+            .saturating_add(other.responses_without_cached_usage);
+    }
+}
+
 /// The unified result of executing an [`LlmSession`].
 pub struct SessionResult<T> {
     /// The validated output of the session.
@@ -29,6 +59,7 @@ pub struct SessionResult<T> {
     pub history: Vec<AiMessage>,
     /// Accumulated token usage statistics.
     pub usage: AiUsage,
+    pub usage_coverage: SessionUsageCoverage,
 }
 
 /// Error returned when an [`LlmSession`] fails, preserving partial conversation
@@ -38,6 +69,7 @@ pub struct SessionFailure {
     pub message: String,
     pub history: Vec<AiMessage>,
     pub usage: AiUsage,
+    pub usage_coverage: SessionUsageCoverage,
 }
 
 impl std::fmt::Display for SessionFailure {
@@ -247,12 +279,14 @@ impl<'a> SessionRunner<'a> {
         let mut total_prompt_tokens = 0;
         let mut total_completion_tokens = 0;
         let mut total_cached_tokens = 0;
+        let mut usage_coverage = SessionUsageCoverage::default();
 
         let make_failure = |message: String,
                             history: Vec<AiMessage>,
                             prompt_tokens: usize,
                             completion_tokens: usize,
-                            cached_tokens: usize|
+                            cached_tokens: usize,
+                            usage_coverage: SessionUsageCoverage|
          -> anyhow::Error {
             anyhow::Error::new(SessionFailure {
                 message,
@@ -263,6 +297,7 @@ impl<'a> SessionRunner<'a> {
                     total_tokens: prompt_tokens.saturating_add(completion_tokens),
                     cached_tokens: Some(cached_tokens),
                 },
+                usage_coverage,
             })
         };
 
@@ -275,6 +310,7 @@ impl<'a> SessionRunner<'a> {
                     total_prompt_tokens,
                     total_completion_tokens,
                     total_cached_tokens,
+                    usage_coverage,
                 ));
             }
             if let Some(ref cb) = self.on_turn {
@@ -312,6 +348,7 @@ impl<'a> SessionRunner<'a> {
 
             // Kept so that a rejected answer can be forgotten below.
             let sent = request.clone();
+            usage_coverage.requests = usage_coverage.requests.saturating_add(1);
             let resp = match self.provider.generate_content(request).await {
                 Ok(r) => r,
                 Err(e) => match classify_ai_error(&e) {
@@ -328,6 +365,7 @@ impl<'a> SessionRunner<'a> {
                                 total_prompt_tokens,
                                 total_completion_tokens,
                                 total_cached_tokens,
+                                usage_coverage,
                             ));
                         }
                         tracing::warn!(
@@ -355,6 +393,7 @@ impl<'a> SessionRunner<'a> {
                                         total_prompt_tokens,
                                         total_completion_tokens,
                                         total_cached_tokens,
+                                        usage_coverage,
                                     ));
                                 }
                                 let msg = AiMessage {
@@ -382,12 +421,31 @@ impl<'a> SessionRunner<'a> {
                                             .saturating_add(total_completion_tokens),
                                         cached_tokens: Some(total_cached_tokens),
                                     },
+                                    usage_coverage,
                                 }));
                             }
                         }
                     }
                 },
             };
+
+            if let Some(usage) = &resp.usage {
+                usage_coverage.responses_with_usage =
+                    usage_coverage.responses_with_usage.saturating_add(1);
+                if usage.cached_tokens.is_none() {
+                    usage_coverage.responses_without_cached_usage = usage_coverage
+                        .responses_without_cached_usage
+                        .saturating_add(1);
+                }
+                total_prompt_tokens = total_prompt_tokens.saturating_add(usage.prompt_tokens);
+                total_completion_tokens =
+                    total_completion_tokens.saturating_add(usage.completion_tokens);
+                total_cached_tokens =
+                    total_cached_tokens.saturating_add(usage.cached_tokens.unwrap_or(0));
+            } else {
+                usage_coverage.responses_without_usage =
+                    usage_coverage.responses_without_usage.saturating_add(1);
+            }
 
             if resp.truncated {
                 // Giving up, as when the answers are rejected below: forget
@@ -402,15 +460,8 @@ impl<'a> SessionRunner<'a> {
                     total_prompt_tokens,
                     total_completion_tokens,
                     total_cached_tokens,
+                    usage_coverage,
                 ));
-            }
-
-            if let Some(usage) = &resp.usage {
-                total_prompt_tokens = total_prompt_tokens.saturating_add(usage.prompt_tokens);
-                total_completion_tokens =
-                    total_completion_tokens.saturating_add(usage.completion_tokens);
-                total_cached_tokens =
-                    total_cached_tokens.saturating_add(usage.cached_tokens.unwrap_or(0));
             }
 
             let assistant_msg = AiMessage {
@@ -447,6 +498,7 @@ impl<'a> SessionRunner<'a> {
                                         .saturating_add(total_completion_tokens),
                                     cached_tokens: Some(total_cached_tokens),
                                 },
+                                usage_coverage,
                             }));
                         }
                     };
@@ -479,6 +531,7 @@ impl<'a> SessionRunner<'a> {
                         output,
                         history: log_history,
                         usage,
+                        usage_coverage,
                     });
                 }
                 Result::Err(ValidationError::FormatViolation(violation)) => {
@@ -499,6 +552,7 @@ impl<'a> SessionRunner<'a> {
                             total_prompt_tokens,
                             total_completion_tokens,
                             total_cached_tokens,
+                            usage_coverage,
                         ));
                     }
                     let feedback = session.format_validation_feedback(&violation);
@@ -521,6 +575,7 @@ impl<'a> SessionRunner<'a> {
                         total_prompt_tokens,
                         total_completion_tokens,
                         total_cached_tokens,
+                        usage_coverage,
                     ));
                 }
             }
@@ -650,6 +705,9 @@ mod tests {
 
         let res = runner.run(&mut session).await.unwrap();
         assert_eq!(res.output, "Recovered after tool error");
+        assert_eq!(res.usage_coverage.requests, 2);
+        assert_eq!(res.usage_coverage.responses_without_usage, 2);
+        assert!(!res.usage_coverage.is_complete());
 
         // Verify history contains the error response for the tool
         let tool_msg = res.history.iter().find(|m| m.role == AiRole::Tool).unwrap();
@@ -661,6 +719,111 @@ mod tests {
                 .unwrap()
                 .contains("Tool execution failed")
         );
+    }
+
+    #[test]
+    fn usage_coverage_requires_explicit_response_counters() {
+        for incomplete in [
+            serde_json::json!({}),
+            serde_json::json!({"requests": 1, "responses_with_usage": 1}),
+            serde_json::json!({"requests": 1, "responses_with_usage": 1, "responses_without_usage": 0}),
+        ] {
+            assert!(serde_json::from_value::<SessionUsageCoverage>(incomplete).is_err());
+        }
+        let empty = SessionUsageCoverage::default();
+        let restored: SessionUsageCoverage =
+            serde_json::from_value(serde_json::to_value(empty).unwrap()).unwrap();
+        assert_eq!(restored, empty);
+        assert!(!restored.is_complete());
+    }
+
+    #[tokio::test]
+    async fn usage_coverage_distinguishes_missing_and_measured_zero() {
+        for usage in [
+            None,
+            Some(AiUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cached_tokens: Some(0),
+            }),
+            Some(AiUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cached_tokens: None,
+            }),
+        ] {
+            let reported = usage.is_some();
+            let cached_unknown = usage
+                .as_ref()
+                .is_some_and(|usage| usage.cached_tokens.is_none());
+            let provider = MockProvider::new(vec![AiResponse {
+                content: Some("Valid output".to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage,
+                truncated: false,
+            }]);
+            let result = SessionRunner::new(&provider)
+                .run(&mut DummySession)
+                .await
+                .unwrap();
+            assert_eq!(result.usage.prompt_tokens, 0);
+            assert_eq!(result.usage_coverage.requests, 1);
+            assert_eq!(
+                result.usage_coverage.responses_with_usage,
+                usize::from(reported)
+            );
+            assert_eq!(
+                result.usage_coverage.responses_without_usage,
+                usize::from(!reported)
+            );
+            assert_eq!(
+                result.usage_coverage.responses_without_cached_usage,
+                usize::from(cached_unknown)
+            );
+            assert_eq!(result.usage_coverage.is_complete(), reported);
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_coverage_retains_failed_and_truncated_call_accounting() {
+        for truncated in [false, true] {
+            let provider = MockProvider::new(vec![AiResponse {
+                content: None,
+                thought: None,
+                thought_signature: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "usage-tool".to_string(),
+                    function_name: "ok_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                }]),
+                usage: Some(AiUsage {
+                    prompt_tokens: 17,
+                    completion_tokens: 2,
+                    total_tokens: 19,
+                    cached_tokens: Some(3),
+                }),
+                truncated,
+            }]);
+            let error = SessionRunner::new(&provider)
+                .run(&mut DummySession)
+                .await
+                .err()
+                .unwrap();
+            let failure = error.downcast_ref::<SessionFailure>().unwrap();
+            assert_eq!(failure.usage.prompt_tokens, 17);
+            assert_eq!(failure.usage.completion_tokens, 2);
+            assert_eq!(failure.usage_coverage.responses_with_usage, 1);
+            assert_eq!(
+                failure.usage_coverage.requests,
+                if truncated { 1 } else { 2 }
+            );
+            assert_eq!(failure.usage_coverage.is_complete(), truncated);
+        }
     }
 
     #[tokio::test]

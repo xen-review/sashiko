@@ -3099,6 +3099,15 @@ fn write_review_result(
         }
     }
 
+    write_review_usage(out, result)?;
+    Ok(())
+}
+
+fn write_review_usage(out: &mut impl WriteColor, result: &Value) -> std::io::Result<()> {
+    let coverage: Option<sashiko::ai::SessionUsageCoverage> =
+        serde_json::from_value(result["usage_coverage"].clone())
+            .ok()
+            .flatten();
     let tokens_in = result
         .get("tokens_in")
         .and_then(|v| v.as_u64())
@@ -3111,12 +3120,48 @@ fn write_review_result(
         .get("tokens_cached")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    if tokens_in > 0 || tokens_out > 0 || tokens_cached > 0 {
+    if tokens_in > 0
+        || tokens_out > 0
+        || tokens_cached > 0
+        || coverage.is_some_and(|coverage| coverage.responses_with_usage > 0)
+    {
+        let cached = if coverage.is_some_and(|coverage| coverage.responses_without_cached_usage > 0)
+        {
+            if tokens_cached > 0 {
+                format!("{tokens_cached} reported (partial)")
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            tokens_cached.to_string()
+        };
         writeln!(
             out,
-            "\nTokens: {} in / {} out / {} cached",
-            tokens_in, tokens_out, tokens_cached
+            "\nReported tokens: {} in / {} out / {} cached",
+            tokens_in, tokens_out, cached
         )?;
+    } else if coverage.is_some_and(|coverage| coverage.requests == 0) {
+        writeln!(out, "\nNo provider requests recorded.")?;
+    } else {
+        writeln!(
+            out,
+            "\nToken usage: unavailable (not recorded or unconfirmed)."
+        )?;
+    }
+    if let Some(coverage) = coverage {
+        writeln!(
+            out,
+            "Requests with reported usage: {} / {}{}",
+            coverage.responses_with_usage,
+            coverage.requests,
+            if coverage.is_complete() {
+                ""
+            } else {
+                " (incomplete)"
+            }
+        )?;
+    } else {
+        writeln!(out, "Usage coverage: unknown.")?;
     }
 
     Ok(())
@@ -4276,6 +4321,50 @@ mod tests {
         let default_output = String::from_utf8(default_buf.into_inner()).unwrap();
         assert!(default_output.contains("\nNo issues found.\n"));
         assert!(!default_output.contains("Pre-existing Findings:"));
+    }
+
+    #[test]
+    fn write_review_result_distinguishes_missing_partial_and_zero_usage() {
+        let complete = sashiko::ai::SessionUsageCoverage {
+            requests: 1,
+            responses_with_usage: 1,
+            ..Default::default()
+        };
+        for (coverage, required, forbidden) in [
+            (None, "Token usage: unavailable", "Reported tokens: 0"),
+            (
+                Some(complete),
+                "Reported tokens: 0 in / 0 out / 0 cached",
+                "incomplete",
+            ),
+            (
+                Some(sashiko::ai::SessionUsageCoverage {
+                    requests: 2,
+                    ..complete
+                }),
+                "1 / 2 (incomplete)",
+                "Usage coverage: unknown",
+            ),
+            (
+                Some(sashiko::ai::SessionUsageCoverage {
+                    responses_without_cached_usage: 1,
+                    ..complete
+                }),
+                "unknown cached",
+                " / 0 cached",
+            ),
+        ] {
+            let result = serde_json::json!({
+                "review": {"findings": []},
+                "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+                "usage_coverage": coverage,
+            });
+            let mut buffer = Buffer::no_color();
+            write_review_result(&mut buffer, &result, "HEAD", false).unwrap();
+            let output = String::from_utf8(buffer.into_inner()).unwrap();
+            assert!(output.contains(required), "{output}");
+            assert!(!output.contains(forbidden), "{output}");
+        }
     }
 
     use termcolor::Buffer;
