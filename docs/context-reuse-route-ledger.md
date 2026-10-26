@@ -85,6 +85,14 @@ by default. This policy is separate from the coding assistant's model setting.
   Typed strategy selection is implemented with whole_series as the default;
   sequential_patches fails closed until continuation and persistence are wired.
   Focused settings regression and all full deterministic gates passed.
+  The shared HarnessSession now owns the fixed prefix, read-only declarations,
+  cumulative trace/limits, and original deadline. Whole-series execution uses
+  the same checkpoint operation. Fake-provider tests cover two append-only
+  checkpoints, shared invocation/input limits, unchanged deadline, terminal
+  cancellation, and no calls after expiry. Full gates passed 1,113 library,
+  48 main, seven CLI, and 25 integration tests, formatting, and all Clippy
+  profiles. Per-patch artifact validation and atomic partial persistence are
+  still required before enabling sequential strategy.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each
