@@ -115,6 +115,14 @@ by default. This policy is separate from the coding assistant's model setting.
   all Clippy profiles. This schema foundation is not installed in the live
   database; atomic checkpoint writers, interruption recovery, and runtime
   dispatch remain pending. Sequential selection still fails closed.
+  Startup recovery now terminalizes active sequential invocation markers in
+  one transaction rather than requeueing them. Completed checkpoint artifacts
+  and Reviewed patches are preserved; cancellation remains sticky. Tests cover
+  rollback on the final status write, repeated startup, ordinary workflow
+  recovery, and an explicit later rerun unaffected by the older interrupted
+  marker. Full gates passed 1,118 library, 48 main, seven CLI, and 25 integration
+  tests, formatting, and all Clippy profiles. Atomic checkpoint writers and
+  dispatch remain disabled/pending, and this recovery change is not deployed.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

@@ -9968,8 +9968,36 @@ impl Database {
 
     pub async fn reset_reviewing_status(&self) -> Result<u64> {
         let status_pending = ReviewStatus::Pending.as_str();
+        let tx = self.begin_transaction().await?;
+        let checkpoint_reviews = tx.execute(
+            "UPDATE reviews SET status = CASE
+                WHEN EXISTS (SELECT 1 FROM patchsets p WHERE p.id = reviews.patchset_id AND p.status = 'Cancelled') THEN 'Cancelled'
+                ELSE 'Failed' END,
+                result_description = 'Sequential harness interrupted; completed checkpoints preserved; remaining scope will not be replayed'
+             WHERE status = 'In Review' AND id IN (SELECT review_id FROM harness_checkpoint_sessions WHERE state = 'active')", (),
+        ).await?;
+        tx.execute(
+            "UPDATE patches SET status = 'Failed'
+             WHERE COALESCE(status, '') NOT IN ('Reviewed', 'Skipped', 'Cancelled')
+               AND id IN (SELECT c.patch_id FROM review_patch_coverage c
+                   JOIN harness_checkpoint_sessions s ON s.review_id = c.review_id
+                   JOIN reviews r ON r.id = s.review_id JOIN patchsets p ON p.id = r.patchset_id
+                   WHERE s.state = 'active' AND r.status = 'Failed' AND p.status IN ('In Review', 'Reviewing'))", (),
+        ).await?;
+        let checkpoint_patchsets = tx.execute(
+            "UPDATE patchsets SET status = 'Failed', failed_reason = 'Sequential harness interrupted; completed checkpoints retained; explicit rerun required'
+             WHERE status IN ('In Review', 'Reviewing') AND id IN (
+                 SELECT r.patchset_id FROM reviews r JOIN harness_checkpoint_sessions s ON s.review_id = r.id
+                 WHERE s.state = 'active' AND r.status = 'Failed')", (),
+        ).await?;
+        tx.execute(
+            "UPDATE harness_checkpoint_sessions SET state = CASE
+                WHEN EXISTS (SELECT 1 FROM reviews r WHERE r.id = review_id AND r.status = 'Cancelled') THEN 'cancelled'
+                ELSE 'interrupted' END
+             WHERE state = 'active' AND review_id IN (SELECT id FROM reviews WHERE status IN ('Failed', 'Cancelled'))", (),
+        ).await?;
         // Reset Patchsets
-        let count_ps = self
+        let count_ps = tx
             .execute(
                 format!(
                     "UPDATE patchsets SET status = '{}' WHERE status IN ('In Review', 'Reviewing')",
@@ -9981,7 +10009,7 @@ impl Database {
             .await?;
 
         // Reset Reviews
-        let count_rev = self
+        let count_rev = tx
             .execute(
                 format!(
                     "UPDATE reviews SET status = '{}' WHERE status = 'In Review'",
@@ -9992,7 +10020,8 @@ impl Database {
             )
             .await?;
 
-        Ok(count_ps + count_rev)
+        tx.commit().await?;
+        Ok(count_ps + count_rev + checkpoint_reviews + checkpoint_patchsets)
     }
 
     pub async fn get_patchset_counts_by_status(
@@ -11812,6 +11841,119 @@ mod tests {
         db.create_patch(patchset_id, "base-2", 2, "diff two")
             .await?;
         Ok(patchset_id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_recovery_preserves_completed_results_without_replay() -> Result<()> {
+        for cancelled in [false, true] {
+            let db = setup_db().await;
+            let patchset_id = insert_stored_prerequisite_series(&db).await?;
+            let diffs = db.get_patch_diffs(patchset_id).await?;
+            let covered: Vec<_> = diffs
+                .iter()
+                .map(|(patch_id, index, ..)| HarnessReviewPatch {
+                    patch_id: *patch_id,
+                    commit_id: crate::baseline::CommitId::parse(&format!("{index:040x}")).unwrap(),
+                })
+                .collect();
+            db.update_patchset_status(patchset_id, "In Review").await?;
+            let review_id = db
+                .start_harness_review(HarnessReviewStart {
+                    patchset_id,
+                    provider: "codex-cli",
+                    model: "gpt-6-luna",
+                    baseline_id: None,
+                    prompts_hash: "snapshot",
+                    patches: &covered,
+                })
+                .await?
+                .unwrap();
+            db.execute("INSERT INTO harness_checkpoint_sessions (review_id, input_context, series_fingerprint, checkpoint_count, history_end, provider_calls_end, created_at) VALUES (?, 'input', ?, 1, 2, 1, 1)", libsql::params![review_id, "b".repeat(64)]).await?;
+            db.execute("INSERT INTO harness_patch_checkpoints (review_id, checkpoint_index, patch_id, message_id, commit_id, reviewer_notes, reply_body, history_end, provider_calls_end, created_at) VALUES (?, 1, ?, ?, ?, 'Preserved evidence', 'Preserved reply', 2, 1, 1)", libsql::params![review_id, covered[0].patch_id, diffs[0].6.as_str(), covered[0].commit_id.to_string()]).await?;
+            db.execute("UPDATE patches SET status = CASE WHEN id = ? THEN 'Reviewed' ELSE 'In Review' END WHERE patchset_id = ?", libsql::params![covered[0].patch_id, patchset_id]).await?;
+            if cancelled {
+                db.update_patchset_status(patchset_id, "Cancelled").await?;
+            } else {
+                db.execute_batch("CREATE TEMP TRIGGER fail_checkpoint_recovery BEFORE UPDATE OF status ON patchsets WHEN NEW.status = 'Failed' BEGIN SELECT RAISE(ABORT, 'Injected recovery failure'); END;").await?;
+                assert!(db.reset_reviewing_status().await.is_err());
+                let mut rows = db.conn.query("SELECT r.status, s.state FROM reviews r JOIN harness_checkpoint_sessions s ON s.review_id = r.id WHERE r.id = ?", libsql::params![review_id]).await?;
+                let row = rows.next().await?.unwrap();
+                assert_eq!(row.get::<String>(0)?, "In Review");
+                assert_eq!(row.get::<String>(1)?, "active");
+                drop(rows);
+                db.execute_batch("DROP TRIGGER fail_checkpoint_recovery")
+                    .await?;
+            }
+            db.reset_reviewing_status().await?;
+            let mut rows = db.conn.query("SELECT r.status, s.state, p.status, c.reviewer_notes, c.reply_body FROM reviews r JOIN harness_checkpoint_sessions s ON s.review_id = r.id JOIN harness_patch_checkpoints c ON c.review_id = r.id JOIN patches p ON p.id = c.patch_id WHERE r.id = ?", libsql::params![review_id]).await?;
+            let row = rows.next().await?.unwrap();
+            assert_eq!(
+                row.get::<String>(0)?,
+                if cancelled { "Cancelled" } else { "Failed" }
+            );
+            assert_eq!(
+                row.get::<String>(1)?,
+                if cancelled {
+                    "cancelled"
+                } else {
+                    "interrupted"
+                }
+            );
+            assert_eq!(row.get::<String>(2)?, "Reviewed");
+            assert_eq!(row.get::<String>(3)?, "Preserved evidence");
+            assert_eq!(row.get::<String>(4)?, "Preserved reply");
+            drop(rows);
+            assert_eq!(
+                db.get_patchset_status(patchset_id).await?.as_deref(),
+                Some(if cancelled { "Cancelled" } else { "Failed" })
+            );
+            assert_eq!(db.reset_reviewing_status().await?, 0);
+            if !cancelled {
+                db.update_patchset_status(patchset_id, "In Review").await?;
+                let rerun_id = db
+                    .create_review(patchset_id, None, "codex-cli", "gpt-6-luna", None, None)
+                    .await?;
+                db.update_review_status(rerun_id, "In Review", None).await?;
+                db.reset_reviewing_status().await?;
+                assert_eq!(
+                    db.get_patchset_status(patchset_id).await?.as_deref(),
+                    Some("Pending")
+                );
+                let mut rows = db
+                    .conn
+                    .query(
+                        "SELECT status FROM reviews WHERE id = ?",
+                        libsql::params![rerun_id],
+                    )
+                    .await?;
+                assert_eq!(rows.next().await?.unwrap().get::<String>(0)?, "Pending");
+            }
+        }
+        let legacy = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&legacy).await?;
+        legacy
+            .update_patchset_status(patchset_id, "In Review")
+            .await?;
+        let review_id = legacy
+            .create_review(patchset_id, None, "codex-cli", "gpt-6-luna", None, None)
+            .await?;
+        legacy
+            .update_review_status(review_id, "In Review", None)
+            .await?;
+        legacy.reset_reviewing_status().await?;
+        assert_eq!(
+            legacy.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Pending")
+        );
+        let mut rows = legacy
+            .conn
+            .query(
+                "SELECT status FROM reviews WHERE id = ?",
+                libsql::params![review_id],
+            )
+            .await?;
+        assert_eq!(rows.next().await?.unwrap().get::<String>(0)?, "Pending");
+        Ok(())
     }
 
     #[tokio::test]
