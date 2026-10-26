@@ -248,9 +248,15 @@ persisted evidence, unknown/stale and revert semantics, and unchanged scheduling
 Read-only inspection confirms origin is the xen-review fork and upstream is the
 Xenbits repository, with different staging tips. Recommend explicit
 refs/remotes/upstream/staging. Approval is required for that new index/evidence
-architecture and target choice before implementation. The alternative is an
-operator-run read-only JSON report without integrated filters. No ref fetch,
-migration, new worker, history scan, model call, or live classification ran.
+architecture and target choice was explicitly granted by the operator after
+the interrupted question was recovered on 2026-10-26. Typed opt-in settings and
+the bounded pinned-tip matcher are implemented in source. Four temporary-Git
+tests cover rewritten identities, ref rewrites, history/byte limits, cache reuse,
+duplicates, merges, binary/empty diffs, and reverts. Full make check-pr passed
+1,137 library tests (two ignored), 49 main, seven CLI, 26 integration, formatting,
+and all Clippy profiles. Persisted evidence, sync integration, and classification
+UI/filtering remain pending. No live ref fetch, migration, history scan, model
+call, or live classification ran; ordinary reviews and scheduling are unchanged.
 
 Goal: detect and display when an individual patch is already incorporated into
 the configured upstream reference. For Xen, prefer the upstream `staging` branch

@@ -6,11 +6,15 @@ the general improvement ledger retains other independent tasks.
 ## Current Continuation
 
 Current task boundary: staging design drafted in
-designs/DESIGN_XEN_STAGING_EVIDENCE.md. The new bounded index/persisted evidence
-architecture and explicit refs/remotes/upstream/staging target require operator
-approval. No source implementation, migration, worker, fetch, broad history
-scan, model call, or scheduling change was made for this proposal. A manual
-read-only JSON command is the lower-integration alternative. Remote inspection
+designs/DESIGN_XEN_STAGING_EVIDENCE.md. After interruption, the operator explicitly
+approved the integrated bounded index/persisted evidence architecture and
+refs/remotes/upstream/staging target on 2026-10-26. Configuration and bounded
+matching foundations are now implemented in source, with focused temporary-Git
+tests and full gates passing: 1,137 library tests (two ignored), 49 main, seven
+CLI, 26 integration, formatting, and all Clippy profiles. The idle daemon was
+resumed after validation. Database evidence, refresh
+integration, and API/UI remain pending; no migration, live fetch/history scan,
+model call, or scheduling change has been made. Remote inspection
 confirms origin is https://github.com/xen-review/xen.git and upstream is the
 Xenbits repository; their staging tips differ, so silently choosing origin
 would be wrong for the proposed target. Do not infer freshness from commit dates.
@@ -37,6 +41,12 @@ Fresh authenticated quota at 19:03:02 CET confirms the reset: 99% five-hour and
 daemon-account quotas remain distinct. No provider/model/effort switch, premium
 experiment, sleep, benchmark, self-review, public post, or queue refill occurred.
 Continue useful authorized ledger work without spending just because reset.
+
+Interruption-resume check at 22:24 CET: daemon healthy, 4,071 messages, same
+451 series and 98 Reviewed, no Pending/In Review. Fresh authenticated quota
+91% five-hour / 69% weekly, reset 00:01:44 CET on 2026-10-27. That does not
+authorize overnight model experiments or self-review. No model call is needed
+for the staging implementation. Preserve the existing muted Luna/medium runtime.
 
 ### Status-Filter Rollout Evidence
 

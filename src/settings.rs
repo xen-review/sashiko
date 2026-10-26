@@ -1099,6 +1099,70 @@ pub struct GitSettings {
     #[serde(default)]
     pub repository_path: String,
     pub custom_remotes: Option<Vec<CustomRemoteSettings>>,
+    pub staging: Option<StagingSettings>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StagingSettings {
+    pub remote: String,
+    pub target_ref: String,
+    #[serde(default = "default_staging_freshness")]
+    pub freshness_seconds: u64,
+    #[serde(default = "default_staging_commits")]
+    pub max_commits: usize,
+    #[serde(default = "default_staging_bytes")]
+    pub max_diff_bytes: usize,
+    #[serde(default = "default_staging_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_staging_freshness() -> u64 {
+    86400
+}
+fn default_staging_commits() -> usize {
+    1000
+}
+fn default_staging_bytes() -> usize {
+    16 * 1024 * 1024
+}
+fn default_staging_timeout() -> u64 {
+    120
+}
+
+impl StagingSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_component = |part: &str| {
+            !part.is_empty()
+                && !part.starts_with(['.', '-'])
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && !part.contains("..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        };
+        if !valid_component(&self.remote)
+            || !self
+                .target_ref
+                .starts_with(&format!("refs/remotes/{}/", self.remote))
+            || !self.target_ref.split('/').all(valid_component)
+            || self.target_ref.ends_with("/HEAD")
+        {
+            return Err("[git.staging] requires a remote and an explicit refs/remotes/<remote>/<branch> target, not HEAD or a revision expression".to_string());
+        }
+        if self.freshness_seconds == 0
+            || self.timeout_seconds == 0
+            || self.timeout_seconds > 600
+            || self.max_commits == 0
+            || self.max_commits > 10000
+            || self.max_diff_bytes == 0
+            || self.max_diff_bytes > 64 * 1024 * 1024
+        {
+            return Err("[git.staging] requires positive freshness, timeout <= 600 seconds, max_commits <= 10000, and max_diff_bytes <= 67108864".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// No repository. A local review has none to configure, since it reviews the
@@ -1109,6 +1173,7 @@ impl Default for GitSettings {
         Self {
             repository_path: String::new(),
             custom_remotes: None,
+            staging: None,
         }
     }
 }
@@ -1493,6 +1558,12 @@ impl Settings {
     /// and an empty one reaching a connection attempt or a git command produces
     /// an error far from its cause.
     pub fn validate_for_daemon(&self) -> Result<(), String> {
+        if let Some(staging) = &self.git.staging {
+            staging.validate()?;
+            if self.project.kind != Some(ProjectId::Xen) {
+                return Err("[git.staging] currently requires project.kind = 'xen'".to_string());
+            }
+        }
         if self.review.mode == ReviewMode::AgentHarness {
             self.review.validate_mode()?;
             if self.ai.provider != "codex-cli" || self.ai.no_ai {
@@ -1662,6 +1733,9 @@ impl Settings {
             .build()?;
 
         let mut settings: Self = s.try_deserialize()?;
+        if let Some(staging) = &settings.git.staging {
+            staging.validate().map_err(ConfigError::Message)?;
+        }
         if let Some(codex) = &settings.ai.codex_cli {
             codex
                 .validate_timeout_profiles()
@@ -1748,6 +1822,49 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn staging_settings_are_optional_explicit_and_bounded() {
+        let legacy: super::GitSettings = toml::from_str("repository_path = '.'").unwrap();
+        assert!(legacy.staging.is_none());
+        let settings: super::StagingSettings =
+            toml::from_str("remote = 'upstream'\ntarget_ref = 'refs/remotes/upstream/staging'")
+                .unwrap();
+        assert!(settings.validate().is_ok());
+        assert_eq!(settings.max_commits, 1000);
+        for target in [
+            "staging",
+            "refs/remotes/origin/staging",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/staging~1",
+            "refs/remotes/upstream/staging^{commit}",
+            "refs/remotes/upstream/../staging",
+            "refs/remotes/upstream/staging.lock",
+            "--all",
+            "refs/remotes/upstream/",
+        ] {
+            let mut invalid = settings.clone();
+            invalid.target_ref = target.to_string();
+            assert!(invalid.validate().is_err(), "{target}");
+        }
+        let mut invalid = settings.clone();
+        invalid.remote = "-upstream".to_string();
+        assert!(invalid.validate().is_err());
+        for (commits, bytes, seconds) in [
+            (0, 1, 1),
+            (10001, 1, 1),
+            (1, 0, 1),
+            (1, 67108865, 1),
+            (1, 1, 0),
+            (1, 1, 601),
+        ] {
+            let mut invalid = settings.clone();
+            invalid.max_commits = commits;
+            invalid.max_diff_bytes = bytes;
+            invalid.timeout_seconds = seconds;
+            assert!(invalid.validate().is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

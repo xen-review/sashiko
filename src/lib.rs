@@ -59,6 +59,8 @@ pub mod reviewer;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod settings;
+#[cfg(feature = "server")]
+pub mod staging;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod toolbox;

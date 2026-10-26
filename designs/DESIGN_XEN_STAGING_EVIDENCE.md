@@ -1,7 +1,9 @@
 # Xen Staging Membership Evidence
 
-Status: proposed architecture; operator approval is required before adding the
-index, persisted evidence, worker integration, or classification filters.
+Status: integrated index/evidence architecture and the explicit
+refs/remotes/upstream/staging target approved by the operator on 2026-10-26
+after the interrupted approval question was recovered. Implement incrementally
+with deterministic tests and backed-up migration, without scheduling changes.
 The existing recorded review-state filter is deployed and remains view-only.
 
 ## Local Evidence and Decision
@@ -104,3 +106,26 @@ reviews and retain unmerged patches in mixed series.
 
 Do not start a model review, public post, benchmark, broad history scan, schema
 migration, new scheduled worker, or upstream fetch solely to draft this design.
+
+## Implementation Progress
+
+The opt-in Xen configuration and read-only bounded matcher are implemented in
+source. Target refs must name the configured remote explicitly. The matcher
+pins an immutable tip, bounds reachable commits, total new diff bytes, and time,
+then rechecks that tip before returning. Its versioned immutable-commit identities
+can be reused, but reachability is enumerated afresh for every snapshot. It uses
+the existing stable Git patch-ID helper and safe Git command constructors.
+
+Temporary-repository tests cover rewritten commit IDs, master/staging divergence,
+missing refs, byte/history limits, cache reuse, removed reachability after ref
+rewrites, binary/empty diffs, and historical matches after reverts. Merge commits
+are explicitly unsupported rather than treated as textual single-parent diffs;
+duplicate matching commits are retained, not arbitrarily collapsed.
+The full make check-pr gate passed 1,137 library tests (two ignored), 49 main,
+seven CLI, and 26 integration tests, formatting, and all Clippy profiles. The
+installed daemon was resumed after the idle validation boundary.
+
+Persisted evidence, refresh integration, exact-ancestry matching, stale-state
+projection, and API/UI classification remain pending. The runtime is unchanged;
+there has been no live repository scan, fetch, migration, or model call for this
+feature. Do not infer feature rollout from the configuration type alone.

@@ -280,6 +280,27 @@ SASHIKO__SERVER__ACL__ADMINS="first@example.org,second@example.org"
 |-----|------|---------|-------------|
 | `repository_path` | string | -- | Path to the kernel git repository used for patch application and context. |
 
+#### `[git.staging]`
+
+The optional Xen-only `[git.staging]` section is an opt-in for read-only staging
+membership evidence. Its matching foundation is implemented; background
+publication and API/UI integration are not enabled yet. Omission preserves
+existing behavior and does not guess a target from local HEAD or origin.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `remote` | string | required | Explicit configured authoritative remote, such as `upstream`. |
+| `target_ref` | string | required | Full `refs/remotes/<remote>/<branch>` name. HEAD, revision expressions, and mismatched remotes are rejected. |
+| `freshness_seconds` | integer | `86400` | Maximum age of successful refresh evidence; positive. Commit dates do not establish freshness. |
+| `max_commits` | integer | `1000` | Maximum reachable commits per indexing pass; `1..=10000`. An incomplete range cannot establish absence. |
+| `max_diff_bytes` | integer | `16777216` | Maximum new diff bytes per pass; `1..=67108864`. |
+| `timeout_seconds` | integer | `120` | Whole-pass deadline, including Git reads and patch-ID calculation; `1..=600`. |
+
+This does not change review scheduling or outbound delivery. A matching commit
+in history does not establish that the change remains effective after reverts,
+that it entered master, or that a human reviewed it. See
+[the approved staging-evidence design](../designs/DESIGN_XEN_STAGING_EVIDENCE.md).
+
 #### `[[git.custom_remotes]]`
 
 Optional array of additional git remotes to track.
