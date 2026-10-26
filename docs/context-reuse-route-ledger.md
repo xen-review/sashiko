@@ -46,9 +46,14 @@ by default. This policy is separate from the coding assistant's model setting.
   cancellation. Tests cover rollback on the final write, invalid scope,
   instruction identity, duplicate completion, failed artifacts, and cleanup.
   Required gates passed: 1,110 library, 48 main, seven CLI, 25 integration tests,
-  formatting, and all Clippy profiles. Next: wire daemon execution/cancellation
-  to this transaction without automatic public delivery. Keep mode disabled
-  until dispatch and presentation are validated.
+  formatting, and all Clippy profiles. Cancellation now retains partial session
+  history and invocation counts. Daemon execution branches once after existing
+  eligibility filters, uses the shared model limiter, and persists without
+  email/forge delivery or workflow retries. Fake-provider tests cover a selected
+  subset, malformed output, cancellation, and one usage record per invocation.
+  Dispatch gates passed 1,112 library, 48 main, seven CLI, 25 integration tests,
+  formatting, and all Clippy profiles. Next: validate retry compatibility and
+  artifact presentation before lifting the daemon configuration guard.
 5. Establish one bounded Luna evaluation with retained artifacts and measured
    cached input, uncached input, output, provider calls, tools, and review quality.
    No full/small benchmark or automatic queue refill is authorized by this plan.

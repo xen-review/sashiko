@@ -23,7 +23,7 @@ use crate::email_policy::EmailPolicyConfig;
 use crate::email_router::{Action as EmailAction, EmailRouter};
 use crate::git_ops::{GitWorktree, PatchApplyFailure, ensure_remote, get_commit_hash};
 use crate::prerequisites::{PrerequisitePatch, resolve_prerequisites_from_lore};
-use crate::settings::Settings;
+use crate::settings::{ReviewMode, Settings};
 use crate::utils::redact_secret;
 use crate::worker::prompts::ReviewError;
 use anyhow::{Context, Result, anyhow};
@@ -285,7 +285,11 @@ impl Reviewer {
             }
         };
 
-        let provider = create_provider_cached(&settings.ai, Some(settings.database.url.as_str()))
+        let mut ai = settings.ai.clone();
+        if settings.review.mode == ReviewMode::AgentHarness {
+            ai.response_cache = false;
+        }
+        let provider = create_provider_cached(&ai, Some(settings.database.url.as_str()))
             .await
             .expect("Failed to create AI provider");
 
@@ -1036,6 +1040,55 @@ impl Reviewer {
                 });
             }
 
+            if ctx.settings.review.mode == ReviewMode::AgentHarness {
+                let execution = async {
+                    let input: crate::worker::ReviewInput = serde_json::from_value(input_payload)?;
+                    let selected: Vec<_> = valid_jobs.iter().map(|job| job.index).collect();
+                    let coverage = valid_jobs
+                        .iter()
+                        .map(|job| {
+                            Ok(crate::db::HarnessReviewPatch {
+                                patch_id: job.patch_id,
+                                commit_id: job
+                                    .commit_sha
+                                    .as_deref()
+                                    .and_then(CommitId::parse)
+                                    .ok_or_else(|| {
+                                        anyhow!(
+                                            "Harness patch {} has no exact applied commit",
+                                            job.index
+                                        )
+                                    })?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let request = crate::agent_harness::series::SeriesRequest {
+                        input: &input,
+                        baseline: &review_baseline,
+                        selected_indexes: &selected,
+                        cover_letter: body.as_deref(),
+                        max_bytes: 8 * 1024 * 1024,
+                    };
+                    Self::process_harness_series(&ctx, &request, &coverage, &worktree, baseline_id)
+                        .await
+                }
+                .await;
+                if let Err(error) = execution {
+                    error!(
+                        "Harness review failed for patchset {}: {error:#}",
+                        patchset_id
+                    );
+                    Self::mark_patchset_failed_unless_cancelled(&ctx.db, patchset_id).await;
+                }
+                if let Err(error) = worktree.remove().await {
+                    warn!(
+                        "Failed to remove harness worktree for patchset {}: {error}",
+                        patchset_id
+                    );
+                }
+                return;
+            }
+
             // Reverse so that pop() processes in the original order (index 1 first)
             valid_jobs.reverse();
             let total_valid = valid_jobs.len();
@@ -1269,6 +1322,126 @@ impl Reviewer {
                 );
             }
         }
+    }
+
+    async fn process_harness_series(
+        ctx: &ReviewContext,
+        request: &crate::agent_harness::series::SeriesRequest<'_>,
+        coverage: &[crate::db::HarnessReviewPatch],
+        worktree: &GitWorktree,
+        baseline_id: i64,
+    ) -> Result<()> {
+        let patchset_id = request.input.id;
+        if ctx.settings.ai.provider != "codex-cli" || ctx.settings.ai.no_ai {
+            anyhow::bail!("Daemon harness execution requires an enabled codex-cli provider");
+        }
+        if ctx.target_review_count != 1 || ctx.worker_overrides.report_preexisting {
+            anyhow::bail!(
+                "Daemon harness execution supports one series invocation without pre-existing reports"
+            );
+        }
+        let instructions = ctx
+            .settings
+            .review
+            .instruction_snapshot
+            .as_ref()
+            .context("Daemon harness requires an immutable instruction snapshot")?;
+        let mut limits = ctx
+            .settings
+            .review
+            .agent_harness
+            .clone()
+            .context("Daemon harness requires execution limits")?;
+        limits.validate().map_err(anyhow::Error::msg)?;
+        if ctx.settings.review.timeout_seconds > 0 {
+            limits.timeout_seconds = limits
+                .timeout_seconds
+                .min(ctx.settings.review.timeout_seconds);
+        }
+        let prompt = crate::agent_harness::series::build_prompt(
+            request.input,
+            request.baseline,
+            request.selected_indexes,
+            request.cover_letter,
+            request.max_bytes,
+        )?;
+        let input = serde_json::to_string(&json!({
+            "review_mode": "agent_harness",
+            "instruction_snapshot": instructions,
+            "series_input": serde_json::from_str::<Value>(&prompt)?,
+            "provider": ctx.settings.ai.provider,
+            "model": ctx.settings.ai.model,
+            "effort": ctx.settings.ai.codex_cli.as_ref().and_then(|config| config.effort.as_deref()),
+            "response_cache": false,
+        }))?;
+        let Some(review_id) = ctx
+            .db
+            .start_harness_review(crate::db::HarnessReviewStart {
+                patchset_id,
+                provider: &ctx.settings.ai.provider,
+                model: &ctx.settings.ai.model,
+                baseline_id: Some(baseline_id),
+                prompts_hash: &instructions.fingerprint,
+                patches: coverage,
+            })
+            .await?
+        else {
+            return Ok(());
+        };
+        let provider = crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
+            ctx.provider.clone(),
+            ctx.llm_semaphore.clone(),
+        );
+        let progress = ctx.progress_registry.begin(patchset_id);
+        ctx.progress_registry.update(
+            patchset_id,
+            progress.run_id,
+            "agent harness: whole-series review (not independently verified)",
+        );
+        let mut tools = crate::toolbox::ToolBox::new(worktree.path.clone(), None);
+        if let Some(commit) = request
+            .input
+            .patches
+            .last()
+            .and_then(|patch| patch.commit_id.clone())
+        {
+            tools.set_virtual_head(commit);
+        }
+        let cancellation = async {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match ctx.db.get_patchset_status(patchset_id).await {
+                    Ok(Some(status)) if status == ReviewStatus::InReview.as_str() => {}
+                    result => {
+                        warn!(
+                            "Stopping harness for patchset {} after status check: {:?}",
+                            patchset_id, result
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let outcome = crate::agent_harness::series::review_with_cancellation(
+            &provider,
+            &tools,
+            instructions,
+            request,
+            &limits,
+            cancellation,
+        )
+        .await?;
+        let status = ctx
+            .db
+            .complete_harness_review(review_id, &input, &outcome)
+            .await?;
+        info!(
+            "Harness series {} completed with status {}; output is not independently verified and no delivery was queued",
+            patchset_id, status
+        );
+        Ok(())
     }
 
     async fn apply_prerequisites(
@@ -3634,6 +3807,216 @@ mod tests {
                 context_window_size: 1000,
             }
         }
+    }
+
+    struct HarnessProvider {
+        calls: AtomicUsize,
+        report: String,
+        cancel: Option<(Arc<Database>, i64)>,
+    }
+
+    #[async_trait]
+    impl AiProvider for HarnessProvider {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let input: Value =
+                serde_json::from_str(request.messages[0].content.as_deref().unwrap())?;
+            assert_eq!(input["patches"].as_array().unwrap().len(), 2);
+            assert_eq!(input["selected_patch_indexes"], json!([2]));
+            if let Some((db, patchset_id)) = &self.cancel {
+                db.update_patchset_status(*patchset_id, ReviewStatus::Cancelled.as_str())
+                    .await?;
+                return std::future::pending().await;
+            }
+            Ok(AiResponse {
+                content: Some(self.report.clone()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                truncated: false,
+                usage: Some(crate::ai::AiUsage {
+                    prompt_tokens: 40,
+                    completion_tokens: 10,
+                    total_tokens: 50,
+                    cached_tokens: Some(30),
+                }),
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "fake".to_string(),
+                context_window_size: 10000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_harness_persists_one_selected_scope_without_delivery() -> Result<()> {
+        let directory = tempdir()?;
+        let config_path = directory.path().join("Settings.toml");
+        std::fs::write(directory.path().join("agent.md"), "Review source.")?;
+        std::fs::write(
+            &config_path,
+            "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[review]\nconcurrency = 1\nmode = 'agent_harness'\n[review.agent_harness]\ninstruction_files = ['agent.md']\nmax_generations = 2\nmax_tool_calls = 5\nmax_input_tokens = 10000\nmax_output_tokens = 1000\ntimeout_seconds = 10\n",
+        )?;
+        let mut settings = Settings::from_file(&config_path)?;
+        settings.database.url = ":memory:".to_string();
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let thread_id = db.create_thread("harness-cover", "Series", 100).await?;
+        for index in 1..=2 {
+            db.create_message(
+                &format!("harness-{index}"),
+                thread_id,
+                None,
+                "Author",
+                "Patch",
+                100,
+                "Body",
+                "",
+                "",
+                None,
+                None,
+            )
+            .await?;
+        }
+        let patchset_id = db
+            .create_patchset(
+                thread_id,
+                None,
+                "harness-1",
+                "Series",
+                "Author",
+                100,
+                2,
+                1,
+                "",
+                "",
+                None,
+                1,
+                None,
+                false,
+                None,
+                None,
+            )
+            .await?
+            .unwrap();
+        let first = db
+            .create_patch(patchset_id, "harness-1", 1, "diff one")
+            .await?;
+        let second = db
+            .create_patch(patchset_id, "harness-2", 2, "diff two")
+            .await?;
+        db.update_patch_status(first, "Skipped").await?;
+        let baseline = "a".repeat(40);
+        let baseline_id = db
+            .create_baseline(None, Some("master"), Some(&baseline))
+            .await?;
+        let input = crate::worker::ReviewInput {
+            id: patchset_id,
+            subject: "Series".to_string(),
+            patches: (1..=2)
+                .map(|index| crate::worker::PatchInput {
+                    index,
+                    diff: format!("diff {index}"),
+                    subject: Some(format!("Patch {index}")),
+                    author: None,
+                    date: None,
+                    message_id: Some(format!("harness-{index}")),
+                    commit_id: Some(format!("{index:040x}")),
+                })
+                .collect(),
+        };
+        let request = crate::agent_harness::series::SeriesRequest {
+            input: &input,
+            baseline: &baseline,
+            selected_indexes: &[2],
+            cover_letter: Some("Cover"),
+            max_bytes: 10000,
+        };
+        let coverage = vec![crate::db::HarnessReviewPatch {
+            patch_id: second,
+            commit_id: CommitId::parse(&format!("{:040x}", 2)).unwrap(),
+        }];
+        let worktree = GitWorktree::from_path(
+            directory.path().to_path_buf(),
+            directory.path().to_path_buf(),
+        );
+        for (index, expected) in [
+            ReviewStatus::Reviewed,
+            ReviewStatus::Failed,
+            ReviewStatus::Cancelled,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.execute(
+                "UPDATE patchsets SET status = 'In Review' WHERE id = ?",
+                libsql::params![patchset_id],
+            )
+            .await?;
+            let provider = Arc::new(HarnessProvider {
+                calls: AtomicUsize::new(0),
+                report: if index == 1 {
+                    "Malformed report".to_string()
+                } else {
+                    json!({"reviewer_notes":"Notes", "reply_drafts":[{"patch_index":2,"message_id":"harness-2","body":"Complete reply"}]}).to_string()
+                },
+                cancel: (index == 2).then(|| (db.clone(), patchset_id)),
+            });
+            let ctx = ReviewContext {
+                semaphore: Arc::new(Semaphore::new(1)),
+                llm_semaphore: Arc::new(Semaphore::new(1)),
+                db: db.clone(),
+                settings: settings.clone(),
+                baseline_registry: Arc::new(BaselineRegistry::new(Path::new("."), None)?),
+                quota_manager: Arc::new(QuotaManager::new()),
+                target_review_count: 1,
+                provider: provider.clone(),
+                worker_overrides: WorkerSubprocessOverrides::default(),
+                progress_registry: ReviewProgressRegistry::default(),
+            };
+            Reviewer::process_harness_series(&ctx, &request, &coverage, &worktree, baseline_id)
+                .await?;
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(ctx.llm_semaphore.available_permits(), 1);
+            assert!(ctx.progress_registry.current(patchset_id).is_none());
+            assert_eq!(
+                db.get_patchset_status(patchset_id).await?.as_deref(),
+                Some(expected.as_str())
+            );
+            let mut rows = db
+                .conn
+                .query(
+                    "SELECT id FROM reviews WHERE patchset_id = ? ORDER BY id DESC LIMIT 1",
+                    libsql::params![patchset_id],
+                )
+                .await?;
+            let review_id: i64 = rows.next().await?.unwrap().get(0)?;
+            drop(rows);
+            let details = db.get_review_details(review_id).await?.unwrap();
+            assert_eq!(details["review_mode"], "agent_harness");
+            assert_eq!(details["independently_verified"], false);
+            assert_eq!(details["covered_patches"].as_array().unwrap().len(), 1);
+            assert_eq!(details["covered_patches"][0]["patch_index"], 2);
+            let saved: Value = serde_json::from_str(details["input"].as_str().unwrap())?;
+            assert_eq!(
+                saved["instruction_snapshot"]["files"][0]["body"],
+                "Review source."
+            );
+            assert_eq!(saved["response_cache"], false);
+            if index < 2 {
+                assert_eq!(details["tokens_in"], 40);
+            }
+        }
+        let mut rows = db.conn.query("SELECT (SELECT status FROM patches WHERE id = ?), (SELECT COUNT(*) FROM email_outbox), (SELECT COUNT(*) FROM forge_outbox), (SELECT COUNT(*) FROM ai_interactions)", libsql::params![first]).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<String>(0)?, "Skipped");
+        assert_eq!(row.get::<i64>(1)?, 0);
+        assert_eq!(row.get::<i64>(2)?, 0);
+        assert_eq!(row.get::<i64>(3)?, 3);
+        Ok(())
     }
 
     struct FailingProvider;
