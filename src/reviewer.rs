@@ -42,6 +42,130 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+/// Tracks transient stage progress for active patchset reviews.
+#[derive(Clone, Default)]
+pub struct ReviewProgressRegistry {
+    inner: Arc<ReviewProgressRegistryInner>,
+}
+
+#[derive(Default)]
+struct ReviewProgressRegistryInner {
+    next_run_id: std::sync::atomic::AtomicU64,
+    entries: std::sync::Mutex<std::collections::HashMap<i64, ActiveReviewProgress>>,
+}
+
+struct ActiveReviewProgress {
+    run_id: u64,
+    message: String,
+}
+
+pub(crate) struct ReviewProgressCleanup {
+    registry: ReviewProgressRegistry,
+    patchset_id: i64,
+    run_id: u64,
+}
+
+impl ReviewProgressRegistry {
+    /// Returns the latest progress line for an active review, if available.
+    pub fn current(&self, patchset_id: i64) -> Option<String> {
+        let entries = self.lock_entries();
+        entries
+            .get(&patchset_id)
+            .map(|entry| entry.message.clone())
+            .filter(|message| !message.is_empty())
+    }
+
+    pub(crate) fn begin(&self, patchset_id: i64) -> ReviewProgressCleanup {
+        let run_id = self
+            .inner
+            .next_run_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lock_entries().insert(
+            patchset_id,
+            ActiveReviewProgress {
+                run_id,
+                message: String::new(),
+            },
+        );
+        ReviewProgressCleanup {
+            registry: self.clone(),
+            patchset_id,
+            run_id,
+        }
+    }
+
+    fn update(&self, patchset_id: i64, run_id: u64, message: &str) {
+        let mut entries = self.lock_entries();
+        if let Some(entry) = entries.get_mut(&patchset_id)
+            && entry.run_id == run_id
+        {
+            entry.message = message.to_string();
+        }
+    }
+
+    fn clear(&self, patchset_id: i64, run_id: u64) {
+        let mut entries = self.lock_entries();
+        if entries
+            .get(&patchset_id)
+            .is_some_and(|entry| entry.run_id == run_id)
+        {
+            entries.remove(&patchset_id);
+        }
+    }
+
+    fn lock_entries(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<i64, ActiveReviewProgress>> {
+        self.inner
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ReviewProgressCleanup {
+    #[cfg(test)]
+    pub(crate) fn report(&self, message: &str) {
+        self.registry.update(self.patchset_id, self.run_id, message);
+    }
+}
+
+impl Drop for ReviewProgressCleanup {
+    fn drop(&mut self) {
+        self.registry.clear(self.patchset_id, self.run_id);
+    }
+}
+
+#[cfg(test)]
+mod review_progress_tests {
+    use super::ReviewProgressRegistry;
+
+    #[test]
+    fn progress_is_scoped_to_patchset_and_worker_run() {
+        let registry = ReviewProgressRegistry::default();
+        let first = registry.begin(1);
+        registry.update(1, first.run_id, "implementation turn 1/12");
+
+        assert_eq!(
+            registry.current(1).as_deref(),
+            Some("implementation turn 1/12")
+        );
+        assert_eq!(registry.current(2), None);
+
+        let second = registry.begin(1);
+        registry.update(1, first.run_id, "stale progress");
+        registry.update(1, second.run_id, "verification turn 1/12");
+        drop(first);
+
+        assert_eq!(
+            registry.current(1).as_deref(),
+            Some("verification turn 1/12")
+        );
+        drop(second);
+        assert_eq!(registry.current(1), None);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WorkerSubprocessOverrides {
     pub prompts: Option<PathBuf>,
@@ -60,6 +184,7 @@ struct ReviewContext {
     target_review_count: usize,
     provider: Arc<dyn AiProvider>,
     worker_overrides: WorkerSubprocessOverrides,
+    progress_registry: ReviewProgressRegistry,
 }
 
 enum PatchResult {
@@ -121,6 +246,7 @@ pub struct Reviewer {
     quota_manager: Arc<QuotaManager>,
     provider: Arc<dyn AiProvider>,
     worker_overrides: WorkerSubprocessOverrides,
+    progress_registry: ReviewProgressRegistry,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -174,12 +300,19 @@ impl Reviewer {
             quota_manager: Arc::new(QuotaManager::new()),
             provider,
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub fn with_worker_overrides(mut self, overrides: WorkerSubprocessOverrides) -> Self {
         self.worker_overrides = overrides;
+        self
+    }
+
+    /// Uses the supplied registry to publish progress from worker subprocesses.
+    pub fn with_progress_registry(mut self, registry: ReviewProgressRegistry) -> Self {
+        self.progress_registry = registry;
         self
     }
 
@@ -307,6 +440,7 @@ impl Reviewer {
                 target_review_count,
                 provider: self.provider.clone(),
                 worker_overrides: self.worker_overrides.clone(),
+                progress_registry: self.progress_registry.clone(),
             };
 
             let patchset_id = patchset.id;
@@ -388,6 +522,7 @@ impl Reviewer {
                 target_review_count: 1,
                 provider: self.provider.clone(),
                 worker_overrides: self.worker_overrides.clone(),
+                progress_registry: self.progress_registry.clone(),
             };
 
             if let Err(e) = Self::release_patchset_results(&context, &patchset).await {
@@ -1815,6 +1950,7 @@ impl Reviewer {
                 worktree_path,
                 ctx.provider.clone(),
                 ctx.llm_semaphore.clone(),
+                ctx.progress_registry.clone(),
                 &ctx.worker_overrides,
             )
             .await;
@@ -2364,6 +2500,7 @@ async fn run_review_tool(
     worktree_path: Option<&Path>,
     provider: Arc<dyn AiProvider>,
     llm_semaphore: Arc<Semaphore>,
+    progress_registry: ReviewProgressRegistry,
     worker_overrides: &WorkerSubprocessOverrides,
 ) -> Result<serde_json::Value> {
     let cmd = default_worker_command()?;
@@ -2381,6 +2518,7 @@ async fn run_review_tool(
         worktree_path,
         provider,
         llm_semaphore,
+        progress_registry,
         worker_overrides,
     )
     .await
@@ -2442,6 +2580,7 @@ async fn run_review_tool_with_cmd(
         worktree_path,
         provider,
         llm_semaphore,
+        ReviewProgressRegistry::default(),
         &WorkerSubprocessOverrides::default(),
     )
     .await
@@ -2462,6 +2601,7 @@ async fn run_review_tool_with_cmd_and_overrides(
     worktree_path: Option<&Path>,
     provider: Arc<dyn AiProvider>,
     llm_semaphore: Arc<Semaphore>,
+    progress_registry: ReviewProgressRegistry,
     worker_overrides: &WorkerSubprocessOverrides,
 ) -> Result<serde_json::Value> {
     // Cap concurrent model calls with the shared limiter instead of taking the
@@ -2573,12 +2713,22 @@ async fn run_review_tool_with_cmd_and_overrides(
     cmd.kill_on_drop(true);
 
     let mut child = cmd.spawn()?;
+    let progress_guard = progress_registry.begin(patchset_id);
+    let progress_run_id = progress_guard.run_id;
 
     if let Some(stderr) = child.stderr.take() {
+        let progress_registry = progress_registry.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(progress) = line
+                    .strip_prefix(crate::local_review::PROGRESS_LINE_PREFIX)
+                    .map(str::trim)
+                    .filter(|progress| !progress.is_empty())
+                {
+                    progress_registry.update(patchset_id, progress_run_id, progress);
+                }
                 if line.contains(" ERROR ")
                     || line.starts_with("Error:")
                     || line.contains("panicked")
@@ -3597,6 +3747,7 @@ mod tests {
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
         let candidate = BaselineResolution::Commit(CommitId::parse(&base_sha).unwrap());
         let diffs = vec![(
@@ -3721,6 +3872,7 @@ mod tests {
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         // A decoy tree that is unreachable, and one that shares the local
@@ -4225,6 +4377,7 @@ fi
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         })
     }
 
@@ -4431,6 +4584,7 @@ fi
             target_review_count: 1,
             provider,
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         // Create dummy patchset and patch in DB
@@ -4841,6 +4995,7 @@ echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         // Scenario 1: Mixed findings
@@ -5170,6 +5325,7 @@ inline review content 4\n\n-- \nSashiko AI review · https://sashiko.dev/#/patch
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         Reviewer::queue_notifications(
@@ -5336,6 +5492,7 @@ inline review content 4\n\n-- \nSashiko AI review · https://sashiko.dev/#/patch
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         let empty_findings = Vec::new();
@@ -5545,6 +5702,7 @@ inline review content 4\n\n-- \nSashiko AI review · https://sashiko.dev/#/patch
             target_review_count: 1,
             provider: Arc::new(MockProvider),
             worker_overrides: WorkerSubprocessOverrides::default(),
+            progress_registry: ReviewProgressRegistry::default(),
         };
 
         Reviewer::review_patchset_task(ctx, patchset).await;

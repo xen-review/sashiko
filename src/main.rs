@@ -1256,12 +1256,14 @@ async fn run_daemon(
     let api_fetch_tx = fetch_tx.clone();
     let local_token_path = settings.local_token_path();
     let local_token = publish_local_token(&local_token_path);
+    let review_progress = sashiko::reviewer::ReviewProgressRegistry::default();
     let server_options = sashiko::server::ServerOptions {
         allow_all_submit: cli.enable_unsafe_all_submit,
         smtp_enabled: settings.smtp.is_some(),
         dry_run: settings.smtp.as_ref().map(|s| s.dry_run).unwrap_or(false),
         local_token,
         email_worker_heartbeat: email_worker_heartbeat.clone(),
+        review_progress: review_progress.clone(),
     };
     let api_handle = tokio::spawn(async move {
         if let Err(e) =
@@ -1435,7 +1437,11 @@ async fn run_daemon(
     };
 
     // Start Reviewer Service
-    let reviewer = Arc::new(Reviewer::new(db.clone(), settings.clone()).await);
+    let reviewer = Arc::new(
+        Reviewer::new(db.clone(), settings.clone())
+            .await
+            .with_progress_registry(review_progress),
+    );
     let reviewer_handle = spawn_supervised_worker("Reviewer", move || {
         let reviewer = Arc::clone(&reviewer);
         async move {

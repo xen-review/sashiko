@@ -239,6 +239,7 @@ pub struct ServerOptions {
     pub local_token: Option<crate::auth::LocalToken>,
     /// Shared UNIX timestamp updated on each iteration of `EmailWorker::run`.
     pub email_worker_heartbeat: Option<Arc<std::sync::atomic::AtomicI64>>,
+    pub review_progress: crate::reviewer::ReviewProgressRegistry,
 }
 
 pub struct AppState {
@@ -253,6 +254,7 @@ pub struct AppState {
     pub dry_run: bool,
     pub local_token: Option<crate::auth::LocalToken>,
     pub email_worker_heartbeat: Option<Arc<std::sync::atomic::AtomicI64>>,
+    pub review_progress: crate::reviewer::ReviewProgressRegistry,
     pub sign_in_link_rate_limiter: SignInLinkRateLimiter,
     stats_timeline_cache: AsyncMapCache<Option<i64>, serde_json::Value>,
     stats_reviews_cache: AsyncCache<serde_json::Value>,
@@ -306,6 +308,7 @@ pub fn build_router(
         dry_run: options.dry_run,
         local_token: options.local_token,
         email_worker_heartbeat: options.email_worker_heartbeat,
+        review_progress: options.review_progress,
         sign_in_link_rate_limiter: SignInLinkRateLimiter::new(),
         stats_timeline_cache: AsyncMapCache::new(Duration::from_secs(60)),
         stats_reviews_cache: AsyncCache::new(Duration::from_secs(60)),
@@ -316,7 +319,6 @@ pub fn build_router(
         messages_homepage_cache: AsyncCache::new(Duration::from_secs(10)),
         bug_subsystems_cache: AsyncMapCache::new(Duration::from_secs(5)),
     });
-
     Router::new()
         .route("/health", get(health_check))
         .route("/api/health", get(health_check))
@@ -1180,6 +1182,7 @@ async fn get_patchset_summary(
                 false,
             )
             .await?;
+            attach_active_review_progress(&mut details, &state.review_progress);
             Ok(Json(details))
         }
         Ok(None) => {
@@ -1190,6 +1193,54 @@ async fn get_patchset_summary(
             info!("Database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+    }
+}
+
+fn attach_active_review_progress(
+    details: &mut serde_json::Value,
+    registry: &crate::reviewer::ReviewProgressRegistry,
+) {
+    if details.get("status").and_then(serde_json::Value::as_str) != Some("In Review") {
+        return;
+    }
+    let Some(patchset_id) = details.get("id").and_then(serde_json::Value::as_i64) else {
+        return;
+    };
+    if let Some(progress) = registry.current(patchset_id)
+        && let Some(object) = details.as_object_mut()
+    {
+        object.insert(
+            "active_review_progress".to_string(),
+            serde_json::Value::String(progress),
+        );
+    }
+}
+
+#[cfg(test)]
+mod active_review_progress_tests {
+    use super::attach_active_review_progress;
+    use crate::reviewer::ReviewProgressRegistry;
+
+    #[test]
+    fn attaches_progress_only_to_matching_active_patchset() {
+        let registry = ReviewProgressRegistry::default();
+        let progress = registry.begin(7);
+        progress.report("patch 1: verification turn 1/12");
+
+        let mut active = serde_json::json!({ "id": 7, "status": "In Review" });
+        attach_active_review_progress(&mut active, &registry);
+        assert_eq!(
+            active["active_review_progress"],
+            "patch 1: verification turn 1/12"
+        );
+
+        let mut other_patchset = serde_json::json!({ "id": 8, "status": "In Review" });
+        attach_active_review_progress(&mut other_patchset, &registry);
+        assert!(other_patchset.get("active_review_progress").is_none());
+
+        let mut completed = serde_json::json!({ "id": 7, "status": "Reviewed" });
+        attach_active_review_progress(&mut completed, &registry);
+        assert!(completed.get("active_review_progress").is_none());
     }
 }
 
@@ -4150,6 +4201,7 @@ mod tests {
             dry_run: true,
             local_token: None,
             email_worker_heartbeat: None,
+            review_progress: Default::default(),
             sign_in_link_rate_limiter: SignInLinkRateLimiter::new(),
             stats_timeline_cache: AsyncMapCache::new(Duration::from_secs(60)),
             stats_reviews_cache: AsyncCache::new(Duration::from_secs(60)),
@@ -4720,6 +4772,7 @@ mod tests {
                 dry_run: true,
                 local_token: None,
                 email_worker_heartbeat: None,
+                review_progress: Default::default(),
                 sign_in_link_rate_limiter: SignInLinkRateLimiter::new(),
                 stats_timeline_cache: AsyncMapCache::new(Duration::from_secs(60)),
                 stats_reviews_cache: AsyncCache::new(Duration::from_secs(60)),
@@ -4787,6 +4840,7 @@ mod tests {
                 dry_run: true,
                 local_token,
                 email_worker_heartbeat: None,
+                review_progress: Default::default(),
                 sign_in_link_rate_limiter: SignInLinkRateLimiter::new(),
                 stats_timeline_cache: AsyncMapCache::new(Duration::from_secs(60)),
                 stats_reviews_cache: AsyncCache::new(Duration::from_secs(60)),
@@ -4945,6 +4999,7 @@ mod tests {
             bug_subsystems_cache: AsyncMapCache::new(Duration::from_secs(5)),
             local_token: None,
             email_worker_heartbeat: None,
+            review_progress: Default::default(),
         });
         let index = crate::maintainers::MaintainersIndex::from_reader(
             b"Maintainers List\n================\n\nSECTION A\nM:\tAlice <a@example.org>\nF:\ta/\n\nSECTION B\nM:\tBob <b@example.org>\nF:\tb/\n".as_slice()
@@ -5672,6 +5727,7 @@ F:	*
             dry_run: true,
             local_token: None,
             email_worker_heartbeat: None,
+            review_progress: Default::default(),
             forge_registry: Arc::new(crate::forge::ForgeRegistry::new()),
             patchsets_homepage_cache: AsyncCache::new(Duration::from_secs(2)),
             messages_homepage_cache: AsyncCache::new(Duration::from_secs(2)),
