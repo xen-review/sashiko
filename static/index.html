@@ -4436,6 +4436,17 @@
             return `<div class="text-muted-sm" style="overflow-wrap:anywhere;">Model confidence: ${assessment} (uncalibrated)</div>${showRationale ? `<div class="log-inline-block">${escapeHtml(confidence.rationale)}</div>` : ''}`;
         }
 
+        function renderReviewTokens(record) {
+            const valid = value => Number.isSafeInteger(value) && value >= 0;
+            const values = [record?.tokens_in, record?.tokens_cached, record?.tokens_out];
+            const session = record?.checkpoint_session;
+            const confirmedZero = session?.usage_complete === true && session.provider_calls_recorded > 0;
+            if (!values.some(value => valid(value) && value > 0) && !confirmedZero) return 'Unavailable (not recorded or unconfirmed)';
+            const uncached = valid(record?.tokens_in) && valid(record?.tokens_cached) && record.tokens_in >= record.tokens_cached ? record.tokens_in - record.tokens_cached : null;
+            const format = value => valid(value) ? formatTokenCount(value) : 'Unknown';
+            return `In: ${format(uncached)} &middot; Cached: ${format(record?.tokens_cached)} &middot; Out: ${format(record?.tokens_out)}`;
+        }
+
         function renderReviewEffort(attribution) {
             const configured = typeof attribution?.configured_effort === 'string' && attribution.configured_effort.trim() ? attribution.configured_effort : 'Unknown';
             const effective = typeof attribution?.effective_effort === 'string' && attribution.effective_effort.trim() ? attribution.effective_effort : 'Unknown';
@@ -4575,10 +4586,7 @@
                 displayResult = `<span>${checkpointSession ? 'Sequential harness' : 'Agent harness'} &middot; Not independently verified</span>`;
             }
 
-            const tokensOut = (r.tokens_out || 0);
-            const tokensCached = (r.tokens_cached || 0);
-            const tokensIn = Math.max(0, (r.tokens_in || 0) - tokensCached);
-            const tokenStr = `In: ${formatTokenCount(tokensIn)} &middot; Cached: ${formatTokenCount(tokensCached)} &middot; Out: ${formatTokenCount(tokensOut)}`;
+            const tokenStr = renderReviewTokens(r);
 
             const summaryText = (r.summary || (isHarness ? outputJson?.artifacts?.reviewer_notes : outputJson?.summary) || '').trim();
             let summaryHtml = '';
@@ -4671,7 +4679,7 @@
                         ${emailHtml}
                         <div style="font-size: 0.9em; color: var(--text-muted); line-height: 1.4; margin-top: 2px;">
                             <div style="overflow-wrap:anywhere;">${renderReviewEffort(outputJson?.review_attribution || r.review_attribution)}</div>
-                            <strong>${checkpointSession ? 'Reported tokens' : 'Tokens used'}:</strong> ${tokenStr}
+                            <strong>Reported tokens:</strong> ${tokenStr}
                             ${checkpointSession ? `<br>Recorded provider calls: ${escapeHtml(String(checkpointSession.provider_calls_recorded ?? 0))}${checkpointSession.provider_calls_attempted == null ? '' : ` &middot; Attempted: ${escapeHtml(String(checkpointSession.provider_calls_attempted))}`}${checkpointSession.usage_complete ? '' : '<br>Usage incomplete: active or interrupted calls may not have reported tokens.'}` : isHarness && outputJson?.execution?.trace ? `<br>Provider calls: ${escapeHtml(String(outputJson.execution.trace.provider_calls))} &middot; Tool calls: ${escapeHtml(String(outputJson.execution.trace.tool_calls))}` : ''}
                         </div>
                     </div>
@@ -6354,9 +6362,6 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                 `;
             }
 
-            const tokensOut = data.tokens_out || 0;
-            const tokensCached = data.tokens_cached || 0;
-            const tokensIn = Math.max(0, (data.tokens_in || 0) - tokensCached);
             const providerModel = data.model ? (data.provider ? `${data.provider}/${data.model}` : data.model) : '-';
             const promptsHash = data.prompts_hash ? String(data.prompts_hash).substring(0, 8) : '';
 
@@ -6379,7 +6384,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                     <div class="kv"><div class="label">Review:</div><div>#${escapeHtml(String(data.id || id))}${reviewMap.legacy ? ' <span class="text-muted-sm">(synthesized from final review output)</span>' : ''}</div></div>
                     <div class="kv"><div class="label">Model:</div><div>${escapeHtml(providerModel)}</div></div>
                     <div class="kv"><div class="label">Thinking effort:</div><div style="overflow-wrap:anywhere;">${renderReviewEffort(outputObj?.review_attribution || data.review_attribution)}</div></div>
-                    <div class="kv"><div class="label">Tokens:</div><div>In: ${formatTokenCount(tokensIn)} &middot; Cached: ${formatTokenCount(tokensCached)} &middot; Out: ${formatTokenCount(tokensOut)}</div></div>
+                    <div class="kv"><div class="label">Reported tokens:</div><div>${renderReviewTokens(data)}</div></div>
                     ${promptsHash ? `<div class="kv"><div class="label">Sashiko ver.:</div><div>${escapeHtml(promptsHash)}</div></div>` : ''}
                 </div>
 

@@ -166,7 +166,22 @@ and the release/installed hashes match. Fresh live review-48 checks at both
 widths show two Not assessed labels, no synthetic score or overflow, and unchanged
 saved findings. The daemon is healthy and ingestion advanced after restart.
 
-Backend-confirmed per-stage effort and missing-usage presentation remain open.
+The first missing-usage presentation slice shares card/map rendering. Zero-only
+legacy aggregates without availability evidence say Unavailable, not measured
+zero. A complete checkpoint session with recorded calls can still display real
+zeros. Positive counters are labeled reported tokens, missing fields stay
+Unknown, and an invalid cached-prefix subtraction does not invent zero. Existing
+stored aggregates are unchanged; their lost availability cannot be reconstructed
+from zeros alone. This does not establish completeness of positive legacy totals.
+Syntax and focused legacy/confirmed-zero/positive/partial/invalid-input checks
+pass, along with the diff-aware make check-pr gate and editor diagnostics.
+The read-only review-48 fixture passed card/map checks at 1,280 and 390 pixels:
+Unavailable is visible, the false zero triple is absent, and there is no page
+overflow or injected image. The fixture is stopped and the daemon resumed;
+deployment of this presentation slice is pending.
+
+Backend-confirmed per-stage effort, future usage-availability persistence, and
+live/final usage completeness remain open.
 Review 48's public API and saved prompt do not contain effort; its stored zero
 token totals do not establish that its Copilot invocation used no tokens. No
 historical effort or confidence was invented, and no new model review was run
