@@ -79,6 +79,27 @@ configurable quota hysteresis, and durable subscription-exhaustion deferral.
 The overnight pause/resume trial is lower priority, test-first, near a reported
 00:00-06:00 local reset only with fresh authorization; no watcher is installed.
 
+### Continuation Update
+
+At 15:10 CET the user confirmed the coding-chat plan switch and requested no
+clarifying questions until another message/new session. Record conservative
+recommended assumptions instead of treating predictions as prior approval;
+existing budget, architecture, posting, and self-review restrictions still apply.
+The next UI edit described above is now implemented: retained checkpoint notes
+and drafts render for active, Failed, Cancelled, and Reviewed sessions alongside
+completed/selected counts, remaining scope, and explicit incomplete usage.
+Implementation assumption: reuse existing review cards, styling, and disclosure
+controls rather than add another page or redesign the application.
+
+Inline JavaScript syntax and rendering checks passed, including legacy harness
+compatibility and escaped injection text. Isolated browser fixtures at 1280px
+and 390px showed no page/card overflow or header overlap, no injected elements,
+all raw-log links, no false review-map links, and a working notes toggle. Visual
+snapshots were inspected. The synthetic fixture never touched the live database.
+The immediate next task is daemon/local dispatch; sequential startup stays gated
+until its persistence and cancellation integration tests pass. No sequential
+mode or schema-15 deployment is claimed by this frontend change.
+
 ## Decision
 
 Finish the bounded whole-series harness as the nearest usable milestone, then

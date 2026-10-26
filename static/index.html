@@ -4430,6 +4430,8 @@
         function renderReviewCard(r, emailHtml = '') {
             const uniqueId = Math.random().toString(36).substr(2, 9);
             const isHarness = r.review_mode === 'agent_harness';
+            const checkpointSession = isHarness && r.review_strategy === 'sequential_patches' ? r.checkpoint_session : null;
+            const checkpoints = Array.isArray(checkpointSession?.checkpoints) ? checkpointSession.checkpoints : [];
 
             let displayResult = '';
             
@@ -4535,7 +4537,7 @@
             }
 
             if (isHarness) {
-                displayResult = '<span>Agent harness &middot; Not independently verified</span>';
+                displayResult = `<span>${checkpointSession ? 'Sequential harness' : 'Agent harness'} &middot; Not independently verified</span>`;
             }
 
             const tokensOut = (r.tokens_out || 0);
@@ -4559,7 +4561,26 @@
 
             let inlineHtml = '';
             let draftsHtml = '';
-            if (isHarness && Array.isArray(outputJson?.artifacts?.reply_drafts)) {
+            let checkpointHtml = '';
+            if (checkpointSession) {
+                const selected = Array.isArray(checkpointSession.selected_patch_indexes) ? checkpointSession.selected_patch_indexes : [];
+                const remaining = Array.isArray(checkpointSession.remaining_patch_indexes) ? checkpointSession.remaining_patch_indexes : [];
+                checkpointHtml = `
+                    <div style="margin-top:12px; overflow-wrap:anywhere;">
+                        <strong>Checkpoints:</strong> ${escapeHtml(String(checkpointSession.completed_count ?? checkpoints.length))} / ${selected.length}
+                        &middot; ${escapeHtml(checkpointSession.state || 'Unknown')}
+                        ${remaining.length ? `<div>Remaining patches: ${escapeHtml(remaining.join(', '))}</div>` : ''}
+                    </div>
+                `;
+                draftsHtml = checkpoints.map(checkpoint => `
+                    <section style="margin-top:16px; min-width:0;">
+                        <h4>Patch ${escapeHtml(String(checkpoint.patch_index))} &middot; Reviewer Notes</h4>
+                        <div class="log-inline-block">${escapeHtml(checkpoint.reviewer_notes || '', true, false)}</div>
+                        <h4>Reply Draft for Patch ${escapeHtml(String(checkpoint.patch_index))}</h4>
+                        <div class="log-inline-block">${escapeHtml(checkpoint.reply_body || '', true, false)}</div>
+                    </section>
+                `).join('');
+            } else if (isHarness && Array.isArray(outputJson?.artifacts?.reply_drafts)) {
                 draftsHtml = outputJson.artifacts.reply_drafts.map(draft => `
                     <div style="margin-top:12px;">
                         <h4>Reply Draft for Patch ${escapeHtml(String(draft.patch_index))}</h4>
@@ -4586,7 +4607,7 @@
 
             const statusRaw = r.status || 'Finished';
             const s = statusRaw.toLowerCase();
-            const showDetails = s === 'reviewed' || s === 'finished' || s === 'failed' || s === 'skipped' || (isHarness && s === 'cancelled');
+            const showDetails = Boolean(checkpointSession) || s === 'reviewed' || s === 'finished' || s === 'failed' || s === 'skipped' || (isHarness && s === 'cancelled');
 
             return `
                 <div class="review-card">
@@ -4603,14 +4624,15 @@
                         `}
                     </div>
                     ${showDetails ? `
+                    ${checkpointHtml}
                     ${summaryHtml}
                     ${inlineHtml}
                     ${draftsHtml}
                     <div style="margin-top: 24px; margin-bottom: 0;">
                         ${emailHtml}
                         <div style="font-size: 0.9em; color: var(--text-muted); line-height: 1.4; margin-top: 2px;">
-                            <strong>Tokens used:</strong> ${tokenStr}
-                            ${isHarness && outputJson?.execution?.trace ? `<br>Provider calls: ${escapeHtml(String(outputJson.execution.trace.provider_calls))} &middot; Tool calls: ${escapeHtml(String(outputJson.execution.trace.tool_calls))}` : ''}
+                            <strong>${checkpointSession ? 'Reported tokens' : 'Tokens used'}:</strong> ${tokenStr}
+                            ${checkpointSession ? `<br>Recorded provider calls: ${escapeHtml(String(checkpointSession.provider_calls_recorded ?? 0))}${checkpointSession.provider_calls_attempted == null ? '' : ` &middot; Attempted: ${escapeHtml(String(checkpointSession.provider_calls_attempted))}`}${checkpointSession.usage_complete ? '' : '<br>Usage incomplete: active or interrupted calls may not have reported tokens.'}` : isHarness && outputJson?.execution?.trace ? `<br>Provider calls: ${escapeHtml(String(outputJson.execution.trace.provider_calls))} &middot; Tool calls: ${escapeHtml(String(outputJson.execution.trace.tool_calls))}` : ''}
                         </div>
                     </div>
                     <div style="margin-top:8px; display:flex; justify-content:space-between; align-items:center; font-size: 0.9em;">
