@@ -410,6 +410,20 @@ pub struct MessageRow {
     pub references_hdr: Option<String>,
 }
 
+pub struct HarnessReviewPatch {
+    pub patch_id: i64,
+    pub commit_id: crate::baseline::CommitId,
+}
+
+pub struct HarnessReviewStart<'a> {
+    pub patchset_id: i64,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub baseline_id: Option<i64>,
+    pub prompts_hash: &'a str,
+    pub patches: &'a [HarnessReviewPatch],
+}
+
 pub struct AiInteractionParams<'a> {
     pub id: &'a str,
     pub parent_id: Option<&'a str>,
@@ -2057,7 +2071,16 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 13.");
+        if current_version < 14 {
+            info!("Applying database migration version 14 (harness review scope)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/014_harness_review_scope.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 14", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 14.");
 
         Ok(())
     }
@@ -2221,6 +2244,154 @@ impl Database {
         )
         .await?
         .ok_or_else(|| anyhow::anyhow!("Failed to get review ID"))
+    }
+
+    pub async fn start_harness_review(&self, scope: HarnessReviewStart<'_>) -> Result<Option<i64>> {
+        let unique: std::collections::BTreeSet<_> =
+            scope.patches.iter().map(|patch| patch.patch_id).collect();
+        if scope.patches.is_empty() || unique.len() != scope.patches.len() {
+            bail!("Harness review scope must contain unique, non-empty patch references");
+        }
+        let tx = self.begin_transaction().await?;
+        let mut rows = tx
+            .query(
+                "SELECT status FROM patchsets WHERE id = ?",
+                libsql::params![scope.patchset_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            bail!("Harness review patchset does not exist");
+        };
+        let status: String = row.get(0)?;
+        drop(rows);
+        if status != ReviewStatus::InReview.as_str() {
+            return Ok(None);
+        }
+        let mut active = tx.query("SELECT 1 FROM reviews WHERE patchset_id = ? AND review_mode = 'agent_harness' AND status = 'In Review'", libsql::params![scope.patchset_id]).await?;
+        if active.next().await?.is_some() {
+            bail!("A harness review is already active for this patchset");
+        }
+        drop(active);
+        let mut inserted = tx.query(
+            "INSERT INTO reviews (patchset_id, patch_id, status, created_at, provider, model, baseline_id, prompts_hash, review_mode, independently_verified)
+             VALUES (?, NULL, 'In Review', ?, ?, ?, ?, ?, 'agent_harness', 0) RETURNING id",
+            libsql::params![scope.patchset_id, chrono::Utc::now().timestamp(), scope.provider, scope.model, scope.baseline_id, scope.prompts_hash],
+        ).await?;
+        let review_id: i64 = inserted
+            .next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Failed to create harness review"))?
+            .get(0)?;
+        drop(inserted);
+        for patch in scope.patches {
+            let changed = tx
+                .execute(
+                    "INSERT INTO review_patch_coverage (review_id, patch_id, commit_id)
+                 SELECT ?, id, ? FROM patches WHERE id = ? AND patchset_id = ?",
+                    libsql::params![
+                        review_id,
+                        patch.commit_id.to_string(),
+                        patch.patch_id,
+                        scope.patchset_id
+                    ],
+                )
+                .await?;
+            if changed != 1 {
+                bail!(
+                    "Harness scope patch {} does not belong to patchset {}",
+                    patch.patch_id,
+                    scope.patchset_id
+                );
+            }
+        }
+        tx.commit().await?;
+        Ok(Some(review_id))
+    }
+
+    pub async fn complete_harness_review(
+        &self,
+        review_id: i64,
+        input: &str,
+        outcome: &crate::agent_harness::series::SeriesOutcome,
+    ) -> Result<ReviewStatus> {
+        use crate::agent_harness::session::HarnessStatus;
+        let requested_status = match &outcome.execution.status {
+            HarnessStatus::Completed { .. } if outcome.artifacts.is_some() => {
+                ReviewStatus::Reviewed
+            }
+            HarnessStatus::Completed { .. } => {
+                bail!("Completed harness review requires validated artifacts")
+            }
+            _ if outcome.artifacts.is_some() => {
+                bail!("Unsuccessful harness review cannot contain final artifacts")
+            }
+            _ => ReviewStatus::Failed,
+        };
+        let usage = &outcome.execution.trace.usage;
+        let tokens_in = i64::try_from(usage.prompt_tokens)?;
+        let tokens_out = i64::try_from(usage.completion_tokens)?;
+        let tokens_cached = i64::try_from(usage.cached_tokens.unwrap_or_default())?;
+        let output = serde_json::to_string(outcome)?;
+        let compressed_input = crate::compression::compress_string_async(input).await;
+        let compressed_output = crate::compression::compress_string_async(&output).await;
+        let interaction_id = uuid::Uuid::new_v4().to_string();
+        let tx = self.begin_transaction().await?;
+        let mut rows = tx.query(
+            "SELECT r.patchset_id, r.status, p.status, r.provider, r.model, r.interaction_id, r.prompts_hash FROM reviews r
+             JOIN patchsets p ON p.id = r.patchset_id WHERE r.id = ? AND r.patch_id IS NULL AND r.review_mode = 'agent_harness'",
+            libsql::params![review_id],
+        ).await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Harness review does not exist"))?;
+        let patchset_id: i64 = row.get(0)?;
+        let review_status: String = row.get(1)?;
+        let patchset_status: String = row.get(2)?;
+        let provider: String = row.get(3)?;
+        let model: String = row.get(4)?;
+        let previous_interaction: Option<String> = row.get(5)?;
+        let instruction_fingerprint: Option<String> = row.get(6)?;
+        drop(rows);
+        if review_status != ReviewStatus::InReview.as_str()
+            && review_status != ReviewStatus::Cancelled.as_str()
+        {
+            bail!("Harness review is already terminal; refusing to overwrite results");
+        }
+        if previous_interaction.is_some() {
+            bail!("Harness review already has persisted results");
+        }
+        if instruction_fingerprint.as_deref()
+            != Some(outcome.execution.instruction_fingerprint.as_str())
+        {
+            bail!("Harness result instruction fingerprint does not match its review");
+        }
+        let status = if patchset_status != ReviewStatus::InReview.as_str()
+            || review_status == ReviewStatus::Cancelled.as_str()
+        {
+            ReviewStatus::Cancelled
+        } else {
+            requested_status
+        };
+        tx.execute(
+            "INSERT INTO ai_interactions (id, provider, model, input_context, output_raw, tokens_in, tokens_out, tokens_cached, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            libsql::params![interaction_id.as_str(), provider, model, compressed_input, compressed_output, tokens_in, tokens_out, tokens_cached, chrono::Utc::now().timestamp()],
+        ).await?;
+        tx.execute(
+            "UPDATE reviews SET status = ?, interaction_id = ?, result_description = ?, summary = ?, independently_verified = 0 WHERE id = ?",
+            libsql::params![status.as_str(), interaction_id.as_str(), "Agent harness output; not independently verified", outcome.artifacts.as_ref().map(|artifacts| artifacts.reviewer_notes.as_str()), review_id],
+        ).await?;
+        if status != ReviewStatus::Cancelled {
+            tx.execute("UPDATE patches SET status = ? WHERE patchset_id = ? AND id IN (SELECT patch_id FROM review_patch_coverage WHERE review_id = ?)", libsql::params![status.as_str(), patchset_id, review_id]).await?;
+            tx.execute(
+                "UPDATE patchsets SET status = ? WHERE id = ?",
+                libsql::params![status.as_str(), patchset_id],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(status)
     }
 
     pub async fn has_successful_review(
@@ -8515,7 +8686,8 @@ impl Database {
                             (SELECT m.subject FROM patches p JOIN messages m ON p.message_id = m.message_id WHERE p.id = r.patch_id LIMIT 1),
                             (SELECT ps.subject FROM patchsets ps WHERE ps.id = r.patchset_id)
                         ),
-                        (SELECT ps.embargo_until FROM patchsets ps WHERE ps.id = r.patchset_id)
+                        (SELECT ps.embargo_until FROM patchsets ps WHERE ps.id = r.patchset_id),
+                        r.review_mode, r.independently_verified
              FROM reviews r
              LEFT JOIN ai_interactions ai ON r.interaction_id = ai.id
              LEFT JOIN baselines b ON r.baseline_id = b.id
@@ -8525,6 +8697,22 @@ impl Database {
             .await?;
 
         if let Ok(Some(r)) = rows.next().await {
+            let review_mode: String = r.get(22)?;
+            let mut covered_patches = Vec::new();
+            if review_mode == "agent_harness" {
+                let mut coverage = self.conn.query(
+                    "SELECT c.patch_id, p.part_index, c.commit_id FROM review_patch_coverage c
+                     JOIN patches p ON p.id = c.patch_id WHERE c.review_id = ? ORDER BY p.part_index",
+                    libsql::params![id],
+                ).await?;
+                while let Some(patch) = coverage.next().await? {
+                    covered_patches.push(serde_json::json!({
+                        "patch_id": patch.get::<i64>(0)?,
+                        "patch_index": patch.get::<i64>(1)?,
+                        "commit_id": patch.get::<String>(2)?,
+                    }));
+                }
+            }
             let bugs = self.list_bugs_for_review(id).await.unwrap_or_default();
             let bugs_json = bugs
                 .into_iter()
@@ -8556,6 +8744,9 @@ impl Database {
                 "patchset_id": r.get::<Option<i64>>(19).ok(),
                 "subject": r.get::<Option<String>>(20).ok(),
                 "embargo_until": r.get::<Option<i64>>(21).ok(),
+                "review_mode": review_mode,
+                "independently_verified": r.get::<Option<i64>>(23)?.map(|value| value != 0),
+                "covered_patches": covered_patches,
                 "bugs": bugs_json,
             })))
         } else {
@@ -11608,6 +11799,203 @@ mod tests {
         db.create_patch(patchset_id, "base-2", 2, "diff two")
             .await?;
         Ok(patchset_id)
+    }
+
+    #[tokio::test]
+    async fn harness_completion_is_atomic_scoped_and_cancellation_safe() -> Result<()> {
+        use crate::agent_harness::{
+            series::{ReplyDraft, ReviewArtifacts, SeriesOutcome},
+            session::{HarnessOutcome, HarnessStatus, HarnessTrace},
+        };
+        let db = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&db).await?;
+        let diffs = db.get_patch_diffs(patchset_id).await?;
+        let patches: Vec<_> = diffs
+            .iter()
+            .map(|(patch_id, index, ..)| HarnessReviewPatch {
+                patch_id: *patch_id,
+                commit_id: crate::baseline::CommitId::parse(&format!("{index:040x}")).unwrap(),
+            })
+            .collect();
+        let start = |covered| HarnessReviewStart {
+            patchset_id,
+            provider: "codex-cli",
+            model: "gpt-6-luna",
+            baseline_id: None,
+            prompts_hash: "snapshot",
+            patches: covered,
+        };
+        assert!(db.start_harness_review(start(&patches)).await?.is_none());
+        db.update_patchset_status(patchset_id, ReviewStatus::InReview.as_str())
+            .await?;
+        let invalid = vec![HarnessReviewPatch {
+            patch_id: i64::MAX,
+            commit_id: crate::baseline::CommitId::parse(&"a".repeat(40)).unwrap(),
+        }];
+        assert!(db.start_harness_review(start(&invalid)).await.is_err());
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT COUNT(*) FROM reviews WHERE review_mode = 'agent_harness'",
+                (),
+            )
+            .await?;
+        assert_eq!(rows.next().await?.unwrap().get::<i64>(0)?, 0);
+        drop(rows);
+        let review_id = db.start_harness_review(start(&patches)).await?.unwrap();
+        assert!(db.start_harness_review(start(&patches)).await.is_err());
+        let mut trace = HarnessTrace::default();
+        trace.usage.prompt_tokens = 60;
+        trace.usage.completion_tokens = 10;
+        trace.usage.total_tokens = 70;
+        trace.usage.cached_tokens = Some(45);
+        trace.provider_calls = 1;
+        let mut outcome = SeriesOutcome {
+            artifacts: Some(ReviewArtifacts {
+                reviewer_notes: "Source-grounded notes.".to_string(),
+                reply_drafts: diffs
+                    .iter()
+                    .map(|(_, index, _, _, _, _, message_id)| ReplyDraft {
+                        patch_index: *index,
+                        message_id: Some(message_id.clone()),
+                        body: format!("Reply for patch {index}"),
+                    })
+                    .collect(),
+            }),
+            execution: HarnessOutcome {
+                status: HarnessStatus::Completed {
+                    report: "Full raw report".to_string(),
+                },
+                trace,
+                instruction_fingerprint: "different snapshot".to_string(),
+            },
+        };
+        assert!(
+            db.complete_harness_review(review_id, "Input and instruction snapshot", &outcome)
+                .await
+                .is_err()
+        );
+        outcome.execution.instruction_fingerprint = "snapshot".to_string();
+        db.execute_batch("CREATE TEMP TRIGGER fail_harness_completion BEFORE UPDATE OF status ON patchsets
+            WHEN NEW.status = 'Reviewed' BEGIN SELECT RAISE(ABORT, 'Injected completion failure'); END;").await?;
+        assert!(
+            db.complete_harness_review(review_id, "Rolled-back completion", &outcome)
+                .await
+                .is_err()
+        );
+        let mut rolled_back = db
+            .conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM ai_interactions), status FROM reviews WHERE id = ?",
+                libsql::params![review_id],
+            )
+            .await?;
+        let row = rolled_back.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 0);
+        assert_eq!(row.get::<String>(1)?, "In Review");
+        drop(rolled_back);
+        db.execute_batch("DROP TRIGGER fail_harness_completion")
+            .await?;
+        assert_eq!(
+            db.complete_harness_review(review_id, "Input and instruction snapshot", &outcome)
+                .await?,
+            ReviewStatus::Reviewed
+        );
+        assert!(
+            db.complete_harness_review(review_id, "Repeated completion", &outcome)
+                .await
+                .is_err()
+        );
+        let mut rows = db.conn.query(
+            "SELECT r.patch_id, r.independently_verified, COUNT(c.patch_id), SUM(p.status = 'Reviewed')
+             FROM reviews r JOIN review_patch_coverage c ON c.review_id = r.id
+             JOIN patches p ON p.id = c.patch_id WHERE r.id = ? GROUP BY r.id",
+            libsql::params![review_id],
+        ).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<Option<i64>>(0)?, None);
+        assert_eq!(row.get::<i64>(1)?, 0);
+        assert_eq!(row.get::<i64>(2)?, 2);
+        assert_eq!(row.get::<i64>(3)?, 2);
+        drop(rows);
+        let details = db.get_review_details(review_id).await?.unwrap();
+        assert_eq!(details["review_mode"], "agent_harness");
+        assert_eq!(details["independently_verified"], false);
+        assert_eq!(details["covered_patches"].as_array().unwrap().len(), 2);
+        assert_eq!(details["tokens_in"], 60);
+        assert_eq!(details["input"], "Input and instruction snapshot");
+        let persisted: serde_json::Value =
+            serde_json::from_str(details["output"].as_str().unwrap())?;
+        assert_eq!(
+            persisted["execution"]["status"]["report"],
+            "Full raw report"
+        );
+        assert_eq!(
+            db.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Reviewed")
+        );
+        db.update_patchset_status(patchset_id, ReviewStatus::InReview.as_str())
+            .await?;
+        let cancelled_id = db.start_harness_review(start(&patches)).await?.unwrap();
+        db.update_patchset_status(patchset_id, ReviewStatus::Cancelled.as_str())
+            .await?;
+        assert_eq!(
+            db.complete_harness_review(cancelled_id, "Late completion", &outcome)
+                .await?,
+            ReviewStatus::Cancelled
+        );
+        assert_eq!(
+            db.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Cancelled")
+        );
+        let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached) FROM ai_interactions", ()).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 2);
+        assert_eq!(row.get::<i64>(1)?, 120);
+        assert_eq!(row.get::<i64>(2)?, 20);
+        assert_eq!(row.get::<i64>(3)?, 90);
+        drop(rows);
+        db.execute(
+            "UPDATE patchsets SET status = 'In Review' WHERE id = ?",
+            libsql::params![patchset_id],
+        )
+        .await?;
+        let failed_id = db.start_harness_review(start(&patches)).await?.unwrap();
+        outcome.artifacts = None;
+        outcome.execution.status = HarnessStatus::Failed {
+            reason: "Invalid final artifact".to_string(),
+        };
+        assert_eq!(
+            db.complete_harness_review(failed_id, "Failed invocation input", &outcome)
+                .await?,
+            ReviewStatus::Failed
+        );
+        assert_eq!(
+            db.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Failed")
+        );
+        let failed = db.get_review_details(failed_id).await?.unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(failed["output"].as_str().unwrap())?;
+        assert_eq!(persisted["execution"]["status"]["status"], "failed");
+        assert_eq!(
+            persisted["execution"]["trace"]["usage"]["prompt_tokens"],
+            60
+        );
+        db.execute(
+            "DELETE FROM reviews WHERE id = ?",
+            libsql::params![failed_id],
+        )
+        .await?;
+        let mut coverage = db
+            .conn
+            .query(
+                "SELECT COUNT(*) FROM review_patch_coverage WHERE review_id = ?",
+                libsql::params![failed_id],
+            )
+            .await?;
+        assert_eq!(coverage.next().await?.unwrap().get::<i64>(0)?, 0);
+        Ok(())
     }
 
     #[tokio::test]
@@ -17705,7 +18093,12 @@ mod tests {
             .await
             .unwrap();
         db.conn
-            .execute("PRAGMA user_version = 3", ())
+            .execute_batch(
+                "DROP TABLE review_patch_coverage;
+                ALTER TABLE reviews DROP COLUMN review_mode;
+                ALTER TABLE reviews DROP COLUMN independently_verified;
+                PRAGMA user_version = 3;",
+            )
             .await
             .unwrap();
 
@@ -21980,6 +22373,9 @@ mod tests {
                 "DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
+                 DROP TABLE review_patch_coverage;
+                 ALTER TABLE reviews DROP COLUMN review_mode;
+                 ALTER TABLE reviews DROP COLUMN independently_verified;
                  PRAGMA user_version = 7;",
             )
             .await
@@ -22006,6 +22402,9 @@ mod tests {
             .execute_batch(
                 "DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
+                 DROP TABLE review_patch_coverage;
+                 ALTER TABLE reviews DROP COLUMN review_mode;
+                 ALTER TABLE reviews DROP COLUMN independently_verified;
                  PRAGMA user_version = 9;",
             )
             .await

@@ -41,9 +41,14 @@ by default. This policy is separate from the coding assistant's model setting.
   no-AI uses zero, and malformed output is retained without retry or fallback.
   Required gates passed: 1,109 library, 48 main, seven CLI, 25 integration tests,
   formatting, and all Clippy profiles. Daemon harness mode remains rejected.
-4. Next: add daemon whole-series persistence and cancellation with one series usage
-   record, covered patch identities, atomic status updates, and no automatic
-   public delivery. Validate before enabling this mode in runtime settings.
+4. In progress: atomic persistence is implemented with one series usage record,
+  covered patch identities, explicit mode/verification metadata, and preserved
+  cancellation. Tests cover rollback on the final write, invalid scope,
+  instruction identity, duplicate completion, failed artifacts, and cleanup.
+  Required gates passed: 1,110 library, 48 main, seven CLI, 25 integration tests,
+  formatting, and all Clippy profiles. Next: wire daemon execution/cancellation
+  to this transaction without automatic public delivery. Keep mode disabled
+  until dispatch and presentation are validated.
 5. Establish one bounded Luna evaluation with retained artifacts and measured
    cached input, uncached input, output, provider calls, tools, and review quality.
    No full/small benchmark or automatic queue refill is authorized by this plan.
