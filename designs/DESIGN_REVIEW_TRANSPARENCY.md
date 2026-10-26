@@ -150,7 +150,7 @@ pass. This attribution slice was installed on 2026-10-26 at 17:21 CET with
 matching release/installed hashes and a private stopped-database backup.
 
 Optional confidence validation, map projection, and presentation are implemented
-and validated in source, but not yet deployed at the context-switch handoff.
+and deployed after the context switch at 17:50 CET on 2026-10-26.
 Verification accepts absent or null confidence; a supplied assessment requires
 a bounded numeric or unknown score and an evidence rationale. The map supplies
 model/stage provenance and labels scores uncalibrated. Old or invalid assessments
@@ -161,6 +161,10 @@ full make check-pr gate. The final synthetic-confidence browser check passed at
 1,280 and 390 pixels: no page overflow or injected image elements, visible scored
 and historical-unassessed cases, and visible escaped rationale. The temporary
 fixture is stopped; its synthetic score was never written to the live database.
+The four-job release build passed, an idle database backup passed quick_check,
+and the release/installed hashes match. Fresh live review-48 checks at both
+widths show two Not assessed labels, no synthetic score or overflow, and unchanged
+saved findings. The daemon is healthy and ingestion advanced after restart.
 
 Backend-confirmed per-stage effort and missing-usage presentation remain open.
 Review 48's public API and saved prompt do not contain effort; its stored zero

@@ -58,11 +58,15 @@ cards/maps. Historical missing effort and unconfirmed effective effort remain
 Unknown. Snapshot/proxy/provider/escaping tests, full make check-pr, and narrow
 desktop/mobile label checks pass. This configured-effort slice is deployed.
 Optional model confidence with score/rationale, application-owned provenance,
-uncalibrated labels, and historical-unassessed fallback is validated in source
-but not deployed at the context-switch handoff. Contract, projection, fake
+uncalibrated labels, and historical-unassessed fallback is deployed at 17:50 CET
+on 2026-10-26 after the context switch. Contract, projection, fake
 workflow, escaping, full make check-pr, and final desktop/mobile fixture checks
 pass; even a 1% assessment remains a finding, not a filter. The fixture is stopped
-and no synthetic score entered the live database. Backend-confirmed per-stage
+and no synthetic score entered the live database. A checked idle database backup
+and rollback binary are retained; the installed hash matches the release build.
+Fresh live-page/API checks preserve review 48's original results and show two
+unassessed historical threads without overflow at desktop/mobile widths.
+Backend-confirmed per-stage
 effort and missing usage remain open; see the report for browser limits.
 
 ### P1: Budget-Gated Premium Model Comparisons

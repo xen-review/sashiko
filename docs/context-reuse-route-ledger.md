@@ -3,7 +3,33 @@
 Updated: 2026-10-26. This is the execution ledger for the selected route;
 the general improvement ledger retains other independent tasks.
 
-## Switch Handoff
+## Current Continuation
+
+The operator resumed the improvement loop on the Copilot Business coding-chat
+plan. At 17:50 CET on 2026-10-26 the confidence source eed4fbdd is deployed
+from source HEAD 71181008. Release/installed SHA-256:
+5f50f8a71435e81961ac67d4f9a7e7085164ae9e73517fe96d2199a57e74c57f.
+The four-job release build passed with unchanged OOM counters. The idle database
+backup before-confidence-20261026-174938.db passed quick_check; the matching
+sashiko-before-confidence-20261026-174938 rollback binary is retained privately
+under the Xen data backups directory. No active review was interrupted.
+
+Service active, PID 991092; API healthy, schema 15, 4,066 messages, 451 series,
+no Pending or In Review. Ingestion advanced after restart. No new model call was
+needed to verify rollout. Freshly served HTML includes the confidence renderer;
+live review 48 at 1,280 and 390 pixels has no overflow, two Not assessed labels,
+Unknown effective effort, no synthetic score, and unchanged saved findings.
+Runtime remains workflow / codex-cli / gpt-6-luna / medium, muted with no SMTP.
+
+Latest authenticated quota at 17:48:55 CET: 14% five-hour and 72% weekly,
+reset 19:01:38 CET. The premium gate is false; no model experiment is planned.
+The chat plan change does not alter daemon billing or self-review restrictions.
+Next evidence-backed task: distinguish unavailable historical token usage from
+measured zero without relabeling successful reviews or inventing token counts.
+Other open work and validation constraints remain in the ledger and historical
+handoff below; its pause and undeployed-confidence statements are superseded.
+
+## Switch Handoff (Historical)
 
 Authoritative state at 17:39 CET on 2026-10-26. The operator requested saving
 state before switching the coding chat back to the Copilot harness/plan.
