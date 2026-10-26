@@ -19,6 +19,24 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Prioritized Work
 
+### P0: Track Provider JSON Failures Without Inventing Results
+
+Status: unresolved provider-output failure observed on 2026-10-26 at 12:07 UTC.
+The final patch of x86/alternatives: Adjust all insn-relative fields exhausted
+three schema-validation attempts. Native Codex assistant artifacts at 12:07:00,
+12:07:08, and 12:07:13 contain malformed JSON themselves (1,519, 1,453, and
+1,453 characters), with missing container closures. This is not evidence that
+Sashiko dropped a complete valid response. A prior GICv3 review also failed on
+EOF JSON parsing; its native artifacts have not been compared yet.
+
+Preserve the failed review, native artifacts, and completed patch results. Do
+not manufacture a successful result by guessing missing JSON or repeatedly
+requeue the series. Normal review throughput continues on other work. Investigate
+schema-specific corrective feedback or a supported structured-output backend
+only with a focused reproduction and bounded validation; no parser weakening or
+extra retry budget is authorized by this observation. Check the failed stage's
+full request and native response before attributing the error to a prompt bug.
+
 ### P1: Classify Xen Staging Merges and Filter Review State
 
 Status: operator-requested follow-up on 2026-10-26; ledger only, not a change to
