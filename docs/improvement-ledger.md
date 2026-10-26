@@ -20,8 +20,8 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ### P0: Resolve Verification Failures That Lose Completed Analysis
 
-Status: contract violation reproduced; prompt and retry feedback improved;
-all deterministic gates passed. Deployment and supported retry are next.
+Status: prompt/retry feedback fix deployed in `3c3db2d4`; supported retry accepted.
+Await the retried patch's actual outcome; model compliance is not guaranteed.
 
 Evidence: a Luna review of the x86 microcode timeout-removal patch exhausted
 three validation attempts on 2026-10-26 at 02:23 UTC with
@@ -34,7 +34,7 @@ The prompt now gives this exact distinction, and retry errors list valid IDs.
 A focused regression checks the rejected shape, accepted lineage, and rejection
 of unknown IDs. Evidence and provenance checks remain strict.
 
-Next: deploy and use the supported retry API for the affected review. Do not
+Next: inspect the retried review's outcome without repeated restarts. Do not
 claim prompt changes guarantee model compliance. Checks passed with 1,088 library,
 47 main, seven CLI, and 24 integration tests, plus all formatting/Clippy profiles.
 
@@ -74,6 +74,12 @@ requires explicit model authorization and recorded generation counts.
 Status: ambient Codex instruction overhead removed by the restricted profile;
 repeated Sashiko stage context still needs measurement and a focused reduction.
 
+Saved-request measurement: each of the three prompts carried 52,124 characters
+of shared review context, 4,684 of tool definitions, 515-595 of stage instruction,
+and approximately 45,500 of ambient CLI instructions. Do not translate character
+counts into tokens or promise a quota percentage saving. Keep needed source
+context; the optional whole-series mode below addresses repeated review stages.
+
 Evidence: the same brief Sol interval recorded 171,604 input tokens, including
 118,528 cached and 53,076 uncached tokens, with only 785 output tokens. The three
 CLI sessions accounted for five recorded model generations. Fresh generations
@@ -92,8 +98,11 @@ shared account percentage changes into an invented token price.
 
 ### P2: Add an Optional Skill/Agent-Driven Single-Prompt Review Mode
 
-Status: requested and authorized for planning and implementation after the most
-severe functional issues are resolved. Write and review a design first.
+Status: design proposed in
+[DESIGN_SINGLE_PROMPT_REVIEW.md](../designs/DESIGN_SINGLE_PROMPT_REVIEW.md).
+Operator decision needed: exactly one tool-free completion versus one bounded
+harness invocation with internal source-tool/model turns. Implementation follows
+review of this architecture choice; no runtime mode change has been made.
 
 Goal: allow configuration to bypass Sashiko's entire multiphase review procedure
 and replace it with one explicitly selected agent/skill prompt for a whole Xen
