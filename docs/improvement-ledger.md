@@ -21,6 +21,31 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ### P0: Track Provider JSON Failures Without Inventing Results
 
+Update at 13:22 CET: the operator authorized raising Luna effort progressively
+and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
+model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
+high, xhigh, and max effort. No model names were guessed and no Sol substitution
+was made. MAX is excluded under current 1,800-second review and 600-second
+provider limits; both must allow at least 3,600 seconds before a MAX experiment.
+
+One exact failed-request replay on gpt-6-luna/medium returned valid envelope and
+inner stage JSON with concerns/dismissed_concerns arrays in 8.829 seconds. Usage:
+10,634 input, zero cached input, and 562 output tokens (179 reasoning tokens
+reported within output). Artifacts and the 18,628-character original prompt are
+retained outside the repository under /tmp/sashiko-effort-trial-20261026. This
+is a one-request format check, not proof of causation, semantic correctness, or
+elimination of future failures. No higher effort or alternate model was called.
+
+After a completed-patch boundary, runtime Luna effort was changed from low to
+medium. Explicit-config no-AI preparation passed, the daemon resumed, and its
+actual invocation confirmed model_reasoning_effort=medium. Cache identity already
+includes effort. Database and configuration were backed up before one supported
+patch-only retry of the failed alternatives patch; API accepted it. The original
+failure and successful patches remain preserved. Full retry outcome is pending.
+Latest fresh quota before the test was 10% five-hour and 86% weekly remaining,
+reset at 14:00:02 CET. Keep the existing remaining-budget authorization; do not
+increase effort again unless medium actually fails, and do not change active calls.
+
 Status: unresolved provider-output failure observed on 2026-10-26 at 12:07 UTC.
 The final patch of x86/alternatives: Adjust all insn-relative fields exhausted
 three schema-validation attempts. Native Codex assistant artifacts at 12:07:00,
