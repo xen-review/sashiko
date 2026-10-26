@@ -388,7 +388,7 @@ pub fn build_prompt(request: &AiRequest) -> String {
     out
 }
 
-pub(crate) fn tool_instructions(tools: &[AiTool]) -> String {
+pub(crate) fn tool_catalog(tools: &[AiTool]) -> String {
     let mut out = String::from("<available_tools>\n");
     for tool in tools {
         out.push_str(&format!(
@@ -397,6 +397,11 @@ pub(crate) fn tool_instructions(tools: &[AiTool]) -> String {
         ));
     }
     out.push_str("</available_tools>\n\n");
+    out
+}
+
+pub(crate) fn tool_instructions(tools: &[AiTool]) -> String {
+    let mut out = tool_catalog(tools);
     out.push_str(
         "RESPONSE FORMAT: You MUST respond with a SINGLE valid JSON object only (no markdown, no explanation).\n\
          To call tools: {\"tool_calls\": [{\"id\": \"c1\", \"function_name\": \"TOOL_NAME\", \"arguments\": {ARGS}}, {\"id\": \"c2\", \"function_name\": \"OTHER_TOOL\", \"arguments\": {ARGS2}}]}\n\
@@ -679,6 +684,7 @@ mod tests {
         assert!(prompt.contains("RESPONSE FORMAT"));
         assert!(prompt.contains("tool_calls"));
         assert!(prompt.contains("<available_tools>"));
+        assert!(prompt.contains("For your final answer: {\"content\": \"YOUR RESPONSE\"}"));
         assert!(prompt.find("</user>").unwrap() < prompt.find("<available_tools>").unwrap());
         assert_eq!(prompt.matches("- name: git_log\n").count(), 1);
     }

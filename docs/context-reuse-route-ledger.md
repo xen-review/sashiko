@@ -129,6 +129,45 @@ The immediate next task is daemon/local dispatch; sequential startup stays gated
 until its persistence and cancellation integration tests pass. No sequential
 mode or schema-15 deployment is claimed by this frontend change.
 
+## Three-Patch Comparison and Envelope Follow-Up
+
+On 2026-10-26 at 16:14-16:17 CET, the existing three-patch libxenstat series was
+exported read-only with original message identities and its saved exact baseline.
+Both zero-AI preparations succeeded. The real runs had identical applied patch
+contexts and instruction fingerprints, verified from retained request histories.
+Native turn metadata confirmed gpt-6-luna/medium for all seven comparison calls.
+Response caching was disabled. Each strategy received the same cumulative caps:
+12 provider calls, 30 source calls, 300,000 input tokens, 16,000 output tokens,
+and 1,800 seconds. No live series was requeued or modified.
+
+| Strategy | Outcome | Calls | Tools | Input | Cached | Uncached | Output | Seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| whole_series | Three validated replies | 3 | 9 | 146,011 | 38,400 | 107,611 | 1,758 | 37.887 |
+| sequential_patches | Failed at first artifact | 4 | 3 | 200,052 | 108,160 | 91,892 | 1,075 | 33.815 |
+
+The sequential native reply begins with the malformed syntax
+`{"content":"reviewer_notes":...}`. Its bytes exactly match the retained
+failure, so this is not evidence of parser corruption. All four calls reported
+usage; no checkpoint validated. Lower uncached input and elapsed time are not
+savings on equivalent completed work. No automatic repair or retry was attempted.
+The worker's process exit was zero; the structured result correctly says Failed,
+so consumers must inspect the result rather than infer success from exit alone.
+Artifacts remain outside git in /tmp/sashiko-checkpoint-comparison-20261026.
+
+Local hypothesis: the shared source catalog also supplied a generic final-answer
+content wrapper, while the harness requested top-level reviewer_notes and
+reply_drafts. Extract only the catalog for harness use and give one explicit
+direct-artifact rule; retain the generic provider's envelope unchanged. Focused
+tests check both contracts, tool continuation, prefix stability, limits, missing
+usage, and cancellation. Full make check-pr passes. This removes demonstrated
+instruction ambiguity, not a guarantee that the model will always emit valid
+JSON. Any further real trial requires a new bounded decision and fresh quota.
+
+After deployment, the ordinary daemon ingested and completed all five patches
+of the RISC-V v8 boot/MMU series. It was left running through that work and
+stopped only after completion for the deterministic checks above. This is
+post-deployment review progress, not independent confirmation of its findings.
+
 ## Decision
 
 Finish the bounded whole-series harness as the nearest usable milestone, then
