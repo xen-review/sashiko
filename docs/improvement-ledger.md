@@ -254,8 +254,13 @@ the bounded pinned-tip matcher are implemented in source. Four temporary-Git
 tests cover rewritten identities, ref rewrites, history/byte limits, cache reuse,
 duplicates, merges, binary/empty diffs, and reverts. Full make check-pr passed
 1,137 library tests (two ignored), 49 main, seven CLI, 26 integration, formatting,
-and all Clippy profiles. Persisted evidence, sync integration, and classification
-UI/filtering remain pending. No live ref fetch, migration, history scan, model
+and all Clippy profiles. Schema-16 atomic evidence storage is now implemented
+in source, with a subsequent full gate passing 1,138 library tests (two ignored)
+and the same main/CLI/integration counts. It bounds mailed-patch publication,
+retains immutable cache identities and historical snapshots, invalidates stale,
+failed, or changed-source evidence, and never changes review state. Sync
+integration and classification UI/filtering remain pending. No live ref fetch,
+migration, history scan, model
 call, or live classification ran; ordinary reviews and scheduling are unchanged.
 
 Goal: detect and display when an individual patch is already incorporated into

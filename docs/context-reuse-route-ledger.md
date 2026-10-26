@@ -12,8 +12,12 @@ refs/remotes/upstream/staging target on 2026-10-26. Configuration and bounded
 matching foundations are now implemented in source, with focused temporary-Git
 tests and full gates passing: 1,137 library tests (two ignored), 49 main, seven
 CLI, 26 integration, formatting, and all Clippy profiles. The idle daemon was
-resumed after validation. Database evidence, refresh
-integration, and API/UI remain pending; no migration, live fetch/history scan,
+resumed after validation. Atomic schema-16 evidence storage is also implemented
+in source; its gate passed 1,138 library tests (two ignored), 49 main, seven CLI,
+26 integration, formatting, and all Clippy profiles. Bounded publication,
+immutable cache/rollback, stale/failure/changed-identity invalidation, and no
+review-status mutation are tested. Refresh integration and API/UI remain
+pending; no live migration, fetch/history scan,
 model call, or scheduling change has been made. Remote inspection
 confirms origin is https://github.com/xen-review/xen.git and upstream is the
 Xenbits repository; their staging tips differ, so silently choosing origin

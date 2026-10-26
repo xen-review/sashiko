@@ -125,7 +125,23 @@ The full make check-pr gate passed 1,137 library tests (two ignored), 49 main,
 seven CLI, and 26 integration tests, formatting, and all Clippy profiles. The
 installed daemon was resumed after the idle validation boundary.
 
-Persisted evidence, refresh integration, exact-ancestry matching, stale-state
-projection, and API/UI classification remain pending. The runtime is unchanged;
-there has been no live repository scan, fetch, migration, or model call for this
-feature. Do not infer feature rollout from the configuration type alone.
+Schema 16 and atomic evidence storage are now implemented in source. Immutable
+commit identities are cached by repository and algorithm version. Reachability
+belongs to each snapshot, and a separate publication pointer changes only after
+all bounded mailed-patch evidence is saved. Conflicting cached identity rejects
+the transaction and preserves the previous pointer. Reads return typed matched
+history, no match in checked range, Unknown, or Stale with patch-ID provenance,
+tip, refresh/check timestamps, and explicit limitations. Source identity changes,
+missing evidence, failed refresh/indexing, stale timestamps, and backwards clock
+movement cannot become current positive evidence. No review status is mutated.
+The five matcher/storage tests and opt-in settings checks pass. The full storage
+gate passed 1,138 library tests (two ignored), 49 main, seven CLI, and 26
+integration tests, formatting, and all Clippy profiles. Historical-migration
+fixtures explicitly remove schema-16 tables before rewinding and now verify the
+new final version. The installed daemon is resumed on schema 15; no live
+database migration has occurred.
+
+Refresh integration, exact-ancestry matching, batched API retrieval, and UI/filter
+classification remain pending. The runtime is unchanged; there has been no live
+repository scan, fetch, migration, or model call for this feature. Do not infer
+feature rollout from the configuration or storage types alone.

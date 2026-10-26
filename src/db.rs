@@ -2211,7 +2211,16 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 15.");
+        if current_version < 16 {
+            info!("Applying database migration version 16 (staging membership evidence)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/016_staging_evidence.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 16", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 16.");
 
         Ok(())
     }
@@ -19390,7 +19399,12 @@ mod tests {
             .unwrap();
         db.conn
             .execute_batch(
-                "DROP TABLE harness_provider_calls;
+                "DROP TABLE staging_targets;
+                DROP TABLE staging_patch_evidence;
+                DROP TABLE staging_snapshot_commits;
+                DROP TABLE staging_snapshots;
+                DROP TABLE staging_commit_index;
+                DROP TABLE harness_provider_calls;
                 DROP TABLE harness_patch_checkpoints;
                 DROP TABLE harness_checkpoint_sessions;
                 DROP TABLE review_patch_coverage;
@@ -23672,6 +23686,11 @@ mod tests {
                 "DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
+                 DROP TABLE staging_targets;
+                 DROP TABLE staging_patch_evidence;
+                 DROP TABLE staging_snapshot_commits;
+                 DROP TABLE staging_snapshots;
+                 DROP TABLE staging_commit_index;
                  DROP TABLE harness_provider_calls;
                  DROP TABLE harness_patch_checkpoints;
                  DROP TABLE harness_checkpoint_sessions;
@@ -23704,6 +23723,11 @@ mod tests {
             .execute_batch(
                 "DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
+                 DROP TABLE staging_targets;
+                 DROP TABLE staging_patch_evidence;
+                 DROP TABLE staging_snapshot_commits;
+                 DROP TABLE staging_snapshots;
+                 DROP TABLE staging_commit_index;
                  DROP TABLE harness_provider_calls;
                  DROP TABLE harness_patch_checkpoints;
                  DROP TABLE harness_checkpoint_sessions;

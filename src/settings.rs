@@ -1111,6 +1111,8 @@ pub struct StagingSettings {
     pub freshness_seconds: u64,
     #[serde(default = "default_staging_commits")]
     pub max_commits: usize,
+    #[serde(default = "default_staging_commits")]
+    pub max_patches: usize,
     #[serde(default = "default_staging_bytes")]
     pub max_diff_bytes: usize,
     #[serde(default = "default_staging_timeout")]
@@ -1156,10 +1158,12 @@ impl StagingSettings {
             || self.timeout_seconds > 600
             || self.max_commits == 0
             || self.max_commits > 10000
+            || self.max_patches == 0
+            || self.max_patches > 10000
             || self.max_diff_bytes == 0
             || self.max_diff_bytes > 64 * 1024 * 1024
         {
-            return Err("[git.staging] requires positive freshness, timeout <= 600 seconds, max_commits <= 10000, and max_diff_bytes <= 67108864".to_string());
+            return Err("[git.staging] requires positive freshness, timeout <= 600 seconds, max_commits/max_patches <= 10000, and max_diff_bytes <= 67108864".to_string());
         }
         Ok(())
     }
@@ -1849,6 +1853,11 @@ mod tests {
         let mut invalid = settings.clone();
         invalid.remote = "-upstream".to_string();
         assert!(invalid.validate().is_err());
+        for patches in [0, 10001] {
+            let mut invalid = settings.clone();
+            invalid.max_patches = patches;
+            assert!(invalid.validate().is_err());
+        }
         for (commits, bytes, seconds) in [
             (0, 1, 1),
             (10001, 1, 1),

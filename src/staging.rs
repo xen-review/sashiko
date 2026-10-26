@@ -187,6 +187,205 @@ pub async fn build_snapshot(
     Ok(snapshot)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipState {
+    MatchedHistory,
+    NoMatchInCheckedRange,
+    Unknown,
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchEvidence {
+    pub patch_id: i64,
+    pub state: MembershipState,
+    pub target_ref: String,
+    pub remote: String,
+    pub algorithm_version: u32,
+    pub source_identity: Option<String>,
+    pub match_kind: Option<MatchKind>,
+    pub tip: Option<String>,
+    pub refreshed_at: Option<i64>,
+    pub checked_at: Option<i64>,
+    pub scope_complete: bool,
+    pub matched_commits: Vec<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    StablePatchId,
+}
+
+impl crate::db::Database {
+    pub async fn load_staging_index(
+        &self,
+        repository: &str,
+        limit: usize,
+    ) -> Result<BTreeMap<String, CommitIdentity>> {
+        ensure!((1..=10000).contains(&limit), "invalid staging cache limit");
+        let mut rows = self.conn.query(
+            "SELECT commit_id, identity_json FROM staging_commit_index WHERE repository = ? AND algorithm_version = ? ORDER BY computed_at DESC LIMIT ?",
+            libsql::params![repository, i64::from(INDEX_VERSION), i64::try_from(limit)?],
+        ).await?;
+        let mut entries = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            entries.insert(
+                row.get::<String>(0)?,
+                serde_json::from_str(&row.get::<String>(1)?)?,
+            );
+        }
+        Ok(entries)
+    }
+
+    pub async fn publish_staging_snapshot(
+        &self,
+        repository: &str,
+        settings: &StagingSettings,
+        snapshot: &StagingSnapshot,
+        refreshed_at: i64,
+        checked_at: i64,
+    ) -> Result<i64> {
+        settings.validate().map_err(anyhow::Error::msg)?;
+        ensure!(
+            snapshot.algorithm_version == INDEX_VERSION
+                && snapshot.target_ref == settings.target_ref,
+            "staging snapshot configuration/version mismatch"
+        );
+        ensure!(
+            snapshot.entries.len() <= settings.max_commits
+                && snapshot.diff_bytes <= settings.max_diff_bytes,
+            "staging snapshot exceeds configured bounds"
+        );
+        ensure!(
+            refreshed_at > 0
+                && refreshed_at <= checked_at
+                && checked_at - refreshed_at <= i64::try_from(settings.freshness_seconds)?,
+            "staging snapshot requires fresh successful refresh evidence"
+        );
+        let tx = self.begin_immediate_transaction().await?;
+        tx.execute("INSERT INTO staging_snapshots (repository, remote, target_ref, tip, refreshed_at, checked_at, algorithm_version, scope_complete, diff_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            libsql::params![repository, settings.remote.as_str(), snapshot.target_ref.as_str(), snapshot.tip.as_str(), refreshed_at, checked_at, i64::from(INDEX_VERSION), i64::from(snapshot.scope_complete), i64::try_from(snapshot.diff_bytes)?]).await?;
+        let id = tx.last_insert_rowid();
+        for entry in &snapshot.entries {
+            let identity = serde_json::to_string(&entry.identity)?;
+            let patch_identity = match &entry.identity {
+                CommitIdentity::Text { patch_id } => Some(patch_id.as_str()),
+                _ => None,
+            };
+            tx.execute("INSERT INTO staging_commit_index (repository, algorithm_version, commit_id, identity_json, patch_identity, computed_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                libsql::params![repository, i64::from(INDEX_VERSION), entry.commit.as_str(), identity.as_str(), patch_identity, checked_at]).await?;
+            let mut existing = tx.query("SELECT identity_json FROM staging_commit_index WHERE repository = ? AND algorithm_version = ? AND commit_id = ?",
+                libsql::params![repository, i64::from(INDEX_VERSION), entry.commit.as_str()]).await?;
+            let stored = existing
+                .next()
+                .await?
+                .context("staging cache entry missing")?
+                .get::<String>(0)?;
+            ensure!(
+                stored == identity,
+                "immutable staging commit identity changed"
+            );
+            tx.execute("INSERT INTO staging_snapshot_commits (snapshot_id, commit_id, patch_identity) VALUES (?, ?, ?)",
+                libsql::params![id, entry.commit.as_str(), patch_identity]).await?;
+        }
+        tx.execute("INSERT INTO staging_patch_evidence (snapshot_id, patch_id, source_identity) SELECT ?, id, git_patch_id FROM patches ORDER BY id DESC LIMIT ?", libsql::params![id, i64::try_from(settings.max_patches)?]).await?;
+        tx.execute("INSERT INTO staging_targets (repository, remote, target_ref, snapshot_id) VALUES (?, ?, ?, ?) ON CONFLICT(repository, remote, target_ref) DO UPDATE SET snapshot_id = excluded.snapshot_id, last_failure = NULL, failed_at = NULL",
+            libsql::params![repository, settings.remote.as_str(), settings.target_ref.as_str(), id]).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    pub async fn invalidate_staging_target(
+        &self,
+        repository: &str,
+        settings: &StagingSettings,
+        reason: &str,
+        checked_at: i64,
+    ) -> Result<()> {
+        self.execute("INSERT INTO staging_targets (repository, remote, target_ref, last_failure, failed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(repository, remote, target_ref) DO UPDATE SET last_failure = excluded.last_failure, failed_at = excluded.failed_at",
+            libsql::params![repository, settings.remote.as_str(), settings.target_ref.as_str(), reason, checked_at]).await?;
+        Ok(())
+    }
+
+    pub async fn staging_patch_evidence(
+        &self,
+        repository: &str,
+        settings: &StagingSettings,
+        patch_id: i64,
+        now: i64,
+    ) -> Result<PatchEvidence> {
+        let mut result = PatchEvidence {
+            patch_id,
+            state: MembershipState::Unknown,
+            target_ref: settings.target_ref.clone(),
+            remote: settings.remote.clone(),
+            algorithm_version: INDEX_VERSION,
+            source_identity: None,
+            match_kind: None,
+            tip: None,
+            refreshed_at: None,
+            checked_at: None,
+            scope_complete: false,
+            matched_commits: Vec::new(),
+            reason: Some("No current evidence".to_string()),
+        };
+        let mut rows = self.conn.query("SELECT s.id, s.tip, s.refreshed_at, s.checked_at, s.scope_complete, t.last_failure, e.source_identity, p.git_patch_id, e.patch_id, s.algorithm_version FROM staging_targets t LEFT JOIN staging_snapshots s ON s.id = t.snapshot_id LEFT JOIN staging_patch_evidence e ON e.snapshot_id = s.id AND e.patch_id = ? LEFT JOIN patches p ON p.id = e.patch_id WHERE t.repository = ? AND t.remote = ? AND t.target_ref = ?",
+            libsql::params![patch_id, repository, settings.remote.as_str(), settings.target_ref.as_str()]).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(result);
+        };
+        result.tip = row.get(1)?;
+        result.refreshed_at = row.get(2)?;
+        result.checked_at = row.get(3)?;
+        result.scope_complete = row.get::<Option<i64>>(4)?.is_some_and(|value| value != 0);
+        if let Some(reason) = row.get::<Option<String>>(5)? {
+            result.reason = Some(reason);
+            return Ok(result);
+        }
+        if row.get::<Option<i64>>(9)? != Some(i64::from(INDEX_VERSION)) {
+            return Ok(result);
+        }
+        let Some(refreshed) = result.refreshed_at else {
+            return Ok(result);
+        };
+        if now < refreshed
+            || now.saturating_sub(refreshed) > i64::try_from(settings.freshness_seconds)?
+        {
+            result.state = MembershipState::Stale;
+            result.reason =
+                Some("Successful refresh is stale or the clock moved backwards".to_string());
+            return Ok(result);
+        }
+        let source: Option<String> = row.get(6)?;
+        result.source_identity = source.clone();
+        if source.is_none() || source != row.get::<Option<String>>(7)? {
+            result.reason =
+                Some("Patch identity is unavailable or changed since this check".to_string());
+            return Ok(result);
+        }
+        let mut matches = self.conn.query("SELECT commit_id FROM staging_snapshot_commits WHERE snapshot_id = ? AND patch_identity = ? ORDER BY commit_id",
+            libsql::params![row.get::<i64>(0)?, source]).await?;
+        while let Some(matched) = matches.next().await? {
+            result.matched_commits.push(matched.get(0)?);
+        }
+        if result.matched_commits.is_empty() {
+            result.state = MembershipState::NoMatchInCheckedRange;
+            result.reason = Some("No textual patch-ID match in the checked range; not proof of absence or an effective change".to_string());
+        } else {
+            result.state = MembershipState::MatchedHistory;
+            result.match_kind = Some(MatchKind::StablePatchId);
+            result.reason = Some(
+                "Diff-equivalent commit reachable at the checked tip; may have been reverted"
+                    .to_string(),
+            );
+        }
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +420,138 @@ mod tests {
         git(repo, &["add", name]);
         git(repo, &["commit", "-m", name]);
         git(repo, &["rev-parse", "HEAD"])
+    }
+
+    #[tokio::test]
+    async fn evidence_publication_is_atomic_fresh_and_independent_of_review_state() -> Result<()> {
+        let db = crate::db::Database::new(&crate::settings::DatabaseSettings {
+            url: ":memory:".to_string(),
+            token: String::new(),
+        })
+        .await?;
+        db.migrate().await?;
+        db.migrate().await?;
+        let identity = "a".repeat(40);
+        db.execute(
+            "INSERT INTO patchsets (id, subject, status) VALUES (1, 'saved series', 'Reviewed')",
+            (),
+        )
+        .await?;
+        db.execute("INSERT INTO messages (message_id, subject) VALUES ('saved@example.invalid', 'saved patch')", ()).await?;
+        db.execute("INSERT INTO patches (id, patchset_id, message_id, part_index, git_patch_id) VALUES (1, 1, 'saved@example.invalid', 1, ?)", libsql::params![identity.clone()]).await?;
+        let (_, settings) = fixture();
+        let mut snapshot = StagingSnapshot {
+            target_ref: settings.target_ref.clone(),
+            tip: "b".repeat(40),
+            algorithm_version: INDEX_VERSION,
+            scope_complete: false,
+            diff_bytes: 10,
+            entries: vec![IndexEntry {
+                commit: "c".repeat(40),
+                identity: CommitIdentity::Text {
+                    patch_id: identity.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 100)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        let first = db
+            .publish_staging_snapshot("repo", &settings, &snapshot, 90, 100)
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 100)
+                .await?
+                .state,
+            MembershipState::MatchedHistory
+        );
+        assert_eq!(db.load_staging_index("repo", 10).await?.len(), 1);
+        assert_eq!(
+            db.staging_patch_evidence("other-repo", &settings, 1, 100)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        snapshot.entries[0].identity = CommitIdentity::Empty;
+        assert!(
+            db.publish_staging_snapshot("repo", &settings, &snapshot, 90, 101)
+                .await
+                .is_err()
+        );
+        let mut pointer = db
+            .conn
+            .query(
+                "SELECT snapshot_id FROM staging_targets WHERE repository='repo'",
+                (),
+            )
+            .await?;
+        assert_eq!(pointer.next().await?.unwrap().get::<i64>(0)?, first);
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 100)
+                .await?
+                .state,
+            MembershipState::MatchedHistory
+        );
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 90000)
+                .await?
+                .state,
+            MembershipState::Stale
+        );
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 80)
+                .await?
+                .state,
+            MembershipState::Stale
+        );
+        db.invalidate_staging_target("repo", &settings, "Refresh failed", 101)
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 102)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        snapshot.entries.clear();
+        db.publish_staging_snapshot("repo", &settings, &snapshot, 100, 102)
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 102)
+                .await?
+                .state,
+            MembershipState::NoMatchInCheckedRange
+        );
+        db.execute("UPDATE patches SET git_patch_id = NULL WHERE id=1", ())
+            .await?;
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 102)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        let mut status = db
+            .conn
+            .query("SELECT status FROM patchsets WHERE id=1", ())
+            .await?;
+        assert_eq!(status.next().await?.unwrap().get::<String>(0)?, "Reviewed");
+        db.execute("INSERT INTO messages (message_id, subject) VALUES ('second@example.invalid', 'second patch')", ()).await?;
+        db.execute("INSERT INTO patches (id, patchset_id, message_id, part_index) VALUES (2, 1, 'second@example.invalid', 2)", ()).await?;
+        let mut bounded = settings.clone();
+        bounded.max_patches = 1;
+        db.publish_staging_snapshot("repo", &bounded, &snapshot, 101, 102)
+            .await?;
+        let mut rows = db.conn.query("SELECT COUNT(*) FROM staging_patch_evidence WHERE snapshot_id = (SELECT MAX(id) FROM staging_snapshots)", ()).await?;
+        assert_eq!(rows.next().await?.unwrap().get::<i64>(0)?, 1);
+        assert_eq!(
+            db.staging_patch_evidence("repo", &settings, 1, 102)
+                .await?
+                .state,
+            MembershipState::Unknown
+        );
+        Ok(())
     }
 
     #[tokio::test]

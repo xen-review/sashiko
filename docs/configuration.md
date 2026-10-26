@@ -293,6 +293,7 @@ existing behavior and does not guess a target from local HEAD or origin.
 | `target_ref` | string | required | Full `refs/remotes/<remote>/<branch>` name. HEAD, revision expressions, and mismatched remotes are rejected. |
 | `freshness_seconds` | integer | `86400` | Maximum age of successful refresh evidence; positive. Commit dates do not establish freshness. |
 | `max_commits` | integer | `1000` | Maximum reachable commits per indexing pass; `1..=10000`. An incomplete range cannot establish absence. |
+| `max_patches` | integer | `1000` | Maximum most-recent mailed patches checked per publication; `1..=10000`. Older unchecked patches remain Unknown. |
 | `max_diff_bytes` | integer | `16777216` | Maximum new diff bytes per pass; `1..=67108864`. |
 | `timeout_seconds` | integer | `120` | Whole-pass deadline, including Git reads and patch-ID calculation; `1..=600`. |
 
