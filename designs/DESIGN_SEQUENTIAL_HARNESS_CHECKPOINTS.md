@@ -1,9 +1,10 @@
 # Sequential Harness Checkpoints
 
 Status: partial-completion policy approved by the operator, 2026-10-26.
-Typed strategy configuration, bounded continuation, and atomic checkpoint/terminal
-persistence are implemented. Sequential execution still fails closed until
-dispatch and partial-result API/UI are wired. This extends the approved
+Typed strategy configuration, bounded continuation, atomic checkpoint/terminal
+persistence, daemon dispatch, and partial-result API/UI are implemented.
+Sequential execution still fails closed until local dispatch and remaining
+integration checks pass. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
 default change, automatic retry, public posting, or effort adaptation is proposed.
 
@@ -116,6 +117,19 @@ all checkpoints and traces. An explicit rerun creates a new invocation and never
 overwrites prior output. Resume across restarts is deferred until backend and
 toolbox reconstruction identities can be verified. Normal queue recovery must
 not blindly replay completed checkpoints from a partial sequential invocation.
+
+Continuation assumption, 2026-10-26: retain the existing protection for a patch
+already Reviewed by an earlier invocation. A failed later invocation remains
+explicit in review/session status and remaining scope; it does not retroactively
+erase that earlier success. Reuse the supported force-cancellation API so only
+unfinished patch states are cancelled. This is a conservative implementation
+assumption, not a claim of new operator approval or independent verification.
+
+Each checkpoint uses a new revision-bound toolbox. Reusing one mutable toolbox
+would return stale cached HEAD results after changing its virtual head, because
+tool-result cache identity uses arguments rather than the current virtual head.
+Conversation evidence and cumulative session limits remain shared across these
+toolboxes; source reads are fresh for the exact current applied commit.
 
 ## API and UI
 

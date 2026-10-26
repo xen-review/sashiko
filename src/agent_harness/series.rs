@@ -11,6 +11,7 @@ use crate::settings::{AgentHarnessSettings, HarnessStrategy};
 use crate::toolbox::ToolBox;
 use crate::worker::ReviewInput;
 
+#[derive(Clone, Copy)]
 pub struct SeriesRequest<'a> {
     pub input: &'a ReviewInput,
     pub baseline: &'a str,

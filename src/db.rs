@@ -2434,6 +2434,11 @@ impl Database {
                     scope.patchset_id
                 );
             }
+            tx.execute(
+                "UPDATE patches SET status = 'In Review' WHERE id = ? AND COALESCE(status, '') != 'Reviewed'",
+                libsql::params![patch.patch_id],
+            )
+            .await?;
         }
         tx.commit().await?;
         Ok(Some(review_id))
@@ -8519,7 +8524,7 @@ impl Database {
              FROM reviews r
              LEFT JOIN ai_interactions ai ON r.interaction_id = ai.id
              WHERE r.patchset_id = ? AND (r.patch_id IS NULL OR r.patch_id IN ({}))
-             ORDER BY r.created_at ASC",
+             ORDER BY r.created_at ASC, r.id ASC",
             logs_col, in_clause
         );
 
@@ -10166,7 +10171,9 @@ impl Database {
 
         // 5. Delete failed reviews that block retrying (infra failures)
         self.execute(
-                "DELETE FROM reviews WHERE patchset_id = ? AND status IN ('Failed', 'FailedToApply') AND interaction_id IS NULL",
+                     "DELETE FROM reviews WHERE patchset_id = ? AND status IN ('Failed', 'FailedToApply')
+                         AND interaction_id IS NULL
+                         AND NOT EXISTS (SELECT 1 FROM harness_checkpoint_sessions s WHERE s.review_id = reviews.id)",
                 libsql::params![id],
             )
             .await?;

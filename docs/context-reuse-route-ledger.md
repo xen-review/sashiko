@@ -5,47 +5,52 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Handoff
 
-Authoritative resume summary at 15:01 CET on 2026-10-26. Older milestone and
+Authoritative resume summary at 15:36 CET on 2026-10-26. Older milestone and
 resume entries below are historical evidence, not current quota readings or
-deployment claims. The user plans to switch the coding chat provider; do not
+deployment claims. The user switched the coding chat provider; do not
 infer daemon authentication, billing, quota, or model from that switch.
 
-- Source before this documentation update: 9987f464, signed and pushed to
+- Last delivered UI commit: 4cbed0e1, signed and pushed to
   origin/add-xen-support. Work in the clean detached implementation worktree
   /tmp/sashiko-improvements-20261026. Main contains unrelated untracked user
   agents/skills/CI files; preserve them and never stage or revert them.
 - Installed binary remains 82905979, with timeout profiles. Live database schema
   is 14; checkpoint migration 15 and subsequent source changes are not deployed.
-  The daemon is active on Codex gpt-6-luna/medium with muted outbound delivery.
-  Latest check found no active model call, Pending series, or In Review series.
+  Runtime uses Codex gpt-6-luna/medium with muted outbound delivery. The service
+  was stopped at an idle boundary for required checks and must be resumed after
+  delivery. Latest check: 95 Reviewed, no Pending or In Review series.
   Do not cancel a later active review just to repeat checks.
 - Completed source: migration 15; atomic invocation snapshots, ordered checkpoint
   artifacts and disjoint call interactions; terminal success/failure/cancellation;
   no-replay startup recovery; bounded internal sequential runner; batched review
-  detail/list API enrichment. Full latest gate: 1,122 library tests, 48 main,
+  detail/list API enrichment and partial-result UI. Daemon sequential dispatch
+  now persists before advancing and uses a fresh revision-bound toolbox per
+  checkpoint, preserving shared conversation, limits, and cancellation.
+  Full latest gate: 1,122 library tests, 48 main,
   seven CLI, 25 integration, formatting, and all three Clippy profiles passed.
 - Sequential configuration still fails closed. The installed daemon remains
   workflow mode. Existing independent workflows and whole-series harness remain
   supported; no sequential trial, new default, or transparent crash resume is
   claimed. See the approved checkpoint design for the partial-completion policy.
-- Immediate next edit: extend static/index.html renderReviewCard for the API's
-  review_strategy=sequential_patches and checkpoint_session payload. Show ordered
-  retained reviewer_notes/reply_body, completed/selected progress, remaining
-  scope, and explicit incomplete usage, including Failed/Cancelled/active state.
-  Reuse escaping and existing styling. The attempted UI patch was interrupted
-  and DID NOT APPLY; there are no uncommitted UI edits or running UI tests.
+- UI rendering passed syntax, escaped injection, active/Failed/Cancelled/Reviewed
+  fixtures, desktop/mobile overflow and header checks, raw-log access, and the
+  existing disclosure toggle. The synthetic fixture server has been stopped.
 - API checkpoint_session contains state, completed_count, provider_calls_recorded,
   nullable provider_calls_attempted, usage_complete, ordered checkpoints,
   selected_patch_indexes, and remaining_patch_indexes. Top-level token totals
   are sums of disjoint recorded interactions. Full invocation input is omitted
   from list payloads. No terminal usage is invented for interrupted calls.
-- Validate UI syntax, escaping, long text, raw-log access, and desktop/mobile
-  layout with isolated fixtures. The shared browser's old 127.0.0.1:8091 page
-  was synthetic test content, not a real review or an active test server.
-- Then wire daemon/local sequential dispatch around SequentialReviewSession.
-  Preserve exact patch revisions and eligibility, use the appropriate source
-  revision, await atomic checkpoint persistence before advancing, preserve
-  cancellation and shared limits, and finish the invocation exactly once.
+- Daemon fake-provider tests now cover one selected/context-only patch and two
+  real commits, source reads through virtual HEAD, persisted state before the
+  next call, reversed selection order, malformed second output, supported force
+  cancellation, retained diagnostics on explicit rerun, and no delivery.
+  Fixed exposed integration gaps: stale toolbox HEAD cache across checkpoints;
+  unfinished selected patches not marked active; rerun cleanup discarding
+  checkpoint diagnostics; nondeterministic ordering of same-second reviews.
+- Next wire local sequential dispatch around SequentialReviewSession with
+  retained partial JSON/human/agent artifacts and cancellation. Inspect harness
+  scheduling coverage before enablement; ordinary per-patch review counts do
+  not yet recognize series checkpoint coverage.
   Enable the typed strategy only when these paths and partial-result UI pass.
 - Before installing schema 15, stop at a safe boundary, verify workers exited,
   back up the database, and run required checks. Scheduled/external service
