@@ -169,7 +169,7 @@ select a model or change effort, and unset effort never guesses a model default.
 [[ai.codex_cli.timeout_profiles]]
 model = "gpt-6-luna"
 effort = "xhigh"
-call_timeout_seconds = 3600
+call_timeout_seconds = 4800
 minimum_review_timeout_seconds = 3600
 review_timeout_seconds_per_patch = 600
 
