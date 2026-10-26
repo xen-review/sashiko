@@ -103,21 +103,27 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
 
 # Models and Budget
 
-- Keep daemon reviews distinct from self-review. When authorized, prefer Codex
-  CLI gpt-6.1-sol at high effort; medium and low are allowed to conserve budget.
-  Never silently switch provider or model. The chat model is not evidence of
-  the daemon's actual provider configuration.
-- The current daemon policy is Copilot CLI gpt-6-luna at LOW effort with
-  default context. Keep Sashiko on Luna until the user explicitly authorizes
-  another provider or model. Remaining Codex quota, a quota reset, and the
-  chat's provider do not authorize changing this selection. Recheck quota
-  before necessary restarts for reporting, not automatic model selection.
-  Announce any authorized change, arrange a safe review boundary, and verify
-  the effective invocation after restart. Never change an in-flight request's
-  effort. Disable response caching if its identity cannot distinguish the
-  actual model and wrapper effort. Never run Sashiko self-review through paid
-  Copilot CLI. Do not guess model identifiers, enable paid overages, or exceed
-  the agreed window.
+- Keep daemon Xen reviews distinct from Sashiko self-review and the coding
+  assistant's model. During development, always use the cheapest available
+  suitable Xen review model: gpt-6-luna rather than a Sol model. Do not choose
+  Sol merely because subscription quota is available or has reset. Verify exact
+  model availability; if Luna is unavailable, report the blocker rather than
+  silently substituting a more expensive model.
+- Default development Xen reviews to Luna LOW effort and default context.
+  Different supported thinking budgets on Luna-series models may be tested
+  within the authorized spending limits, subject to the MAX timeout gate below.
+  These experiments do not authorize a Sol substitution, a paid self-review,
+  or an automatic effort-adaptation feature.
+- Distinguish subscription-backed usage from metered API-call/token billing;
+  neither the CLI name nor the chat provider proves the billing arrangement.
+  Reuse authorized authentication, verify the selected account and model, and
+  do not enable metered billing or paid overages without explicit permission.
+  Announce provider/model/effort changes, arrange a safe review boundary, and
+  verify the effective invocation afterward. If Sol is already reviewing,
+  let that review finish; do not stop or restart it to enforce this policy.
+  Never change an in-flight request's effort. Disable response caching if its
+  identity cannot distinguish the actual model and effort. Never run Sashiko
+  self-review through paid Copilot CLI or exceed the agreed operating window.
 - This chat's Copilot budget is distinct from the Codex account used by the
   daemon. The host Codex CLI can still report its authenticated account quota;
   never infer daemon quota from the chat provider or model.
@@ -142,10 +148,13 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   continues after the morning reset. Never redeem account reset credits, buy
   credits, or enable paid overages without explicit permission. Do not drain
   quota merely because the user permits using it.
-- For future Luna MAX daemon experiments, explicitly authorize that effort and
-  increase timeouts first: 900 seconds has been insufficient for complex Xen
-  series. Check the separate 600-second provider-call limit as well. MAX is
-  never allowed for this agent's self-review.
+- Avoid MAX thinking for development Xen reviews unless its configured timeout
+  is at least 60 minutes (3600 seconds). Verify both the whole-review timeout
+  and the provider's per-call timeout allow that duration before starting MAX;
+  raising only review.timeout_seconds while a 600-second provider limit remains
+  does not satisfy this gate. If either limit is shorter or unknown, use a
+  lower Luna thinking budget. Never change an active request's timeout or
+  effort. MAX remains forbidden for this agent's Sashiko self-review.
 
 # Verification and Delivery
 
