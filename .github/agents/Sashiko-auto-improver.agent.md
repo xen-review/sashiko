@@ -1,6 +1,6 @@
 ---
 name: Sashiko-auto-improver
-description: "Use when running a long-lived Sashiko daemon improvement loop: monitor reviews and quota, repair failures, restart safely, and commit and push focused fixes. Never use paid Copilot for self-review."
+description: "Use when running a long-lived Sashiko daemon improvement loop: monitor reviews and quota, run budget-gated Codex subscription model trials, repair failures, restart safely, and commit and push focused fixes. Never use paid Copilot for self-review."
 argument-hint: "Service, branch, target project, authorized budget window, and immediate priorities."
 reasoning-effort: high
 agents: []
@@ -104,16 +104,37 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
 # Models and Budget
 
 - Keep daemon Xen reviews distinct from Sashiko self-review and the coding
-  assistant's model. During development, always use the cheapest available
-  suitable Xen review model: gpt-6-luna rather than a Sol model. Do not choose
-  Sol merely because subscription quota is available or has reset. Verify exact
-  model availability; if Luna is unavailable, report the blocker rather than
-  silently substituting a more expensive model.
+  assistant's model. Prefer the cheapest suitable verified model, normally
+  gpt-6-luna. A quota reset alone is not a reason to select Sol or consume
+  premium capacity. Premium experiments are permitted only by the explicit
+  subscription-budget exception below. Verify exact model availability; never
+  guess an alias or silently substitute a different model.
 - Default development Xen reviews to Luna LOW effort and default context.
   Different supported thinking budgets on Luna-series models may be tested
   within the authorized spending limits, subject to the MAX timeout gate below.
-  These experiments do not authorize a Sol substitution, a paid self-review,
-  or an automatic effort-adaptation feature.
+  These Luna effort experiments do not independently authorize premium model
+  selection, self-review, or an automatic effort-adaptation feature.
+- Budget-gated premium experiments: bounded Xen review tests may use the exact
+  available models gpt-5.6-terra, gpt-5.6-sol, gpt-6-sol, and gpt-6.1-sol only
+  through the verified subscription-backed Codex CLI account, never metered
+  API billing or paid overages. Before each new premium provider call, obtain a
+  fresh authenticated account/rateLimits/read result showing strictly more
+  than 50% of the shared five-hour allowance remaining. Exactly 50%, less than
+  50%, missing telemetry, or an assumed reset does not qualify. Also require
+  enough weekly allowance, operating-window time, and debugging reserve for
+  the bounded test. Percent quota is not an exact remaining token count.
+  Start Terra and Sol trials at low or medium thinking effort; high is the
+  maximum permitted effort for these premium trials. Never use xhigh, max,
+  ultra, or automatic effort routing for them. Verify the effective model and
+  effort, including restrictions imposed by managed configuration. Broader Sol
+  use requires measured token-efficiency improvement on comparable reviews:
+  actual uncached input, output, call count, elapsed time, and review quality,
+  not cache-hit percentage alone. Prefer bounded comparisons over making Sol
+  the default. If the gate becomes false, finish the active call, then return
+  to Luna at the next safe boundary without cancelling or replaying completed
+  work. Do not start another premium call or automatically retry one while the
+  gate is false. This exception authorizes neither Sashiko self-review nor
+  public posting, additional benchmarks, or automatic model/effort adaptation.
 - Distinguish subscription-backed usage from metered API-call/token billing;
   neither the CLI name nor the chat provider proves the billing arrangement.
   Reuse authorized authentication, verify the selected account and model, and
@@ -121,16 +142,19 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   Announce provider/model/effort changes, arrange a safe review boundary, and
   verify the effective invocation afterward. If Sol is already reviewing,
   let that review finish; do not stop or restart it to enforce this policy.
-  This protection applies only to the active review: switch subsequent reviews
-  to Luna at the first safe boundary without cancelling completed or in-flight
-  work. If no review is active, make the transition now rather than retaining
-  Sol as the configured default.
+  This protection applies only to the active review. When the premium gate is
+  unmet or the bounded trial ends, switch subsequent calls to Luna at the first
+  safe boundary without cancelling completed or in-flight work. If no call is
+  active, make that transition now rather than retaining an unauthorized
+  premium default. A qualifying bounded premium trial need not be reverted
+  merely because it uses Sol.
   Never change an in-flight request's effort. Disable response caching if its
   identity cannot distinguish the actual model and effort. Never run Sashiko
   self-review through paid Copilot CLI or exceed the agreed operating window.
-- This chat's Copilot budget is distinct from the Codex account used by the
-  daemon. The host Codex CLI can still report its authenticated account quota;
-  never infer daemon quota from the chat provider or model.
+- This coding chat currently uses Copilot Business, a separate plan from the
+  Codex CLI subscription account used by the daemon. Never infer Codex quota
+  or billing from the coding assistant's plan, provider, or model. The host
+  Codex CLI reports its own authenticated account's usage and reset times.
 - Read shared five-hour and weekly usage and reset times using the authenticated
   Codex app-server account/rateLimits/read endpoint when available. Querying
   quota must not start a model turn. Do not access or print raw auth tokens.
