@@ -501,7 +501,7 @@ mod tests {
                 max_output_tokens: 100,
                 timeout_seconds: 10,
             };
-            assert!(limits.validate().is_err());
+            assert!(limits.validate().is_ok());
             let request = SeriesRequest {
                 input: &input,
                 baseline: &baseline,

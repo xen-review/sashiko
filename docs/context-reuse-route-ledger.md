@@ -28,7 +28,9 @@ infer daemon authentication, billing, quota, or model from that switch.
   checkpoint, preserving shared conversation, limits, and cancellation.
   Full latest gate: 1,122 library tests, 48 main,
   seven CLI, 25 integration, formatting, and all three Clippy profiles passed.
-- Sequential configuration still fails closed. The installed daemon remains
+- Sequential configuration is an explicit supported opt-in in source, with
+  complete/partial JSON, agent, human, no-AI, usage, and exact prompt-prefix CLI
+  integration checks passing. The installed daemon remains
   workflow mode. Existing independent workflows and whole-series harness remain
   supported; no sequential trial, new default, or transparent crash resume is
   claimed. See the approved checkpoint design for the partial-completion policy.
@@ -52,10 +54,11 @@ infer daemon authentication, billing, quota, or model from that switch.
   second output, cancellation, shared totals, and unknown terminal call usage.
   The latest full gate passes with 1,123 library, 48 main, seven CLI, and 25
   integration tests plus formatting and all three Clippy profiles.
-  Next inspect harness scheduling coverage and enable configuration with real
-  CLI integration fixtures; ordinary per-patch review counts do not yet
-  recognize series checkpoint coverage.
-  Enable the typed strategy only when these paths and partial-result UI pass.
+  Queue inspection confirmed Pending status controls harness scheduling; it
+  bypasses independent per-patch worker counts. Leave those counts unchanged
+  rather than conflate unverified harness artifacts with independently verified
+  workflow completion or embargo-clean classification. Next finish enablement
+  gates, then back up and deploy schema 15 without changing runtime mode.
 - Before installing schema 15, stop at a safe boundary, verify workers exited,
   back up the database, and run required checks. Scheduled/external service
   starts have occurred during previous maintenance; recheck actual processes.

@@ -370,10 +370,13 @@ timeout_seconds = 600
 ```
 
 All limits must be positive. The strategy defaults to `whole_series` when
-omitted. The typed `sequential_patches`
-strategy is reserved for checkpoint execution and currently fails validation;
-it never silently falls back to a whole-series review. All other harness fields
-remain required. The instruction
+omitted. Set `strategy = "sequential_patches"` to review selected patches in
+submission order in one shared conversation. Each checkpoint returns notes and
+exactly one validated reply for its original patch identity. Full series context
+and prior investigation remain available, but source tools bind to that patch's
+exact applied commit. Limits and the original deadline apply cumulatively to the
+entire invocation, not per patch. Unknown strategies fail rather than falling
+back. All other harness fields remain required. The instruction
 manifest is ordered; list all required agents, skills, style guides, and reference
 examples explicitly. Relative paths resolve against the settings file directory,
 not the repository or CLI working directory. Sashiko snapshots original contents
@@ -398,6 +401,17 @@ are available through review details. The UI separates reviewer notes and reply
 drafts and explicitly labels them not independently verified. No email, forge
 comment, or deferred embargo notification is generated from harness output.
 Existing delivery policy remains in force for other workflow results.
+
+Sequential daemon invocations atomically store each checkpoint before the next
+patch starts. Earlier completed patches and replies remain available if a later
+checkpoint fails or is cancelled. Review details and the UI expose completed and
+remaining scope, disjoint recorded-call totals, and incomplete usage when a call
+has not reported its terminal accounting. Interrupted daemon invocations retain
+completed results without automatically replaying them after restart. A local
+CLI run includes partial artifacts in its final JSON, agent, or human output,
+including graceful Ctrl-C cancellation; local output is not durable across
+SIGKILL or host loss. Neither strategy is independently verified or guaranteed
+to improve quality, context-cache use, or cost.
 
 An explicit rerun queues one new series invocation and retains earlier artifacts;
 the normal per-patch target count does not trigger multiple harness invocations.

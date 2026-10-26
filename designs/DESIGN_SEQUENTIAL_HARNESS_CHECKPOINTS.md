@@ -3,8 +3,10 @@
 Status: partial-completion policy approved by the operator, 2026-10-26.
 Typed strategy configuration, bounded continuation, atomic checkpoint/terminal
 persistence, daemon/local dispatch, and partial-result API/UI are implemented.
-Sequential execution still fails closed until configuration enablement and remaining
-integration checks pass. This extends the approved
+Sequential execution is now an explicit supported opt-in with fake-CLI checks
+for complete and partial JSON/agent/human output, zero-call no-AI preparation,
+and exact prior-prompt prefix retention. Deployment and representative measured
+comparisons are still pending. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
 default change, automatic retry, public posting, or effort adaptation is proposed.
 
@@ -148,6 +150,12 @@ cancelled. Existing raw-log access and access controls remain applicable.
 Display cumulative usage once, with optional per-checkpoint deltas labeled as
 such. Distinguish provider calls from source calls and backend generations.
 No email, forge comment, embargo delivery, or suggested source edit is enabled.
+
+The daemon queue selects Pending series and bypasses independent per-patch worker
+success-count checks in harness mode. Keep the latter unchanged: unverified
+harness coverage must not silently satisfy an independent workflow review or
+promote an embargoed series to verified clean. Explicit reruns start a new
+invocation; there is no automatic partial replay or count-driven retry here.
 
 ## Incremental Validation
 

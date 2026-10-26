@@ -273,4 +273,85 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         std::fs::read_to_string(bin.join("calls")).unwrap(),
         "call\ncall\n"
     );
+    let configuration = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(
+        &settings,
+        format!("{configuration}strategy = 'sequential_patches'\n"),
+    )
+    .unwrap();
+    std::fs::remove_file(bin.join("calls")).unwrap();
+    let no_ai = run(&["--no-ai", "--agent"]);
+    assert!(
+        no_ai.status.success(),
+        "{}",
+        String::from_utf8_lossy(&no_ai.stderr)
+    );
+    assert!(!bin.join("calls").exists());
+    std::fs::write(&source, "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\ncat \"$fixture/response.$number\"\n").unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let first_report = serde_json::json!({"reviewer_notes":"First checkpoint investigation.", "reply_drafts":[{"patch_index":1,"message_id":null,"body":"Reply one."}]}).to_string();
+    let second_report = serde_json::json!({"reviewer_notes":"Second checkpoint investigation.", "reply_drafts":[{"patch_index":2,"message_id":null,"body":"Reply two."}]}).to_string();
+    std::fs::write(bin.join("response.1"), response(&first_report)).unwrap();
+    for (report, complete) in [
+        (&second_report, true),
+        (&"Malformed checkpoint".to_string(), false),
+    ] {
+        std::fs::write(bin.join("response.2"), response(report)).unwrap();
+        for extra in [vec!["--format", "json"], vec!["--agent"], vec![]] {
+            std::fs::write(bin.join("calls"), "").unwrap();
+            let output = run(&extra);
+            assert_eq!(
+                output.status.code(),
+                Some(if complete { 0 } else { 3 }),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if extra.is_empty() {
+                let human = String::from_utf8(output.stdout).unwrap();
+                assert!(human.contains("not independently verified"));
+                assert!(human.contains("Reply one."));
+                assert_eq!(human.contains("Reply two."), complete);
+            } else {
+                let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(result["review_strategy"], "sequential_patches");
+                assert_eq!(result["partial"], !complete);
+                assert_eq!(
+                    result["checkpoint_session"]["completed_count"],
+                    if complete { 2 } else { 1 }
+                );
+                assert_eq!(
+                    result["checkpoint_session"]["remaining_patch_indexes"],
+                    if complete {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([2])
+                    }
+                );
+                assert_eq!(result["checkpoint_session"]["provider_calls_recorded"], 2);
+                assert_eq!(result["checkpoint_session"]["provider_calls_attempted"], 2);
+                assert_eq!(result["checkpoint_session"]["usage_complete"], true);
+                assert_eq!(result["artifacts"]["reply_drafts"][0]["body"], "Reply one.");
+                assert_eq!(result["tokens_in"], 60);
+                assert_eq!(result["tokens_cached"], 40);
+                assert_eq!(result["independently_verified"], false);
+            }
+            assert_eq!(
+                std::fs::read_to_string(bin.join("calls")).unwrap(),
+                "call\ncall\n"
+            );
+            let first_prompt = std::fs::read_to_string(bin.join("input.1")).unwrap();
+            let second_prompt = std::fs::read_to_string(bin.join("input.2")).unwrap();
+            assert!(second_prompt.starts_with(&first_prompt));
+            assert!(second_prompt.contains("First checkpoint investigation."));
+            assert!(second_prompt.contains("sequential-series-context-v1"));
+        }
+    }
 }

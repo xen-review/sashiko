@@ -1101,9 +1101,6 @@ pub struct AgentHarnessSettings {
 
 impl AgentHarnessSettings {
     pub fn validate(&self) -> Result<(), String> {
-        if self.strategy != HarnessStrategy::WholeSeries {
-            return Err("[review.agent_harness] sequential_patches is not enabled yet; checkpoint continuation and persistence are required".to_string());
-        }
         self.validate_limits()
     }
 
@@ -1824,21 +1821,12 @@ mod tests {
             configured.agent_harness.as_ref().unwrap().strategy,
             HarnessStrategy::WholeSeries
         );
-        for (strategy, supported) in [("whole_series", true), ("sequential_patches", false)] {
+        for strategy in ["whole_series", "sequential_patches"] {
             let selected = format!(
                 "concurrency = 1\nmode = 'agent_harness'{manifest}strategy = '{strategy}'\n"
             );
             let review: ReviewSettings = toml::from_str(&selected).unwrap();
-            if supported {
-                assert!(review.validate_mode().is_ok());
-            } else {
-                assert!(
-                    review
-                        .validate_mode()
-                        .unwrap_err()
-                        .contains("not enabled yet")
-                );
-            }
+            assert!(review.validate_mode().is_ok());
         }
         assert!(
             toml::from_str::<ReviewSettings>(&format!(
