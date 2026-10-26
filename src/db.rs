@@ -424,6 +424,24 @@ pub struct HarnessReviewStart<'a> {
     pub patches: &'a [HarnessReviewPatch],
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarnessCheckpointCursor {
+    pub checkpoints: usize,
+    pub provider_calls: usize,
+    pub history_end: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct HarnessCheckpointWrite<'a> {
+    pub review_id: i64,
+    pub patch: &'a HarnessReviewPatch,
+    pub instruction_fingerprint: &'a str,
+    pub series_fingerprint: &'a str,
+    pub previous: HarnessCheckpointCursor,
+    pub artifacts: &'a crate::agent_harness::series::ReviewArtifacts,
+    pub trace: &'a crate::agent_harness::session::HarnessTrace,
+}
+
 pub struct AiInteractionParams<'a> {
     pub id: &'a str,
     pub parent_id: Option<&'a str>,
@@ -2315,6 +2333,166 @@ impl Database {
         }
         tx.commit().await?;
         Ok(Some(review_id))
+    }
+
+    pub async fn initialize_checkpoint_session(
+        &self,
+        review_id: i64,
+        input: &str,
+    ) -> Result<String> {
+        use sha2::Digest;
+        if !serde_json::from_str::<serde_json::Value>(input)?.is_object() {
+            bail!("Checkpoint session input must be a serialized context object");
+        }
+        let fingerprint: String = sha2::Sha256::digest(input.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let compressed = crate::compression::compress_string_async(input).await;
+        let tx = self.begin_transaction().await?;
+        let inserted = tx.execute(
+            "INSERT INTO harness_checkpoint_sessions (review_id, input_context, series_fingerprint, created_at)
+             SELECT r.id, ?, ?, ? FROM reviews r JOIN patchsets p ON p.id = r.patchset_id
+             WHERE r.id = ? AND r.review_mode = 'agent_harness' AND r.patch_id IS NULL
+               AND r.status = 'In Review' AND p.status = 'In Review'
+               AND EXISTS (SELECT 1 FROM review_patch_coverage c WHERE c.review_id = r.id)",
+            libsql::params![compressed, fingerprint.as_str(), chrono::Utc::now().timestamp(), review_id],
+        ).await?;
+        if inserted != 1 {
+            bail!("Checkpoint session requires an active, covered harness review and patchset");
+        }
+        tx.commit().await?;
+        Ok(fingerprint)
+    }
+
+    pub async fn persist_harness_checkpoint(
+        &self,
+        write: HarnessCheckpointWrite<'_>,
+    ) -> Result<HarnessCheckpointCursor> {
+        use crate::ai::AiRole;
+        if write.artifacts.reviewer_notes.trim().is_empty()
+            || write.artifacts.reply_drafts.len() != 1
+        {
+            bail!("Checkpoint requires notes and exactly one validated reply");
+        }
+        let draft = &write.artifacts.reply_drafts[0];
+        let trace = write.trace;
+        if trace.provider_calls <= write.previous.provider_calls
+            || trace.history.len() <= write.previous.history_end
+            || trace.call_usage.len() != trace.provider_calls
+            || trace.input_token_overshoot > 0
+            || trace.output_token_overshoot > 0
+        {
+            bail!(
+                "Checkpoint requires new, completely accounted provider calls without budget overshoot"
+            );
+        }
+        let mut summed = crate::ai::AiUsage::default();
+        let mut history_end = 0;
+        for (position, call) in trace.call_usage.iter().enumerate() {
+            if call.provider_call != position + 1
+                || call.response_history_end <= history_end
+                || !matches!(
+                    trace
+                        .history
+                        .get(call.response_history_end.saturating_sub(1))
+                        .map(|message| &message.role),
+                    Some(AiRole::Assistant)
+                )
+            {
+                bail!("Checkpoint call usage has inconsistent call or history boundaries");
+            }
+            crate::agent_harness::session::accumulate_usage(&mut summed, &call.usage)?;
+            history_end = call.response_history_end;
+        }
+        if history_end != trace.history.len()
+            || summed.prompt_tokens != trace.usage.prompt_tokens
+            || summed.completion_tokens != trace.usage.completion_tokens
+            || summed.total_tokens != trace.usage.total_tokens
+            || summed.cached_tokens.unwrap_or_default()
+                != trace.usage.cached_tokens.unwrap_or_default()
+        {
+            bail!("Checkpoint aggregate usage or terminal history does not match its calls");
+        }
+        let next = HarnessCheckpointCursor {
+            checkpoints: write
+                .previous
+                .checkpoints
+                .checked_add(1)
+                .context("Checkpoint ordinal overflow")?,
+            provider_calls: trace.provider_calls,
+            history_end: trace.history.len(),
+        };
+        let notes =
+            crate::compression::compress_string_async(&write.artifacts.reviewer_notes).await;
+        let reply = crate::compression::compress_string_async(&draft.body).await;
+        let mut interactions = Vec::new();
+        for call in trace.call_usage.iter().skip(write.previous.provider_calls) {
+            let input = serde_json::to_string(
+                &serde_json::json!({"checkpoint_session": write.review_id, "series_fingerprint": write.series_fingerprint, "history": &trace.history[..call.response_history_end - 1]}),
+            )?;
+            let output = serde_json::to_string(&trace.history[call.response_history_end - 1])?;
+            interactions.push((
+                call,
+                uuid::Uuid::new_v4().to_string(),
+                crate::compression::compress_string_async(&input).await,
+                crate::compression::compress_string_async(&output).await,
+            ));
+        }
+        let tx = self.begin_transaction().await?;
+        let mut rows = tx.query(
+            "SELECT r.patchset_id, r.provider, r.model FROM reviews r JOIN patchsets p ON p.id = r.patchset_id
+             JOIN harness_checkpoint_sessions s ON s.review_id = r.id
+             WHERE r.id = ? AND r.status = 'In Review' AND p.status = 'In Review' AND s.state = 'active'
+               AND r.prompts_hash = ? AND s.series_fingerprint = ? AND s.checkpoint_count = ? AND s.provider_calls_end = ? AND s.history_end = ?",
+            libsql::params![write.review_id, write.instruction_fingerprint, write.series_fingerprint, i64::try_from(write.previous.checkpoints)?, i64::try_from(write.previous.provider_calls)?, i64::try_from(write.previous.history_end)?],
+        ).await?;
+        let row = rows
+            .next()
+            .await?
+            .context("Checkpoint owner, snapshot, or cursor is no longer active")?;
+        let patchset_id: i64 = row.get(0)?;
+        let provider: String = row.get(1)?;
+        let model: String = row.get(2)?;
+        drop(rows);
+        let mut rows = tx.query(
+            "SELECT p.id, p.part_index, p.message_id, c.commit_id, p.status FROM review_patch_coverage c JOIN patches p ON p.id = c.patch_id
+             WHERE c.review_id = ? AND NOT EXISTS (SELECT 1 FROM harness_patch_checkpoints k WHERE k.review_id = c.review_id AND k.patch_id = c.patch_id)
+             ORDER BY p.part_index LIMIT 1", libsql::params![write.review_id],
+        ).await?;
+        let patch = rows
+            .next()
+            .await?
+            .context("No uncompleted checkpoint remains in the selected scope")?;
+        let message_id: String = patch.get(2)?;
+        if patch.get::<i64>(0)? != write.patch.patch_id
+            || patch.get::<i64>(1)? != draft.patch_index
+            || patch.get::<String>(3)? != write.patch.commit_id.to_string()
+            || draft.message_id.as_deref() != Some(message_id.as_str())
+            || patch.get::<Option<String>>(4)?.as_deref() == Some("Cancelled")
+            || draft.body.trim().is_empty()
+        {
+            bail!(
+                "Checkpoint must match the next covered patch, exact commit, and original message identity"
+            );
+        }
+        drop(rows);
+        let now = chrono::Utc::now().timestamp();
+        for (call, interaction_id, input, output) in interactions {
+            tx.execute("INSERT INTO ai_interactions (id, provider, model, input_context, output_raw, tokens_in, tokens_out, tokens_cached, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                libsql::params![interaction_id.as_str(), provider.as_str(), model.as_str(), input, output, i64::try_from(call.usage.prompt_tokens)?, i64::try_from(call.usage.completion_tokens)?, i64::try_from(call.usage.cached_tokens.unwrap_or_default())?, now]).await?;
+            tx.execute("INSERT INTO harness_provider_calls (review_id, provider_call, response_history_end, interaction_id) VALUES (?, ?, ?, ?)", libsql::params![write.review_id, i64::try_from(call.provider_call)?, i64::try_from(call.response_history_end)?, interaction_id]).await?;
+        }
+        tx.execute("INSERT INTO harness_patch_checkpoints (review_id, checkpoint_index, patch_id, message_id, commit_id, reviewer_notes, reply_body, history_end, provider_calls_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            libsql::params![write.review_id, i64::try_from(next.checkpoints)?, write.patch.patch_id, message_id, write.patch.commit_id.to_string(), notes, reply, i64::try_from(next.history_end)?, i64::try_from(next.provider_calls)?, now]).await?;
+        tx.execute(
+            "UPDATE patches SET status = 'Reviewed' WHERE id = ? AND patchset_id = ?",
+            libsql::params![write.patch.patch_id, patchset_id],
+        )
+        .await?;
+        tx.execute("UPDATE harness_checkpoint_sessions SET checkpoint_count = ?, provider_calls_end = ?, history_end = ? WHERE review_id = ?", libsql::params![i64::try_from(next.checkpoints)?, i64::try_from(next.provider_calls)?, i64::try_from(next.history_end)?, write.review_id]).await?;
+        tx.commit().await?;
+        Ok(next)
     }
 
     pub async fn complete_harness_review(
@@ -11841,6 +12019,276 @@ mod tests {
         db.create_patch(patchset_id, "base-2", 2, "diff two")
             .await?;
         Ok(patchset_id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writes_are_atomic_ordered_and_account_each_call_once() -> Result<()> {
+        use crate::agent_harness::{
+            series::{ReplyDraft, ReviewArtifacts},
+            session::{HarnessCallUsage, HarnessTrace},
+        };
+        use crate::ai::{AiMessage, AiRole, AiUsage};
+        let db = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&db).await?;
+        let diffs = db.get_patch_diffs(patchset_id).await?;
+        let covered: Vec<_> = diffs
+            .iter()
+            .map(|(patch_id, index, ..)| HarnessReviewPatch {
+                patch_id: *patch_id,
+                commit_id: crate::baseline::CommitId::parse(&format!("{index:040x}")).unwrap(),
+            })
+            .collect();
+        db.update_patchset_status(patchset_id, "In Review").await?;
+        let review_id = db
+            .start_harness_review(HarnessReviewStart {
+                patchset_id,
+                provider: "codex-cli",
+                model: "gpt-6-luna",
+                baseline_id: None,
+                prompts_hash: "snapshot",
+                patches: &covered,
+            })
+            .await?
+            .unwrap();
+        let fingerprint = db
+            .initialize_checkpoint_session(review_id, r#"{"series":"immutable context"}"#)
+            .await?;
+        let artifacts_for = |position: usize| ReviewArtifacts {
+            reviewer_notes: format!("Evidence for patch {}", diffs[position].1),
+            reply_drafts: vec![ReplyDraft {
+                patch_index: diffs[position].1,
+                message_id: Some(diffs[position].6.clone()),
+                body: "Complete reply".to_string(),
+            }],
+        };
+        let append_call = |trace: &mut HarnessTrace| -> Result<()> {
+            for role in [AiRole::User, AiRole::Assistant] {
+                trace.history.push(AiMessage {
+                    role,
+                    content: Some("Retained message".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            trace.provider_calls += 1;
+            let usage = AiUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                cached_tokens: Some(3),
+            };
+            crate::agent_harness::session::accumulate_usage(&mut trace.usage, &usage)?;
+            trace.call_usage.push(HarnessCallUsage {
+                provider_call: trace.provider_calls,
+                response_history_end: trace.history.len(),
+                usage,
+            });
+            Ok(())
+        };
+        let mut trace = HarnessTrace::default();
+        append_call(&mut trace)?;
+        let first_artifacts = artifacts_for(0);
+        let second_artifacts = artifacts_for(1);
+        let write = HarnessCheckpointWrite {
+            review_id,
+            patch: &covered[0],
+            instruction_fingerprint: "snapshot",
+            series_fingerprint: &fingerprint,
+            previous: HarnessCheckpointCursor::default(),
+            artifacts: &first_artifacts,
+            trace: &trace,
+        };
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                patch: &covered[1],
+                artifacts: &second_artifacts,
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                series_fingerprint: "changed",
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                instruction_fingerprint: "changed",
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        let mut wrong_message = artifacts_for(0);
+        wrong_message.reply_drafts[0].message_id = Some("substituted@example.org".to_string());
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                artifacts: &wrong_message,
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        let mut invalid_trace: HarnessTrace =
+            serde_json::from_value(serde_json::to_value(&trace)?)?;
+        invalid_trace.call_usage[0].usage.cached_tokens = Some(11);
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                trace: &invalid_trace,
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        invalid_trace.call_usage.clear();
+        assert!(
+            db.persist_harness_checkpoint(HarnessCheckpointWrite {
+                trace: &invalid_trace,
+                ..write
+            })
+            .await
+            .is_err()
+        );
+        db.execute(
+            "UPDATE patches SET status = 'Cancelled' WHERE id = ?",
+            libsql::params![covered[0].patch_id],
+        )
+        .await?;
+        assert!(db.persist_harness_checkpoint(write).await.is_err());
+        db.execute(
+            "UPDATE patches SET status = 'Pending' WHERE id = ?",
+            libsql::params![covered[0].patch_id],
+        )
+        .await?;
+        db.execute_batch("CREATE TEMP TRIGGER fail_checkpoint_cursor BEFORE UPDATE OF checkpoint_count ON harness_checkpoint_sessions BEGIN SELECT RAISE(ABORT, 'Injected cursor failure'); END;").await?;
+        assert!(db.persist_harness_checkpoint(write).await.is_err());
+        let mut rows = db.conn.query("SELECT (SELECT COUNT(*) FROM ai_interactions), (SELECT COUNT(*) FROM harness_provider_calls), (SELECT COUNT(*) FROM harness_patch_checkpoints), (SELECT COUNT(*) FROM patches WHERE status = 'Reviewed')", ()).await?;
+        let row = rows.next().await?.unwrap();
+        for column in 0..4 {
+            assert_eq!(row.get::<i64>(column)?, 0);
+        }
+        drop(rows);
+        db.execute_batch("DROP TRIGGER fail_checkpoint_cursor")
+            .await?;
+        let first_cursor = db.persist_harness_checkpoint(write).await?;
+        assert_eq!(
+            first_cursor,
+            HarnessCheckpointCursor {
+                checkpoints: 1,
+                provider_calls: 1,
+                history_end: 2
+            }
+        );
+        assert!(db.persist_harness_checkpoint(write).await.is_err());
+        append_call(&mut trace)?;
+        let second_write = HarnessCheckpointWrite {
+            review_id,
+            patch: &covered[1],
+            instruction_fingerprint: "snapshot",
+            series_fingerprint: &fingerprint,
+            previous: first_cursor,
+            artifacts: &second_artifacts,
+            trace: &trace,
+        };
+        let second_cursor = db.persist_harness_checkpoint(second_write).await?;
+        assert_eq!(
+            second_cursor,
+            HarnessCheckpointCursor {
+                checkpoints: 2,
+                provider_calls: 2,
+                history_end: 4
+            }
+        );
+        let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached) FROM ai_interactions", ()).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 2);
+        assert_eq!(row.get::<i64>(1)?, 20);
+        assert_eq!(row.get::<i64>(2)?, 4);
+        assert_eq!(row.get::<i64>(3)?, 6);
+        drop(rows);
+        let mut rows = db.conn.query("SELECT checkpoint_count, provider_calls_end, history_end FROM harness_checkpoint_sessions WHERE review_id = ?", libsql::params![review_id]).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 2);
+        assert_eq!(row.get::<i64>(1)?, 2);
+        assert_eq!(row.get::<i64>(2)?, 4);
+        drop(rows);
+        db.update_patchset_status(patchset_id, "Cancelled").await?;
+        assert!(db.persist_harness_checkpoint(second_write).await.is_err());
+        assert_eq!(
+            db.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Cancelled")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_session_initialization_requires_active_owner() -> Result<()> {
+        let db = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&db).await?;
+        let diffs = db.get_patch_diffs(patchset_id).await?;
+        let covered = vec![HarnessReviewPatch {
+            patch_id: diffs[0].0,
+            commit_id: crate::baseline::CommitId::parse(&"a".repeat(40)).unwrap(),
+        }];
+        db.update_patchset_status(patchset_id, "In Review").await?;
+        let review_id = db
+            .start_harness_review(HarnessReviewStart {
+                patchset_id,
+                provider: "codex-cli",
+                model: "gpt-6-luna",
+                baseline_id: None,
+                prompts_hash: "snapshot",
+                patches: &covered,
+            })
+            .await?
+            .unwrap();
+        let input = r#"{"series":"exact revision","instructions":"immutable snapshot"}"#;
+        assert!(
+            db.initialize_checkpoint_session(i64::MAX, input)
+                .await
+                .is_err()
+        );
+        assert!(
+            db.initialize_checkpoint_session(review_id, "[]")
+                .await
+                .is_err()
+        );
+        assert!(
+            db.initialize_checkpoint_session(review_id, "invalid JSON")
+                .await
+                .is_err()
+        );
+        let fingerprint = db.initialize_checkpoint_session(review_id, input).await?;
+        assert_eq!(fingerprint.len(), 64);
+        assert!(
+            db.initialize_checkpoint_session(review_id, input)
+                .await
+                .is_err()
+        );
+        let mut rows = db.conn.query("SELECT input_context, series_fingerprint, state FROM harness_checkpoint_sessions WHERE review_id = ?", libsql::params![review_id]).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(crate::compression::get_compressed_string(&row, 0)?, input);
+        assert_eq!(row.get::<String>(1)?, fingerprint);
+        assert_eq!(row.get::<String>(2)?, "active");
+        drop(rows);
+        db.execute(
+            "DELETE FROM harness_checkpoint_sessions WHERE review_id = ?",
+            libsql::params![review_id],
+        )
+        .await?;
+        db.update_patchset_status(patchset_id, "Cancelled").await?;
+        assert!(
+            db.initialize_checkpoint_session(review_id, input)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]

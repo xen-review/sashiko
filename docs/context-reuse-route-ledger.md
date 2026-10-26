@@ -123,6 +123,19 @@ by default. This policy is separate from the coding assistant's model setting.
   marker. Full gates passed 1,118 library, 48 main, seven CLI, and 25 integration
   tests, formatting, and all Clippy profiles. Atomic checkpoint writers and
   dispatch remain disabled/pending, and this recovery change is not deployed.
+  Invocation initialization now snapshots serialized context once, derives its
+  SHA-256 identity, and requires active covered review/series ownership. Atomic
+  checkpoint writes enforce the expected cursor, next selected patch, exact
+  commit/message identity, unchanged instruction/context fingerprints, complete
+  per-call accounting, and preserved cancellation. They store only new call
+  interactions, artifact text, patch completion, and the cursor in one
+  transaction. Tests cover duplicate/out-of-order writes, changed snapshots,
+  substituted identities, impossible/missing usage, patch/series cancellation,
+  final-cursor-write rollback, and two checkpoints with two calls counted once.
+  Full gates passed 1,120 library, 48 main, seven CLI, and 25 integration tests,
+  formatting, and all Clippy profiles. Terminal invocation completion and
+  daemon/local sequential dispatch remain pending; runtime selection is still
+  fail-closed and these storage changes have not been installed in the live DB.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

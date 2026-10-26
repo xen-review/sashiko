@@ -282,7 +282,7 @@ async fn run_session(
     bail!("harness provider-call limit reached without a final response")
 }
 
-fn accumulate_usage(total: &mut AiUsage, usage: &AiUsage) -> Result<()> {
+pub(crate) fn accumulate_usage(total: &mut AiUsage, usage: &AiUsage) -> Result<()> {
     if usage
         .cached_tokens
         .is_some_and(|cached| cached > usage.prompt_tokens)
