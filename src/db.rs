@@ -2325,6 +2325,7 @@ impl Database {
             _ if outcome.artifacts.is_some() => {
                 bail!("Unsuccessful harness review cannot contain final artifacts")
             }
+            HarnessStatus::Cancelled => ReviewStatus::Cancelled,
             _ => ReviewStatus::Failed,
         };
         let usage = &outcome.execution.trace.usage;
@@ -2382,7 +2383,7 @@ impl Database {
             "UPDATE reviews SET status = ?, interaction_id = ?, result_description = ?, summary = ?, independently_verified = 0 WHERE id = ?",
             libsql::params![status.as_str(), interaction_id.as_str(), "Agent harness output; not independently verified", outcome.artifacts.as_ref().map(|artifacts| artifacts.reviewer_notes.as_str()), review_id],
         ).await?;
-        if status != ReviewStatus::Cancelled {
+        if patchset_status == ReviewStatus::InReview.as_str() {
             tx.execute("UPDATE patches SET status = ? WHERE patchset_id = ? AND id IN (SELECT patch_id FROM review_patch_coverage WHERE review_id = ?)", libsql::params![status.as_str(), patchset_id, review_id]).await?;
             tx.execute(
                 "UPDATE patchsets SET status = ? WHERE id = ?",
@@ -11995,6 +11996,20 @@ mod tests {
             )
             .await?;
         assert_eq!(coverage.next().await?.unwrap().get::<i64>(0)?, 0);
+        drop(coverage);
+        db.update_patchset_status(patchset_id, ReviewStatus::InReview.as_str())
+            .await?;
+        let interrupted_id = db.start_harness_review(start(&patches)).await?.unwrap();
+        outcome.execution.status = HarnessStatus::Cancelled;
+        assert_eq!(
+            db.complete_harness_review(interrupted_id, "Cancelled session input", &outcome)
+                .await?,
+            ReviewStatus::Cancelled
+        );
+        assert_eq!(
+            db.get_patchset_status(patchset_id).await?.as_deref(),
+            Some("Cancelled")
+        );
         Ok(())
     }
 

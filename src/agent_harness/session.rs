@@ -25,6 +25,7 @@ pub enum HarnessStatus {
     Completed { report: String },
     Failed { reason: String },
     TimedOut,
+    Cancelled,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -51,25 +52,37 @@ pub async fn run(
     series_prompt: &str,
     limits: &AgentHarnessSettings,
 ) -> HarnessOutcome {
-    let mut trace = HarnessTrace::default();
-    let execution = tokio::time::timeout(
-        Duration::from_secs(limits.timeout_seconds),
-        run_session(
-            provider,
-            tools,
-            instructions,
-            series_prompt,
-            limits,
-            &mut trace,
-        ),
+    run_with_cancellation(
+        provider,
+        tools,
+        instructions,
+        series_prompt,
+        limits,
+        std::future::pending(),
     )
-    .await;
-    let status = match execution {
-        Ok(Ok(report)) => HarnessStatus::Completed { report },
-        Ok(Err(error)) => HarnessStatus::Failed {
-            reason: format!("{error:#}"),
+    .await
+}
+
+pub async fn run_with_cancellation(
+    provider: &dyn AiProvider,
+    tools: &ToolBox,
+    instructions: &InstructionSnapshot,
+    series_prompt: &str,
+    limits: &AgentHarnessSettings,
+    cancellation: impl std::future::Future<Output = ()>,
+) -> HarnessOutcome {
+    let mut trace = HarnessTrace::default();
+    let status = tokio::select! {
+        biased;
+        _ = cancellation => HarnessStatus::Cancelled,
+        execution = tokio::time::timeout(
+            Duration::from_secs(limits.timeout_seconds),
+            run_session(provider, tools, instructions, series_prompt, limits, &mut trace),
+        ) => match execution {
+            Ok(Ok(report)) => HarnessStatus::Completed { report },
+            Ok(Err(error)) => HarnessStatus::Failed { reason: format!("{error:#}") },
+            Err(_) => HarnessStatus::TimedOut,
         },
-        Err(_) => HarnessStatus::TimedOut,
     };
     HarnessOutcome {
         status,
@@ -429,6 +442,59 @@ mod tests {
         assert!(matches!(outcome.status, HarnessStatus::Failed { .. }));
         assert_eq!(outcome.trace.provider_calls, 2);
         assert_eq!(outcome.trace.tool_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_keeps_trace_and_stops_pending_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )
+        .unwrap();
+        let limits = AgentHarnessSettings {
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 2,
+            max_tool_calls: 5,
+            max_input_tokens: 1000,
+            max_output_tokens: 100,
+            timeout_seconds: 10,
+        };
+        let provider = Provider {
+            replies: Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
+            stall: true,
+        };
+        let cancellation = async {
+            while provider.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        };
+        let outcome = run_with_cancellation(
+            &provider,
+            &ToolBox::new(directory.path().to_path_buf(), None),
+            &instructions,
+            "Complete series",
+            &limits,
+            cancellation,
+        )
+        .await;
+        assert!(matches!(outcome.status, HarnessStatus::Cancelled));
+        assert_eq!(outcome.trace.provider_calls, 1);
+        assert_eq!(outcome.trace.history.len(), 1);
+        assert_eq!(outcome.instruction_fingerprint, instructions.fingerprint);
+        let outcome = run_with_cancellation(
+            &provider,
+            &ToolBox::new(directory.path().to_path_buf(), None),
+            &instructions,
+            "Complete series",
+            &limits,
+            std::future::ready(()),
+        )
+        .await;
+        assert_eq!(outcome.trace.provider_calls, 0);
     }
 
     #[tokio::test]

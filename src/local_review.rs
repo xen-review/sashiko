@@ -1500,6 +1500,7 @@ fn format_harness_result(
         crate::agent_harness::session::HarnessStatus::Completed { .. } => None,
         crate::agent_harness::session::HarnessStatus::Failed { reason } => Some(reason.as_str()),
         crate::agent_harness::session::HarnessStatus::TimedOut => Some("Agent harness timed out"),
+        crate::agent_harness::session::HarnessStatus::Cancelled => Some("Agent harness cancelled"),
     };
     json!({
         "patchset_id": patchset_id,

@@ -32,6 +32,25 @@ pub async fn review(
     request: &SeriesRequest<'_>,
     limits: &AgentHarnessSettings,
 ) -> Result<SeriesOutcome> {
+    review_with_cancellation(
+        provider,
+        tools,
+        instructions,
+        request,
+        limits,
+        std::future::pending(),
+    )
+    .await
+}
+
+pub async fn review_with_cancellation(
+    provider: &dyn AiProvider,
+    tools: &ToolBox,
+    instructions: &InstructionSnapshot,
+    request: &SeriesRequest<'_>,
+    limits: &AgentHarnessSettings,
+    cancellation: impl std::future::Future<Output = ()>,
+) -> Result<SeriesOutcome> {
     limits.validate().map_err(anyhow::Error::msg)?;
     let prompt = build_prompt(
         request.input,
@@ -40,7 +59,15 @@ pub async fn review(
         request.cover_letter,
         request.max_bytes,
     )?;
-    let mut execution = session::run(provider, tools, instructions, &prompt, limits).await;
+    let mut execution = session::run_with_cancellation(
+        provider,
+        tools,
+        instructions,
+        &prompt,
+        limits,
+        cancellation,
+    )
+    .await;
     let artifacts = match &execution.status {
         session::HarnessStatus::Completed { report } => {
             match parse_artifacts(report, request.input, request.selected_indexes) {
