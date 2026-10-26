@@ -30,6 +30,9 @@ provider deadline also bounds stdin transfer. Full gates passed 1,116 library,
 48 main, seven CLI, and 25 integration tests, formatting, and all Clippy profiles.
 See the configuration reference and DESIGN_MODEL_EFFORT_TIMEOUTS.md. Longer
 limits do not select higher effort or authorize additional model spending.
+Installed runtime validation completed at 13:42 CET: all six Luna/Terra
+xhigh/MAX profiles passed explicit-config no-AI preparation at an idle queue
+boundary, and the daemon restarted. No hour-long model trial was run.
 
 ### P0: Track Provider JSON Failures Without Inventing Results
 
@@ -37,8 +40,10 @@ Update at 13:22 CET: the operator authorized raising Luna effort progressively
 and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
 model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
 high, xhigh, and max effort. No model names were guessed and no Sol substitution
-was made. MAX is excluded under current 1,800-second review and 600-second
-provider limits; both must allow at least 3,600 seconds before a MAX experiment.
+was made. The original 1,800-second review and 600-second provider limits were
+subsequently replaced for explicitly matching xhigh/MAX timeout profiles. Both
+call and overall deadlines must allow at least 3,600 seconds before a MAX
+experiment; configuring them does not itself start or authorize that experiment.
 
 One exact failed-request replay on gpt-6-luna/medium returned valid envelope and
 inner stage JSON with concerns/dismissed_concerns arrays in 8.829 seconds. Usage:
@@ -53,10 +58,15 @@ medium. Explicit-config no-AI preparation passed, the daemon resumed, and its
 actual invocation confirmed model_reasoning_effort=medium. Cache identity already
 includes effort. Database and configuration were backed up before one supported
 patch-only retry of the failed alternatives patch; API accepted it. The original
-failure and successful patches remain preserved. Full retry outcome is pending.
+failure and successful patches remain preserved. The patch-only retry completed
+as Reviewed at 13:30:01 CET. A read-only check at 13:41 CET confirmed the new
+Reviewed result and retained original Failed record. This closes that targeted
+recovery, not the separate GIC malformed-output failure or future reliability.
 Latest fresh quota before the test was 10% five-hour and 86% weekly remaining,
 reset at 14:00:02 CET. Keep the existing remaining-budget authorization; do not
 increase effort again unless medium actually fails, and do not change active calls.
+Fresh 13:41:52 CET quota: 8% five-hour, 86% weekly, reset 14:00:02 CET. The
+loaded queue was exhausted with no pending or active series; no refill was made.
 
 Status: unresolved provider-output failure observed on 2026-10-26 at 12:07 UTC.
 The final patch of x86/alternatives: Adjust all insn-relative fields exhausted

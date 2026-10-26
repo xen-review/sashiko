@@ -81,14 +81,17 @@ See [configuration.md](configuration.md) for the complete configuration notes.
 - The implementation was pushed and installed from commit 82905979. Runtime
   configuration contains xhigh/MAX profiles for the verified gpt-6-luna,
   gpt-5.6-luna, and gpt-5.6-terra IDs. Medium remains the selected effort.
-- Runtime profile reload/preparation was interrupted before a result was
-  recorded. The service is active, but that interrupted command is not claimed
-  to have validated or activated the new profiles. No long-running MAX test has
-  been performed.
+- The earlier runtime profile validation was interrupted. On 2026-10-26 at
+  13:42 CET, after confirming there were no pending or active series, the
+  installed binary accepted all six profiles in an explicit-config no-AI
+  preparation check. The daemon was then restarted with those settings.
+  No long-running MAX test has been performed.
 - The malformed-JSON failures do not prove truncation by a timeout or low
   effort. Their native assistant responses were malformed too. One exact
-  Luna/medium replay returned valid JSON in 8.829 seconds; that is encouraging
-  evidence, not proof that higher effort eliminates the problem.
+  Luna/medium replay returned valid JSON in 8.829 seconds. The supported
+  patch-only alternatives retry also completed as Reviewed at 13:30 CET, with
+  the original failed result retained. These are encouraging results, not
+  proof that higher effort eliminates the problem.
 
 Provider-side duration limits, network failures, account quota, and process
 termination behavior can still affect a long review. Configuring 80 minutes
