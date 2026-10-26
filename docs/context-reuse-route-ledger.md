@@ -3,6 +3,82 @@
 Updated: 2026-10-26. This is the execution ledger for the selected route;
 the general improvement ledger retains other independent tasks.
 
+## Current Handoff
+
+Authoritative resume summary at 15:01 CET on 2026-10-26. Older milestone and
+resume entries below are historical evidence, not current quota readings or
+deployment claims. The user plans to switch the coding chat provider; do not
+infer daemon authentication, billing, quota, or model from that switch.
+
+- Source before this documentation update: 9987f464, signed and pushed to
+  origin/add-xen-support. Work in the clean detached implementation worktree
+  /tmp/sashiko-improvements-20261026. Main contains unrelated untracked user
+  agents/skills/CI files; preserve them and never stage or revert them.
+- Installed binary remains 82905979, with timeout profiles. Live database schema
+  is 14; checkpoint migration 15 and subsequent source changes are not deployed.
+  The daemon is active on Codex gpt-6-luna/medium with muted outbound delivery.
+  Latest check found no active model call, Pending series, or In Review series.
+  Do not cancel a later active review just to repeat checks.
+- Completed source: migration 15; atomic invocation snapshots, ordered checkpoint
+  artifacts and disjoint call interactions; terminal success/failure/cancellation;
+  no-replay startup recovery; bounded internal sequential runner; batched review
+  detail/list API enrichment. Full latest gate: 1,122 library tests, 48 main,
+  seven CLI, 25 integration, formatting, and all three Clippy profiles passed.
+- Sequential configuration still fails closed. The installed daemon remains
+  workflow mode. Existing independent workflows and whole-series harness remain
+  supported; no sequential trial, new default, or transparent crash resume is
+  claimed. See the approved checkpoint design for the partial-completion policy.
+- Immediate next edit: extend static/index.html renderReviewCard for the API's
+  review_strategy=sequential_patches and checkpoint_session payload. Show ordered
+  retained reviewer_notes/reply_body, completed/selected progress, remaining
+  scope, and explicit incomplete usage, including Failed/Cancelled/active state.
+  Reuse escaping and existing styling. The attempted UI patch was interrupted
+  and DID NOT APPLY; there are no uncommitted UI edits or running UI tests.
+- API checkpoint_session contains state, completed_count, provider_calls_recorded,
+  nullable provider_calls_attempted, usage_complete, ordered checkpoints,
+  selected_patch_indexes, and remaining_patch_indexes. Top-level token totals
+  are sums of disjoint recorded interactions. Full invocation input is omitted
+  from list payloads. No terminal usage is invented for interrupted calls.
+- Validate UI syntax, escaping, long text, raw-log access, and desktop/mobile
+  layout with isolated fixtures. The shared browser's old 127.0.0.1:8091 page
+  was synthetic test content, not a real review or an active test server.
+- Then wire daemon/local sequential dispatch around SequentialReviewSession.
+  Preserve exact patch revisions and eligibility, use the appropriate source
+  revision, await atomic checkpoint persistence before advancing, preserve
+  cancellation and shared limits, and finish the invocation exactly once.
+  Enable the typed strategy only when these paths and partial-result UI pass.
+- Before installing schema 15, stop at a safe boundary, verify workers exited,
+  back up the database, and run required checks. Scheduled/external service
+  starts have occurred during previous maintenance; recheck actual processes.
+  Do not deploy an unfinished sequential feature or claim source is installed.
+- Workspace search tools search main by default. For uncommitted implementation
+  code, read its absolute path or run targeted rg in the implementation worktree;
+  otherwise line numbers and content can misleadingly reflect the older checkout.
+
+Validation environment: use four Cargo jobs and local Git 2.56.0 with
+GIT_TEMPLATE_DIR=/usr/share/git-core/templates,
+CARGO_TARGET_DIR=/home/review/gh/sashiko/target, and
+CARGO_BIN_EXE_sashiko=/home/review/gh/sashiko/target/debug/sashiko. Use
+make check-pr before every code commit, git commit -s with wrapped messages,
+fast-forward main while preserving user files, and push only the authorized
+branch without force. No PR or Sashiko self-review is authorized.
+
+Budget policy is in the updated Sashiko-auto-improver agent. Premium Codex
+subscription trials require a fresh authenticated strictly-above-50% five-hour
+reading before every new call, verified exact models, sufficient weekly/time
+reserve, low/medium starts, and a high effort cap. No metered billing or paid
+overages. Last trial readings at 14:01 CET were 100%/86% with reset near 19:01
+CET; they are stale now. Re-read rather than assuming a reset or allowance.
+Terra/low and GPT-5.6 Sol/low exact-prompt format replays passed, but returned
+empty arrays versus Luna/medium's evidence-backed dismissal. Lower output is
+not equivalent review quality or justification for broad Sol use. Artifacts
+remain under /tmp/sashiko-effort-trial-20261026; daemon default was not changed.
+
+Other ledger work remains: staging merge/status filtering, live/final usage,
+configurable quota hysteresis, and durable subscription-exhaustion deferral.
+The overnight pause/resume trial is lower priority, test-first, near a reported
+00:00-06:00 local reset only with fresh authorization; no watcher is installed.
+
 ## Decision
 
 Finish the bounded whole-series harness as the nearest usable milestone, then
@@ -16,12 +92,9 @@ Sequential per-patch execution is the preferred follow-on for operator control,
 patch-level progress, and carrying source evidence across review boundaries.
 Neither alternative has demonstrated better review quality on Luna yet.
 
-The user reports 67% of the five-hour allowance remaining and approximately
-3h40m until the 14:00 reset. This is a user-reported sample, not independently
-read telemetry or a cost forecast. Do not equate percentage quota with tokens
-or promise all milestones within this window. Preserve a debugging reserve.
-Development review calls must use subscription-backed gpt-6-luna, low effort
-by default. This policy is separate from the coding assistant's model setting.
+Earlier quota samples below are historical and cannot authorize new calls.
+Follow the current handoff and updated agent budget policy. Do not equate quota
+percentages with tokens, assume a reset, or promise completion within a window.
 
 ## Ordered Milestones
 
