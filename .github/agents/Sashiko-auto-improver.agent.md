@@ -121,6 +121,10 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   Announce provider/model/effort changes, arrange a safe review boundary, and
   verify the effective invocation afterward. If Sol is already reviewing,
   let that review finish; do not stop or restart it to enforce this policy.
+  This protection applies only to the active review: switch subsequent reviews
+  to Luna at the first safe boundary without cancelling completed or in-flight
+  work. If no review is active, make the transition now rather than retaining
+  Sol as the configured default.
   Never change an in-flight request's effort. Disable response caching if its
   identity cannot distinguish the actual model and effort. Never run Sashiko
   self-review through paid Copilot CLI or exceed the agreed operating window.
