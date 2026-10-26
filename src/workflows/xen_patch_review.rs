@@ -136,6 +136,11 @@ fn validate_verified(output: &VerifiedOutput, state: &LinuxPatchReviewState) -> 
         .iter()
         .chain(&state.all_dismissed_concerns)
         .collect();
+    let valid_ids = inputs
+        .iter()
+        .filter_map(|input| input["id"].as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut covered = std::collections::BTreeSet::new();
     for (collection, items) in [
         ("findings", &output.findings),
@@ -155,7 +160,11 @@ fn validate_verified(output: &VerifiedOutput, state: &LinuxPatchReviewState) -> 
                 .get("source_ids")
                 .and_then(Value::as_array)
                 .filter(|ids| !ids.is_empty())
-                .ok_or_else(|| format!("{collection}[{index}].source_ids must name input IDs"))?;
+                .ok_or_else(|| {
+                    format!(
+                        "{collection}[{index}].source_ids must be a non-empty array of input IDs. Valid input IDs: {valid_ids}. Put lineage in source_ids, not id."
+                    )
+                })?;
             for source in sources {
                 let source = source
                     .as_str()
@@ -164,7 +173,9 @@ fn validate_verified(output: &VerifiedOutput, state: &LinuxPatchReviewState) -> 
                     .iter()
                     .any(|input| input["id"].as_str() == Some(source))
                 {
-                    return Err(format!("unknown source ID {source}"));
+                    return Err(format!(
+                        "{collection}[{index}].source_ids contains unknown input ID {source}. Valid input IDs: {valid_ids}."
+                    ));
                 }
                 covered.insert(source.to_string());
             }
@@ -267,7 +278,7 @@ pub fn build_xen_patch_review_workflow_with_effort(
     }).collect();
     let verification = Stage::builder("verification")
         .system_prompt(xen_system_prompt(true))
-        .user_prompt(PromptTemplate::new("Independently verify every input using Git tools at explicit revisions. Trace callers and triggers. Deduplicate overlapping issues. Revisit dismissals: never assume an absent check exists. Return only JSON with findings and dismissed_concerns arrays. Every input ID must appear in a non-empty source_ids array. Findings require problem, severity (Low/Medium/High/Critical/Unknown), severity_explanation with source proof and reachable trigger, preexisting (boolean), and locations. Dismissals require description, reasoning citing disproving code, and locations. Every location requires file, function_or_symbol, line, code_snippet, side (PARENT/REVISION), and why_this_location_matters. Do not silently discard unresolved candidates; use source tools to resolve them.\nConcerns: {{concerns}}\nDismissals: {{dismissals}}")
+        .user_prompt(PromptTemplate::new("Independently verify every input using Git tools at explicit revisions. Trace callers and triggers. Deduplicate overlapping issues. Revisit dismissals: never assume an absent check exists. Return only JSON with findings and dismissed_concerns arrays. Every input ID must appear in a non-empty source_ids array. Both findings and dismissals require source_ids; for example, use \"source_ids\": [\"D1\"] when dismissing input D1, not \"id\": \"D1\". Findings require problem, severity (Low/Medium/High/Critical/Unknown), severity_explanation with source proof and reachable trigger, preexisting (boolean), and locations. Dismissals require description, reasoning citing disproving code, and locations. Every location requires file, function_or_symbol, line, code_snippet, side (PARENT/REVISION), and why_this_location_matters. Do not silently discard unresolved candidates; use source tools to resolve them.\nConcerns: {{concerns}}\nDismissals: {{dismissals}}")
             .with_var("concerns", |state: &LinuxPatchReviewState| json!(state.all_concerns).to_string())
             .with_var("dismissals", |state: &LinuxPatchReviewState| json!(state.all_dismissed_concerns).to_string()))
         .output_format(OutputFormat::json().with_validator(validate_verified))
@@ -327,6 +338,42 @@ mod tests {
                 .unwrap_err()
                 .contains("C1")
         );
+    }
+
+    #[test]
+    fn verification_feedback_explains_input_id_lineage() {
+        let state = LinuxPatchReviewState {
+            all_dismissed_concerns: vec![json!({"id": "D1"}), json!({"id": "D2"})],
+            ..Default::default()
+        };
+        let mut output = VerifiedOutput {
+            findings: vec![],
+            dismissed_concerns: vec![json!({
+                "id": "D1",
+                "description": "The value is checked.",
+                "reasoning": "The caller validates the value.",
+                "locations": [{
+                    "file": "xen/common/example.c",
+                    "function_or_symbol": "example",
+                    "line": 1,
+                    "code_snippet": "return value;",
+                    "side": "REVISION",
+                    "why_this_location_matters": "The checked value is returned."
+                }]
+            })],
+        };
+        let error = validate_verified(&output, &state).unwrap_err();
+        assert!(error.contains("non-empty array"));
+        assert!(error.contains("D1, D2"));
+        assert!(error.contains("source_ids, not id"));
+
+        output.dismissed_concerns[0]["source_ids"] = json!(["D1", "D2"]);
+        assert!(validate_verified(&output, &state).is_ok());
+
+        output.dismissed_concerns[0]["source_ids"] = json!(["D9"]);
+        let error = validate_verified(&output, &state).unwrap_err();
+        assert!(error.contains("unknown input ID D9"));
+        assert!(error.contains("D1, D2"));
     }
 
     #[test]

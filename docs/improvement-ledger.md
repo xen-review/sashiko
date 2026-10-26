@@ -20,17 +20,23 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ### P0: Resolve Verification Failures That Lose Completed Analysis
 
-Status: investigate next.
+Status: contract violation reproduced; prompt and retry feedback improved;
+all deterministic gates passed. Deployment and supported retry are next.
 
 Evidence: a Luna review of the x86 microcode timeout-removal patch exhausted
 three validation attempts on 2026-10-26 at 02:23 UTC with
 `dismissed_concerns[0].source_ids must name input IDs`. Analysis had completed,
 but the patch did not receive a completed verified result.
 
-Next: compare the preserved verification input IDs, generated output, prompt,
-schema, and validator. Determine whether the prompt omits required information,
-the validator rejects a valid representation, or the model violates its contract.
-Do not relax evidence or provenance checks just to clear the queue.
+Diagnosis: the request supplied D1, D2, and D3, but the model copied `id: "D1"`
+instead of returning `source_ids: ["D1"]`. The validator correctly rejected it.
+The prompt now gives this exact distinction, and retry errors list valid IDs.
+A focused regression checks the rejected shape, accepted lineage, and rejection
+of unknown IDs. Evidence and provenance checks remain strict.
+
+Next: deploy and use the supported retry API for the affected review. Do not
+claim prompt changes guarantee model compliance. Checks passed with 1,088 library,
+47 main, seven CLI, and 24 integration tests, plus all formatting/Clippy profiles.
 
 Done when: an exact offline reproduction has a focused regression, the cause is
 fixed or explicitly classified as a provider failure, and supported retries
