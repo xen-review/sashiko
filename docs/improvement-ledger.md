@@ -5,8 +5,9 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Operating Constraints
 
-- Keep the daemon on Copilot CLI `gpt-6-luna`, low effort, default context until
-  the user explicitly authorizes another provider or model.
+- Keep development Xen reviews on `gpt-6-luna`, low effort by default. The
+  authorized runtime now uses subscription-backed Codex CLI; do not select Sol
+  merely because quota has reset or enable metered billing without permission.
 - Do not run Sashiko self-review through paid Copilot CLI. Do not spend Sol
   quota to investigate or validate these items without fresh authorization.
 - Preserve muted outbound delivery, completed results, review artifacts, and
@@ -104,7 +105,28 @@ Operator approved one bounded harness invocation with read-only source tools on
 2026-10-26. Implement a separate `agent_harness` mode, not a tool-free
 single-generation mode. Internal model turns must be observable and bounded;
 no runtime mode change or paid trial has been made. The earlier operating window
-is not extended by this architecture decision.
+was not extended by the architecture decision alone; the operator subsequently
+authorized continued implementation and subscription-backed daemon operation.
+
+Implemented foundations:
+
+- `76439f00`: typed mode and positive generation/tool/token/time settings;
+  existing configurations still select workflow. Harness mode currently fails
+  closed with an explicit error rather than running the old workflow.
+- `ad34e99f`: ordered, settings-relative instruction snapshots with original
+  bytes, validated frontmatter, prompt bodies, total byte limits, and SHA-256
+  identity covering contents and order. No metadata enables tools.
+- Latest full gate passed 1,096 library, 47 main, seven CLI, and 24 integration
+  tests, plus formatting and all Clippy profiles. Two library tests are ignored.
+
+Execution capability decision remains open: the installed Codex normal-turn
+schema has no per-generation output-token ceiling. Goal token budgets and an
+experimental rollout-budget feature exist, but their hard-stop behavior has not
+been established. Sashiko's provider interface reports usage after completion,
+not during generation. Do not enable the new mode claiming strict token bounds
+without evidence. Ask whether an explicitly documented between-turn budget,
+which can overshoot by one generation, is acceptable under the subscription plan;
+otherwise retain the strict gate until an enforceable backend is available.
 
 Goal: allow configuration to bypass Sashiko's entire multiphase review procedure
 and replace it with one explicitly selected agent/skill prompt for a whole Xen

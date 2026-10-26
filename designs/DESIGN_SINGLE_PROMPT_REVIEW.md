@@ -3,8 +3,8 @@
 Status: architecture choice approved on 2026-10-26: one bounded harness
 invocation with read-only source tools. Implementation and deterministic
 validation are next; a paid trial requires separate authorization. No runtime
-default changes are approved by this document. The daemon remains Copilot
-gpt-6-luna, low/default context.
+default changes are approved by this document. The daemon now uses the
+separately authorized subscription-backed Codex gpt-6-luna at low effort.
 
 ## Goal
 
@@ -163,6 +163,18 @@ identity. Relative paths or a binary hash alone do not identify custom prompts.
 Do not reuse the earlier paid Copilot cache while its effort identity is absent.
 
 ## Incremental Delivery and Tests
+
+Implemented: typed settings and fail-closed selection (`76439f00`), plus bounded
+immutable instruction snapshots (`ad34e99f`). Enabled harness execution is still
+rejected; no existing configuration changes its review procedure.
+
+Backend budget gap: the installed Codex app-server normal-turn schema does not
+offer a per-generation output-token ceiling. Its goal-budget API and experimental
+rollout tracking do not yet provide verified hard-stop guarantees. The current
+provider trait exposes completed-call usage only. The strict budget requirement
+above remains in force until supported enforcement is proven or the operator
+approves explicitly weaker between-turn accounting with one-generation overshoot.
+Do not silently reinterpret a token ceiling as a post-call threshold.
 
 1. Add typed config and startup validation for the approved `agent_harness`
    mode, keeping defaults unchanged and rejecting invalid combinations or
