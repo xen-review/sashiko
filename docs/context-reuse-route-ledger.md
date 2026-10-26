@@ -3,7 +3,174 @@
 Updated: 2026-10-26. This is the execution ledger for the selected route;
 the general improvement ledger retains other independent tasks.
 
-## Current Handoff
+## Switch Handoff
+
+Authoritative state at 17:39 CET on 2026-10-26. The operator requested saving
+state before switching the coding chat back to the Copilot harness/plan.
+Pause improvement work for that switch; do not start another ledger task or
+model experiment as part of the handoff. The claimed chat context size is not
+verified here and says nothing about the daemon account, quota, or billing.
+All older resume sections below are historical, not current instructions.
+
+### Source and Deployment
+
+- Last code commit: eed4fbdd, optional model confidence with explicit provenance.
+  Signed and pushed to origin/add-xen-support; main fast-forwarded to it.
+  Implementation worktree /tmp/sashiko-improvements-20261026 is clean before
+  this handoff documentation edit. The next documentation commit saves this
+  handoff. Remote: https://github.com/xen-review/sashiko.git. No force push,
+  new branch, PR, or delegated agent was used.
+- Main checkout /home/review/gh/sashiko has unrelated user-owned untracked
+  agents, skills, CI/action/hook files, and copilot-instructions.md. Preserve
+  them; never stage, delete, or revert them to make main appear clean. Main
+  has no tracked diff. Use the clean implementation worktree for new tasks.
+- Installed binary remains 8e0ea8be, configured-effort snapshot and UI.
+  SHA-256: 4bac44289b2c9ed6ead14dd42a9b1de62d648ddf30e025aa675f41889da669d9.
+  Confidence-capable source eed4fbdd has NOT been built or installed. Tracked
+  prompt files in main have advanced with source; do not assume their loaded
+  daemon snapshot or displayed capability from the binary version alone.
+- Service sashiko-xen.service was resumed after checks and is active, PID
+  990066 at 17:39 CET. API http://127.0.0.1:8080 reports healthy version 0.6.3,
+  4,064 messages, 451 series, zero Pending and zero In Review. Database schema
+  15; counts: Reviewed 98, Cancelled 90, Failed 27, Failed To Apply 191,
+  Incomplete 45. Historical failures are not authorization for mass retries.
+- Runtime remains workflow mode, codex-cli / gpt-6-luna / medium. Delivery
+  remains mute_all=true with no SMTP. Do not switch mode/provider/model/effort
+  or post results merely because the coding chat changes plan.
+- No build, test, foreground review, fixture server, or watcher remains. The
+  shared browser is a stale read-only fixture, not a live review. Synthetic
+  confidence shown there was never written to the database. No new OOM events:
+  cgroup counters still oom=3, oom_kill=2.
+
+### Validated Work
+
+- Sequential harness is implemented and explicitly opt-in: fixed instruction
+  snapshot/full-series prefix, one shared bounded conversation, submission-order
+  selected checkpoints, patch-scoped source tools, atomic persist-before-next-call,
+  disjoint usage, partial failure/cancellation, no-replay restart recovery,
+  local partial JSON/agent/human output, and checkpoint API/UI. Workflow remains
+  the runtime default; no independent-verification claim or outbound delivery.
+- A real three-patch libxenstat comparison used matching instructions, applied
+  commits, original message IDs, and native Luna/medium. Whole-series completed
+  three replies: 3 calls/9 tools, 146,011 input, 38,400 cached, 107,611 uncached,
+  1,758 output, 37.887 seconds. Sequential failed its first artifact: 4 calls/
+  3 tools, 200,052 input, 108,160 cached, 91,892 uncached, 1,075 output, 33.815
+  seconds. Native malformed content-wrapper bytes match retained failure. This
+  is not an equivalent-work cost saving. No automatic repair/retry occurred.
+- Response-envelope fix f26e416b separates the catalog from the generic content
+  wrapper and requires direct harness artifact JSON. It is deployed. No real
+  post-fix comparison has been run; original failed artifacts remain intact.
+- User feedback on runstate review 48 is recorded in
+  [the transparency report](../designs/DESIGN_REVIEW_TRANSPARENCY.md) and
+  [the improvement ledger](improvement-ledger.md). Both supplied attachments
+  were readable; no need to ask for them again for the saved facts.
+- Review 48 actually has zero regression findings, one Low pre-existing compat
+  concern, and one dismissed native-path item. Main page formerly hid the short
+  inline result. Deployed UI now shows it directly and matches map disposition
+  counts; responsive map tables no longer widen the page. Saved review untouched.
+- Independent read-only inspection of its exact saved baseline confirms the
+  real compat_handle_is_null definition under CONFIG_COMPAT and the compat
+  handler object's matching build selection. The submitted patch changes neither
+  file: the constant-zero fallback claim is a false positive. The supplied
+  re-review's native NULL portability adjustment is separate. No Xen source
+  edits, repeated builds, new Sol call, or public response was made here.
+- Deployed Xen guidance 869f4902 requires active conditional/build evidence
+  and retains real supported non-default-configuration bugs. It does not
+  guarantee model correctness or suppress uncertain candidates.
+- Deployed 8e0ea8be records configured effort in existing workflow result JSON.
+  The daemon parent replaces worker stdio-proxy attribution with its real backend
+  settings snapshot. Cards/maps distinguish configured from effective effort;
+  the latter remains Unknown without trustworthy backend confirmation. Historical
+  review 48 has no saved effort; never infer low from Luna or use live medium.
+- New source eed4fbdd accepts optional confidence score in [0,1] or null with
+  evidence rationale, projects only that verification item's assessment, and
+  labels it model-reported/uncalibrated. Old/invalid values stay unassessed.
+  No severity, lineage, eligibility, or scheduling filter changes. Tests keep a
+  1% assessment as a final finding; raw candidate scores are not inherited.
+- Latest full make check-pr passed for confidence source: formatting, all three
+  Clippy profiles, library tests, 48 main, seven CLI, 25 integration tests.
+  Focused confidence contract, projection, fake workflow, JavaScript syntax,
+  provenance/bounds/escaping tests passed. Final isolated browser check at 1,280
+  and 390 pixels passed: visible scored/unassessed cases and escaped rationale,
+  zero injected images, zero page overflow/errors. Pointer automation previously
+  timed out; handlers were checked through DOM activation. Browser screenshots
+  are on the browser host, not workspace /tmp; do not claim inaccessible images
+  were visually inspected. No further source edits followed these checks.
+
+### Resume Order and Constraints
+
+1. Re-read this section, AGENTS.md, applicable skills, the transparency report,
+   and the improvement ledger. Recheck live queue/service/worktree rather than
+   assume the saved PID, quota, or idle state persists after the chat switch.
+2. Confidence deployment is the immediate pending delivery step, not another
+   implementation rewrite: build with four jobs, check memory/OOM counters,
+   preserve active reviews, stop only at a safe idle boundary, verify children
+   exited, back up the database, install atomically, restart, and verify the
+   actual served UI/API. Do not relabel or rerun review 48. Existing deterministic
+   gates passed; rerun required gates if source changes before delivery.
+3. Continue remaining transparency work: backend-confirmed per-stage effort,
+   missing versus zero token usage, and real provider confidence observations
+   when naturally available. Optional uncalibrated confidence is not correctness
+   proof. Do not invent historical metadata or launch a premium re-review.
+4. Other open ledger work: Xen staging ancestry/patch-ID classification and the
+   status filter beside All Lists; live/final usage attribution; configurable
+   Codex quota allocation/hysteresis; durable quota-exhaustion deferral. The
+   latter is P3/test-first with a possible later bounded 00:00-06:00 reset trial,
+   not an installed watcher or overnight authorization. Intermittent NNTP errors
+   need current concrete evidence, not speculative refactors. A representative
+   successful post-envelope-fix sequential comparison is still unverified.
+
+Fresh account/rateLimits/read at 17:37:09 CET: authenticated ChatGPT subscription,
+20% shared five-hour allowance, 73% weekly; five-hour reset 19:01:38 CET.
+These are percentages, not token counts or isolated daemon consumption. The
+premium gate requires strictly more than 50% before EACH call, so it is false.
+No premium calls, quota redemption, paid overages, or model turns were started
+for this handoff. Earlier 29%, 43%, 72%, and 100% readings are historical. The
+requested below-20%/above-30% automatic hysteresis is NOT implemented; an earlier
+fixed testing reserve was superseded by the operator, not silently reinstated.
+Reassess conservatively with fresh telemetry before any further experiments.
+
+Self-review remains deferred/prohibited through paid Copilot CLI. Changing the
+coding-chat plan does not authorize daemon self-review on Codex, another model,
+or another billing route. No Sashiko self-review passed, no benchmarks were run,
+and no PR/public posting was authorized. Do not claim unattended monitoring.
+
+Runtime settings: /home/review/.config/sashiko/Settings.toml. Database:
+/home/review/.local/share/sashiko/xen/sashiko.db. Xen repo: /home/review/gh/xen.
+Private stopped backups and rollback binaries are outside git under the Xen
+data directory's backups folder. Latest deployed backup:
+before-effort-attribution-20261026-1720.db (quick_check passed), with matching
+sashiko-before-effort-attribution-20261026-1720 rollback binary. Older schema-15
+and transparency rollout backups are retained. Never commit these or raw logs.
+
+Use this validation environment from the implementation worktree, only after
+checking that no daemon/worker is running; never run suites from Git hooks:
+
+```sh
+PATH=/home/review/git-build/git-2.56.0:$PATH \
+GIT_TEMPLATE_DIR=/usr/share/git-core/templates \
+CARGO_TARGET_DIR=/home/review/gh/sashiko/target \
+CARGO_BIN_EXE_sashiko=/home/review/gh/sashiko/target/debug/sashiko \
+CARGO_BUILD_JOBS=4 make check-pr
+```
+
+Use git commit -s with the configured user identity, wrapped messages, no tool
+metadata; push only origin/add-xen-support without force. Workspace search tools
+default to main, not the implementation worktree: use absolute paths for pending
+implementation reads. External service starts around :00/:30 have happened;
+verify actual executable processes, not argument matches on a log-viewer tail.
+
+Preserved trial artifacts: /tmp/sashiko-checkpoint-comparison-20261026,
+/tmp/sashiko-effort-trial-20261026, and /tmp/sashiko-harness-luna-trial-20261026.
+Temporary transparency fixture source: /tmp/sashiko-review-transparency-20261026.mjs;
+server stopped. Starting it with --confidence creates a synthetic score in memory
+only. Shared browser page ID: 11b782fd-1ff1-429a-bfca-ca92e71b3e27. Refresh onto
+the live app instead of mistaking the fixture for production. fetch_webpage may
+return stale SPA content after rollout; verify nonce/no-cache HTML or browser
+reload. The transcript path supplied in the conversation remains the fallback
+for older tool details; repository memory has a concise current pointer.
+
+## Previous Handoff (Historical)
 
 Authoritative resume summary at 16:05 CET on 2026-10-26. Older milestone and
 resume entries below are historical evidence, not current quota readings or
