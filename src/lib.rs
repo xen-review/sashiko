@@ -15,6 +15,7 @@ pub mod metrics;
 
 #[cfg(feature = "server")]
 pub mod access;
+pub mod agent_harness;
 pub mod ai;
 pub mod api;
 pub mod auth;
