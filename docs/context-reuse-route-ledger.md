@@ -107,12 +107,23 @@ the stop completed, so it was interrupted rather than untouched. A separate
 12:00 service start resumed normal workflow; it was not an automatic crash
 restart. The later test stop used another completed-patch boundary. Runtime
 harness mode has not been enabled and no real harness trial has run.
+The stable-prefix follow-up eb6e81ee was also installed after the same full gate
+passed. No additional schema change or model request was needed for that install.
 
 Quota observations (CET): 63% remaining at 10:32, 54% at 10:52, 44% at 11:22,
 29% at 11:48, and 25% at 11:57; reset reported for 14:00. Coding and daemon
 reviews share the account, so these samples do not isolate either consumer's
 cost. Pause new review work to retain a debugging reserve, re-read quota before
 resuming, and do not assume a reset or promise an unattended resume watcher.
+The fresh 12:10 reading was 15% five-hour remaining and 87% weekly. The daemon
+was already stopped at a completed-patch boundary; leave it stopped to preserve
+the reserve. This pauses the API/UI too, since there is no separate reviewer-only
+pause control yet. No watcher remains and no automatic resume has been scheduled.
+Re-read quota after reset and require more than 30% remaining before resuming
+new reviews. The configurable 20%/30% hysteresis remains a future ledger task,
+not an implemented automatic feature. Next work is a separately bounded Luna
+harness evaluation when authorized and budget permits, then design of sequential
+patch checkpoints; neither was claimed complete by these deterministic checks.
 
 Work in the clean detached implementation worktree
 /tmp/sashiko-improvements-20261026. The main checkout contains unrelated user
