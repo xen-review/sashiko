@@ -99,8 +99,11 @@ shared account percentage changes into an invented token price.
 
 ### P2: Compare Series Context Reuse Strategies
 
-Status: future consideration requested on 2026-10-26; do not redirect the
-approved whole-series harness implementation to implement this alternative now.
+Status: route evaluated on 2026-10-26. Finish the approved whole-series harness
+first, then design sequential per-patch checkpoints on the shared engine. See
+[the dedicated route ledger](context-reuse-route-ledger.md) for ordered steps,
+budget caveats, cache measurements, and resume notes. Do not start a competing
+implementation or change the runtime default before evaluation.
 
 Current behavior: local per-patch review constructs a new Worker for each patch,
 with an initially empty global history. Each workflow session starts fresh.
