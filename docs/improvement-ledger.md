@@ -97,6 +97,43 @@ without changing required evidence, request ordering, provenance, or cache
 identity. Report actual generation counts and cache hits rather than converting
 shared account percentage changes into an invented token price.
 
+### P2: Compare Series Context Reuse Strategies
+
+Status: future consideration requested on 2026-10-26; do not redirect the
+approved whole-series harness implementation to implement this alternative now.
+
+Current behavior: local per-patch review constructs a new Worker for each patch,
+with an initially empty global history. Each workflow session starts fresh.
+Series/source context is supplied, but earlier patches' review conversations,
+tool results, and conclusions are not carried forward as shared model history.
+Provider-side cached input prefixes may still be reused; that is distinct from
+persisting a conversation or reusing Sashiko's completed-response cache.
+
+Compare these explicit, ideally configurable alternatives:
+
+- Whole-series harness review in one session, the current implementation path:
+  share source investigation and reasoning across the series, then validate and
+  split per-patch reply artifacts while retaining series-level usage attribution.
+- Sequential per-patch reviews with earlier review context available: carry
+  forward relevant conversation/tool evidence or a carefully attributed summary,
+  preserving exact patch revisions and per-patch output boundaries.
+- Existing independent per-patch workflow, retained for compatibility and
+  workloads where isolation or parallelism is preferable.
+
+Optimize for measured review quality and total cost, not just fewer subprocesses.
+Keep stable instructions and shared series context at cache-friendly prefixes;
+append patch-specific content and tool results without needlessly changing that
+prefix. Do not promise provider cache hits or assume retained conversation means
+zero additional input cost. Compare actual cached/uncached input, output tokens,
+backend generations, tool calls, latency, and correctness on representative series.
+
+Test that earlier review conclusions remain attributed to their original patch,
+are rechecked when later changes invalidate them, and cannot inject operator
+instructions into subsequent reviews. Bound growing history, preserve diagnostic
+artifacts across cancellation/retry, and prevent duplicated per-patch token
+accounting. Choose a default only after evidence; keep this as a future alternative
+alongside, not a prerequisite for, the approved whole-series mode.
+
 ### P2: Add an Optional Skill/Agent-Driven Single-Prompt Review Mode
 
 Status: design proposed in
