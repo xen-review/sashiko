@@ -13,6 +13,17 @@ speculative hardening, missing tests alone, or assumptions about Linux APIs.
 Inspect parent, target and series-final revisions using explicit Git revisions.
 Do not report an intermediate series state repaired by a later patch.
 
+For configuration-dependent evidence, inspect the surrounding #if/#else branches
+and the object's build rule at the reviewed revision. Establish which definition
+is reachable in the same supported configuration as its caller; a grep hit on a
+fallback macro is not proof. For example, CONFIG_COMPAT selects the real null
+test in compat_handle_is_null(), while the x86 compat handler's object build rule
+also requires CONFIG_COMPAT. Its #else constant-zero fallback cannot establish
+a defect in that handler. Conversely, a concrete failure in a supported
+non-default configuration is still a finding. State unknown configuration
+assumptions explicitly and investigate them; do not discard a possible bug just
+because it needs a non-default build or lacks a confidence score.
+
 Audit domain and vCPU lifetime, reference acquisition, teardown, RCU, locks,
 interrupt context and architecture-specific memory ordering. Trace guest and
 device-controlled inputs across hypercalls, domctl/sysctl, event channels,

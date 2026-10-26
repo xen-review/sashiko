@@ -47,8 +47,12 @@ stored outcome breakdown on cards/maps. Responsive map tables no longer widen
 the page on narrow screens. Syntax, escaping, real review-48 rendering, mixed
 dispositions, legacy cases, desktop/mobile overflow, and disclosure-handler
 checks pass; make check-pr passes. No historical artifact was relabeled.
-Actual-effort attribution, confidence, missing usage, and configuration-sensitive
-evidence guidance remain open; see the report for browser-verification limits.
+The saved baseline independently confirms the inactive compat fallback, and the
+submitted patch leaves the header/build rule unchanged. Shared Xen guidance now
+requires active-branch/object-build evidence and retains real non-default-build
+findings; its prompt contract and full make check-pr gates pass. This is not
+proof of universal false-positive elimination. Actual-effort attribution,
+confidence, and missing usage remain open; see the report for browser limits.
 
 ### P1: Budget-Gated Premium Model Comparisons
 

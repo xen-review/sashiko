@@ -41,6 +41,12 @@ conditions match the reviewed tree, the constant-zero claim is a false positive.
 Verify the exact submitted revision and surrounding conditional/build rules
 before treating a macro definition as reachable evidence.
 
+Independent read-only inspection of Sashiko's saved baseline confirms the
+CONFIG_COMPAT definition and the conditional domain.o build rule above. The
+original submitted diff does not change either file. This establishes that the
+compat claim selected an inactive fallback in the reviewed code. No Xen source
+was modified, and the supplied compile/preprocessing checks were not rerun here.
+
 Keep a separate issue separate: the supplied mailing-list review found an agreed
 native deregistration adjustment that bypasses guest_handle_okay() for NULL.
 That portability hardening and the commit-message corrections do not validate
@@ -111,8 +117,14 @@ direct DOM activation verified the unchanged handlers. Browser screenshots were
 captured but not available to the workspace image viewer, so no separate visual
 inspection is claimed. The diff-aware make check-pr gate passed.
 
-Effort persistence, confidence provenance, missing-usage presentation, and
-configuration-sensitive prompt regression work remain open. Review 48's public
+The shared Xen review prompt now requires surrounding #if/#else and object build
+selection evidence, includes this exact CONFIG_COMPAT counterexample, and retains
+findings affecting supported non-default configurations. A deterministic prompt
+contract check and the full make check-pr gate pass. This checks the supplied
+guidance, not a guarantee that future model reviews cannot repeat the mistake.
+
+Effort persistence, confidence provenance, and missing-usage presentation
+remain open. Review 48's public
 API and saved prompt do not contain effort; the stored token totals are zero but
 do not establish that its Copilot invocation actually used no tokens. This first
 slice does not invent either missing attribution or confidence.

@@ -321,6 +321,20 @@ mod tests {
         let rendered = xen_system_prompt(true).render_for_log(&LinuxPatchReviewState::default());
         assert!(rendered.contains("Xen hypervisor"));
         assert!(!rendered.contains("principal Rust"));
+        let rules = include_str!("../../projects/xen/prompts/review-core.md");
+        for evidence in [
+            "surrounding #if/#else branches",
+            "object's build rule at the reviewed revision",
+            "CONFIG_COMPAT selects the real null",
+            "fallback cannot establish",
+            "non-default configuration is still a finding",
+            "do not discard a possible bug",
+        ] {
+            assert!(
+                rules.contains(evidence),
+                "Missing configuration evidence rule: {evidence}"
+            );
+        }
     }
 
     #[test]
