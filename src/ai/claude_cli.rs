@@ -439,18 +439,15 @@ pub fn parse_inner_response(text: &str, usage: Option<AiUsage>) -> Result<AiResp
     // separate tool_calls objects per line instead of one combined object)
     let mut merged_tool_calls: Vec<ToolCall> = Vec::new();
     let mut had_json = false;
-    for line in json_str.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-            had_json = true;
-            if let Some(calls) = v["tool_calls"].as_array() {
-                for c in calls {
-                    if let Some(tc) = parse_tool_call(c) {
-                        merged_tool_calls.push(tc);
-                    }
+    for value in serde_json::Deserializer::from_str(&json_str).into_iter::<Value>() {
+        let Ok(value) = value else {
+            break;
+        };
+        had_json = true;
+        if let Some(calls) = value["tool_calls"].as_array() {
+            for call in calls {
+                if let Some(tool_call) = parse_tool_call(call) {
+                    merged_tool_calls.push(tool_call);
                 }
             }
         }
@@ -582,6 +579,28 @@ mod tests {
     use super::*;
     use crate::ai::{AiMessage, AiRequest, AiResponseFormat, AiRole, AiTool};
     use serde_json::json;
+
+    #[test]
+    fn test_complete_tool_call_survives_trailing_invalid_json() {
+        let response = parse_inner_response(
+            "{\n\"tool_calls\": [{\"id\": \"diff\", \"function_name\": \"git_diff\", \"arguments\": {\"paths\": [\"file.c\"]}}]\n}\"}",
+            None,
+        )
+        .unwrap();
+        assert!(response.content.is_none());
+        let calls = response.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function_name, "git_diff");
+        assert_eq!(calls[0].arguments, json!({"paths": ["file.c"]}));
+    }
+
+    #[test]
+    fn test_incomplete_tool_call_is_not_recovered() {
+        let text = r#"{"tool_calls":[{"id":"diff","function_name":"git_diff","arguments":{"paths":["file.c"]}}]"#;
+        let response = parse_inner_response(text, None).unwrap();
+        assert!(response.tool_calls.is_none());
+        assert_eq!(response.content.as_deref(), Some(text));
+    }
 
     #[test]
     fn test_parse_error_preview_handles_multibyte_cutoff() {
