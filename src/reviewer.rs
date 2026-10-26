@@ -1335,7 +1335,7 @@ impl Reviewer {
         if ctx.settings.ai.provider != "codex-cli" || ctx.settings.ai.no_ai {
             anyhow::bail!("Daemon harness execution requires an enabled codex-cli provider");
         }
-        if ctx.target_review_count != 1 || ctx.worker_overrides.report_preexisting {
+        if ctx.worker_overrides.report_preexisting {
             anyhow::bail!(
                 "Daemon harness execution supports one series invocation without pre-existing reports"
             );
@@ -3951,11 +3951,8 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            db.execute(
-                "UPDATE patchsets SET status = 'In Review' WHERE id = ?",
-                libsql::params![patchset_id],
-            )
-            .await?;
+            db.rerun_patchset(patchset_id).await?;
+            assert!(db.claim_patchset_for_review(patchset_id).await?);
             let provider = Arc::new(HarnessProvider {
                 calls: AtomicUsize::new(0),
                 report: if index == 1 {
@@ -3972,7 +3969,7 @@ mod tests {
                 settings: settings.clone(),
                 baseline_registry: Arc::new(BaselineRegistry::new(Path::new("."), None)?),
                 quota_manager: Arc::new(QuotaManager::new()),
-                target_review_count: 1,
+                target_review_count: index + 1,
                 provider: provider.clone(),
                 worker_overrides: WorkerSubprocessOverrides::default(),
                 progress_registry: ReviewProgressRegistry::default(),
@@ -3996,6 +3993,20 @@ mod tests {
             let review_id: i64 = rows.next().await?.unwrap().get(0)?;
             drop(rows);
             let details = db.get_review_details(review_id).await?.unwrap();
+            let listing = db
+                .get_patchset_details(patchset_id, None, None)
+                .await?
+                .unwrap();
+            let reviews = listing["reviews"].as_array().unwrap();
+            assert_eq!(reviews.len(), index + 1);
+            assert_eq!(reviews[index]["review_mode"], "agent_harness");
+            assert_eq!(reviews[index]["independently_verified"], false);
+            assert_eq!(reviews[index]["model"], "gpt-6-luna");
+            assert!(
+                db.get_completed_reviews_for_release(patchset_id)
+                    .await?
+                    .is_empty()
+            );
             assert_eq!(details["review_mode"], "agent_harness");
             assert_eq!(details["independently_verified"], false);
             assert_eq!(details["covered_patches"].as_array().unwrap().len(), 1);

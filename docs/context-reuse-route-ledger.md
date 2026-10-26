@@ -41,7 +41,7 @@ by default. This policy is separate from the coding assistant's model setting.
   no-AI uses zero, and malformed output is retained without retry or fallback.
   Required gates passed: 1,109 library, 48 main, seven CLI, 25 integration tests,
   formatting, and all Clippy profiles. Daemon harness mode remains rejected.
-4. In progress: atomic persistence is implemented with one series usage record,
+4. Done: atomic persistence is implemented with one series usage record,
   covered patch identities, explicit mode/verification metadata, and preserved
   cancellation. Tests cover rollback on the final write, invalid scope,
   instruction identity, duplicate completion, failed artifacts, and cleanup.
@@ -52,9 +52,14 @@ by default. This policy is separate from the coding assistant's model setting.
   email/forge delivery or workflow retries. Fake-provider tests cover a selected
   subset, malformed output, cancellation, and one usage record per invocation.
   Dispatch gates passed 1,112 library, 48 main, seven CLI, 25 integration tests,
-  formatting, and all Clippy profiles. Next: validate retry compatibility and
-  artifact presentation before lifting the daemon configuration guard.
-5. Establish one bounded Luna evaluation with retained artifacts and measured
+  formatting, and all Clippy profiles. Explicit reruns retain prior artifacts;
+  daemon validation accepts only supported providers, snapshots, and limits.
+  The UI displays escaped notes/drafts, unverified status, and one usage summary
+  without a review-map claim. Browser checks at 1280px and 390px covered raw-log
+  access, text injection, long source lines, overflow, and header wrapping.
+  Final deterministic gates passed the same complete test and lint profiles.
+5. Next, subject to fresh budget and trial authorization: establish one bounded
+  Luna evaluation with retained artifacts and measured
    cached input, uncached input, output, provider calls, tools, and review quality.
    No full/small benchmark or automatic queue refill is authorized by this plan.
 6. Design sequential checkpoints on this engine before implementation. Retain
@@ -93,8 +98,8 @@ Work in the clean detached implementation worktree
 CI and agent edits; never stage or revert them. Fast-forward main and push only
 origin/add-xen-support after signed commits and required checks.
 
-The installed daemon remains on the older restricted Codex completion runtime;
-local harness dispatch is checked in but not yet installed. Preserve mute_all and SMTP
+The checked implementation supports opt-in harness mode; runtime settings still
+select workflow and no real harness trial has run. Preserve mute_all and SMTP
 policy. Do not stop an active review for routine checks. Before tests, stop at
 a safe boundary, verify workers exited, and resume the service promptly.
 

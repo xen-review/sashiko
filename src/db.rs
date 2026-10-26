@@ -8175,7 +8175,8 @@ impl Database {
         let query_str = format!(
             "SELECT r.summary, r.created_at, ai.output_raw,
                     r.result_description, r.status, r.inline_review, {},
-                    ai.tokens_in, ai.tokens_out, r.patch_id, r.id, ai.tokens_cached
+                    ai.tokens_in, ai.tokens_out, r.patch_id, r.id, ai.tokens_cached,
+                    r.review_mode, r.independently_verified, r.model, r.provider, r.prompts_hash
              FROM reviews r
              LEFT JOIN ai_interactions ai ON r.interaction_id = ai.id
              WHERE r.patchset_id = ? AND (r.patch_id IS NULL OR r.patch_id IN ({}))
@@ -8202,9 +8203,11 @@ impl Database {
                 "patch_id": r.get::<Option<i64>>(9)?,
                 "id": r.get::<i64>(10)?,
                 "tokens_cached": r.get::<Option<u32>>(11)?,
-                "model": model_name,
-                "provider": provider,
-                "prompts_hash": prompts_git_hash,
+                "review_mode": r.get::<String>(12)?,
+                "independently_verified": r.get::<Option<i64>>(13)?.map(|value| value != 0),
+                "model": r.get::<Option<String>>(14)?.as_deref().or(model_name),
+                "provider": r.get::<Option<String>>(15)?.as_deref().or(provider),
+                "prompts_hash": r.get::<Option<String>>(16)?.as_deref().or(prompts_git_hash),
                 "baseline": baseline,
             });
             if include_logs && let Some(obj) = item.as_object_mut() {
@@ -9263,7 +9266,7 @@ impl Database {
              FROM reviews r
              JOIN patches p ON r.patch_id = p.id
              JOIN messages m ON p.message_id = m.message_id
-             WHERE r.patchset_id = ? AND r.status = 'Reviewed'
+             WHERE r.patchset_id = ? AND r.status = 'Reviewed' AND r.review_mode = 'workflow'
              ORDER BY p.part_index ASC, r.id ASC",
                 libsql::params![patchset_id],
             )

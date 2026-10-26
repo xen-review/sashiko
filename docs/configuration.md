@@ -301,14 +301,14 @@ pass.
 | `max_total_output_tokens` | integer | `1000000` | Maximum cumulative output tokens (including thinking tokens) per review. Set to 0 to disable. |
 | `effort` | string | `"mid"` (Argon 4) | Reasoning effort mode for models that support configurable effort levels (currently Argon 4; ignored for other models). Options: `"low"` (uniform `Low` effort across all stages), `"mid"` (uniform `Medium` effort across all stages, default), `"high"` (`High` effort across screening, planning, analysis, and verification stages; `Medium` for report formatting), or `"dynamic"` (`Low` for screening/planning/summary, planned `Medium` or `High` per analysis stage, `High` for verification stages, `Medium` for report formatting). Can also be set via `--effort`. |
 
-#### Local Agent Harness
+#### Agent Harness
 
-`[review] mode = "workflow"` remains the default. Local `sashiko review` can
+`[review] mode = "workflow"` remains the default. Local and daemon reviews can
 instead use `mode = "agent_harness"` with `provider = "codex-cli"`. This mode
 replaces the entire planning/analysis/verification/report workflow with one
 bounded whole-series session using operator-supplied instructions and read-only
-Git tools. It may make multiple provider calls. Daemon harness persistence is
-not implemented yet; daemon startup rejects this mode rather than falling back.
+Git tools. It may make multiple provider calls. Unsupported providers, missing
+instructions, and conflicting workflow stages fail rather than falling back.
 
 Example local configuration, using subscription-backed Codex authentication:
 
@@ -349,6 +349,23 @@ Reviewer notes and per-patch plain-text reply drafts remain separate. Drafts are
 not sent and proposed source fixes are not applied. `--no-ai` still makes zero
 provider calls. Custom prompts, selected workflow stages, and pre-existing bug
 reports are rejected rather than silently ignored in harness execution.
+
+For a daemon, add the usual database, repository, worktree, and delivery-policy
+settings. The complete series is context, with replies limited to patches that
+pass the existing subject and size filters. One series review record stores
+covered patch commits and one usage total; results and instruction snapshots
+are available through review details. The UI separates reviewer notes and reply
+drafts and explicitly labels them not independently verified. No email, forge
+comment, or deferred embargo notification is generated from harness output.
+Existing delivery policy remains in force for other workflow results.
+
+An explicit rerun queues one new series invocation and retains earlier artifacts;
+the normal per-patch target count does not trigger multiple harness invocations.
+Cancellation stops session continuation and retains completed responses and known
+usage. Tokens from an interrupted in-flight provider call may not be reported;
+persisted usage covers completed responses, not an invented terminal total.
+Daemon `--no-ai` is not supported with harness mode; local `--no-ai` remains a
+zero-call patch check. An empty eligible scope is an error, not a clean review.
 
 `max_generations` bounds Sashiko provider calls, not hidden backend generations.
 Native CLI tools remain disabled. Token thresholds count all reported input

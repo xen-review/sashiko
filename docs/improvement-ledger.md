@@ -201,17 +201,24 @@ Implemented foundations:
 
 - `76439f00`: typed mode and positive generation/tool/token/time settings;
   existing configurations still select workflow. Local harness dispatch is now
-  implemented; daemon harness mode remains rejected until persistence is ready.
+  implemented, and daemon mode now has atomic persistence, cancellation, explicit
+  reruns, and unverified artifact presentation. Runtime settings remain workflow.
 - `ad34e99f`: ordered, settings-relative instruction snapshots with original
   bytes, validated frontmatter, prompt bodies, total byte limits, and SHA-256
   identity covering contents and order. No metadata enables tools.
-- Latest full gate passed 1,109 library, 48 main, seven CLI, and 25 integration
+- Latest full gate passed 1,112 library, 48 main, seven CLI, and 25 integration
   tests, plus formatting and all Clippy profiles. Two library tests are ignored.
 - Local CLI regression: a two-patch range uses one fake Codex call, no-AI uses
   zero calls, and malformed final artifacts fail with raw history and usage
   retained. Full JSON includes exact baseline, selected indexes, model/effort,
   and immutable instruction contents. Human and agent output explicitly avoid
   claiming independent verification. No paid trial or runtime mode change.
+- Daemon fake-provider regression covers one selected scope, successful and
+  malformed output, cancellation, preserved artifacts across supported reruns,
+  shared limiter release, one interaction per invocation, and empty outboxes.
+  Deferred delivery explicitly excludes harness results. Desktop/mobile browser
+  checks confirm escaped drafts, unverified labeling, raw-log access, and no
+  horizontal overflow or status-header overlap after narrow-width wrapping.
 
 Execution budget decision approved: for subscription-backed Codex, enforce
 token thresholds between model turns, permitting one-generation overshoot.

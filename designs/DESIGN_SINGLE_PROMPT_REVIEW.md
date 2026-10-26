@@ -2,8 +2,9 @@
 
 Status: architecture choice approved on 2026-10-26: one bounded harness
 invocation with read-only source tools. Local dispatch and deterministic
-validation are implemented; daemon persistence is next. A paid trial requires
-separate authorization. No runtime
+validation are implemented, including daemon persistence, cancellation, explicit
+reruns, and unverified artifact presentation. A paid trial requires separate
+authorization. No runtime
 default changes are approved by this document. The daemon now uses the
 separately authorized subscription-backed Codex gpt-6-luna at low effort.
 
@@ -75,8 +76,8 @@ earlier operating window or authorize a paid trial.
 Use a typed enum, not arbitrary strings in control flow. Existing configurations
 deserialize to `workflow`, preserving all current behavior. The following is a
 manifest excerpt; the required positive execution limits are documented in
-[the configuration reference](../docs/configuration.md#local-agent-harness).
-Only local execution is implemented so far:
+[the configuration reference](../docs/configuration.md#agent-harness).
+Local and daemon execution use the same series/session engine:
 
 ```toml
 [review]

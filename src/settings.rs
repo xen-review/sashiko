@@ -1305,7 +1305,15 @@ impl Settings {
     /// an error far from its cause.
     pub fn validate_for_daemon(&self) -> Result<(), String> {
         if self.review.mode == ReviewMode::AgentHarness {
-            return Err("[review] agent_harness is currently supported only for local review; daemon persistence is not implemented".to_string());
+            self.review.validate_mode()?;
+            if self.ai.provider != "codex-cli" || self.ai.no_ai {
+                return Err(
+                    "[review] agent_harness requires an enabled codex-cli provider".to_string(),
+                );
+            }
+            if self.review.instruction_snapshot.is_none() || self.review.stages.is_some() {
+                return Err("[review] agent_harness requires an instruction snapshot and no workflow stages".to_string());
+            }
         }
         if self.project.kind == Some(ProjectId::Xen) && self.linux_bug.enabled {
             return Err(
@@ -1600,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_loader_snapshots_local_harness_and_rejects_daemon_mode() {
+    fn settings_loader_snapshots_harness_and_validates_daemon_requirements() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("Settings.toml");
         let base =
@@ -1615,7 +1623,7 @@ mod tests {
         let error = Settings::from_file(&path).unwrap_err().to_string();
         assert!(error.contains("cannot resolve instruction file"), "{error}");
         std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
-        let settings = Settings::from_file(&path).unwrap();
+        let mut settings = Settings::from_file(&path).unwrap();
         assert_eq!(settings.review.mode, ReviewMode::AgentHarness);
         assert_eq!(
             settings.review.instruction_snapshot.as_ref().unwrap().files[0].body,
@@ -1630,7 +1638,40 @@ mod tests {
             settings
                 .validate_for_daemon()
                 .unwrap_err()
-                .contains("only for local review")
+                .contains("[database]")
+        );
+        settings.database.url = ":memory:".to_string();
+        settings.git.repository_path = directory.path().to_string_lossy().into_owned();
+        settings.review.worktree_dir = Some(
+            directory
+                .path()
+                .join("worktrees")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(settings.validate_for_daemon().is_ok());
+        settings.ai.no_ai = true;
+        assert!(
+            settings
+                .validate_for_daemon()
+                .unwrap_err()
+                .contains("enabled codex-cli")
+        );
+        settings.ai.no_ai = false;
+        settings.review.stages = Some(vec!["implementation".to_string()]);
+        assert!(
+            settings
+                .validate_for_daemon()
+                .unwrap_err()
+                .contains("no workflow stages")
+        );
+        settings.review.stages = None;
+        settings.review.instruction_snapshot = None;
+        assert!(
+            settings
+                .validate_for_daemon()
+                .unwrap_err()
+                .contains("instruction snapshot")
         );
         std::fs::write(
             &path,

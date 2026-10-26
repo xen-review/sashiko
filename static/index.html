@@ -4429,6 +4429,7 @@
 
         function renderReviewCard(r, emailHtml = '') {
             const uniqueId = Math.random().toString(36).substr(2, 9);
+            const isHarness = r.review_mode === 'agent_harness';
 
             let displayResult = '';
             
@@ -4444,7 +4445,7 @@
                     }
 
                     // Findings
-                    if (outputJson && outputJson.findings && Array.isArray(outputJson.findings)) {
+                    if (!isHarness && outputJson && outputJson.findings && Array.isArray(outputJson.findings)) {
                         const isPatchset = (r.patch_id === null || r.patch_id === undefined);
                         
                         if (isPatchset) {
@@ -4533,17 +4534,21 @@
                 }
             }
 
+            if (isHarness) {
+                displayResult = '<span>Agent harness &middot; Not independently verified</span>';
+            }
+
             const tokensOut = (r.tokens_out || 0);
             const tokensCached = (r.tokens_cached || 0);
             const tokensIn = Math.max(0, (r.tokens_in || 0) - tokensCached);
             const tokenStr = `In: ${formatTokenCount(tokensIn)} &middot; Cached: ${formatTokenCount(tokensCached)} &middot; Out: ${formatTokenCount(tokensOut)}`;
 
-            const summaryText = (r.summary || (outputJson && outputJson.summary) || '').trim();
+            const summaryText = (r.summary || (isHarness ? outputJson?.artifacts?.reviewer_notes : outputJson?.summary) || '').trim();
             let summaryHtml = '';
             if (summaryText) {
                 summaryHtml = `
                     <div style="margin-top:8px;">
-                        <button class="toggle-btn" onclick="toggleCollapsible('summary-${uniqueId}', this)">▼ Summary</button>
+                        <button class="toggle-btn" onclick="toggleCollapsible('summary-${uniqueId}', this)">▼ ${isHarness ? 'Reviewer Notes' : 'Summary'}</button>
                         <div id="summary-${uniqueId}" class="collapsible open" style="position: relative;">
                             <button class="copy-btn" style="position: absolute; top: 5px; right: 5px; z-index: 10;" onclick="copyToClipboard(this.nextElementSibling, this)">Copy</button>
                             <div class="log-inline-block">${escapeHtml(summaryText, true, false)}</div>
@@ -4553,6 +4558,15 @@
             }
 
             let inlineHtml = '';
+            let draftsHtml = '';
+            if (isHarness && Array.isArray(outputJson?.artifacts?.reply_drafts)) {
+                draftsHtml = outputJson.artifacts.reply_drafts.map(draft => `
+                    <div style="margin-top:12px;">
+                        <h4>Reply Draft for Patch ${escapeHtml(String(draft.patch_index))}</h4>
+                        <div class="log-inline-block">${escapeHtml(draft.body || '', true, false)}</div>
+                    </div>
+                `).join('');
+            }
             const inlineReview = r.inline_review || r.description;
             if (inlineReview) {
                 // If we found issues (parsedFindings is true and result isn't "No regressions"), expand by default
@@ -4572,14 +4586,14 @@
 
             const statusRaw = r.status || 'Finished';
             const s = statusRaw.toLowerCase();
-            const showDetails = s === 'reviewed' || s === 'finished' || s === 'failed' || s === 'skipped';
+            const showDetails = s === 'reviewed' || s === 'finished' || s === 'failed' || s === 'skipped' || (isHarness && s === 'cancelled');
 
             return `
                 <div class="review-card">
                     <div class="review-meta">
                         ${showDetails ? `
                         <div class="review-meta-label">Result:</div>
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;${isHarness ? 'gap:8px;flex-wrap:wrap;' : ''}">
                             <span>${displayResult}</span>
                             <span class="status-badge status-${(statusRaw || '').replace(/ /g, '')}">${statusRaw}</span>
                         </div>
@@ -4591,14 +4605,16 @@
                     ${showDetails ? `
                     ${summaryHtml}
                     ${inlineHtml}
+                    ${draftsHtml}
                     <div style="margin-top: 24px; margin-bottom: 0;">
                         ${emailHtml}
                         <div style="font-size: 0.9em; color: var(--text-muted); line-height: 1.4; margin-top: 2px;">
                             <strong>Tokens used:</strong> ${tokenStr}
+                            ${isHarness && outputJson?.execution?.trace ? `<br>Provider calls: ${escapeHtml(String(outputJson.execution.trace.provider_calls))} &middot; Tool calls: ${escapeHtml(String(outputJson.execution.trace.tool_calls))}` : ''}
                         </div>
                     </div>
                     <div style="margin-top:8px; display:flex; justify-content:space-between; align-items:center; font-size: 0.9em;">
-                        ${r.id ? `<span><a href="#/map/${r.id}" style="font-weight:600; color:var(--link); text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">View Review Map</a><span style="color:var(--text-dim); margin: 0 6px;">&middot;</span><a href="#/log/${r.id}" style="font-weight:600; color:var(--text-dim); text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">View Raw Log</a></span>` : '<span></span>'}
+                        ${r.id ? `<span>${isHarness ? '' : `<a href="#/map/${r.id}" style="font-weight:600; color:var(--link); text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">View Review Map</a><span style="color:var(--text-dim); margin: 0 6px;">&middot;</span>`}<a href="#/log/${r.id}" style="font-weight:600; color:var(--text-dim); text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">View Raw Log</a></span>` : '<span></span>'}
                         <a href="javascript:void(0)" onclick="document.getElementById('ai-reviews').scrollIntoView({behavior: 'smooth'})" style="font-size: 0.95em; color: var(--text-dim); text-decoration: none;">↑ Back to Summary</a>
                     </div>
                     ` : ''}
