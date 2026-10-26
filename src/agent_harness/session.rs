@@ -69,7 +69,7 @@ impl HarnessSession {
         instructions: &InstructionSnapshot,
         limits: &AgentHarnessSettings,
     ) -> Result<Self> {
-        limits.validate().map_err(anyhow::Error::msg)?;
+        limits.validate_limits().map_err(anyhow::Error::msg)?;
         if instructions.files.is_empty() {
             bail!("harness requires instructions");
         }
@@ -96,6 +96,19 @@ impl HarnessSession {
             stopped: false,
             trace: HarnessTrace::default(),
         })
+    }
+
+    pub fn seed_context(&mut self, context: &str) -> Result<()> {
+        if context.trim().is_empty()
+            || !self.trace.history.is_empty()
+            || self.trace.provider_calls != 0
+        {
+            bail!("Harness context must be non-empty and seeded once before provider calls");
+        }
+        self.trace
+            .history
+            .push(message(AiRole::User, Some(context.to_string()), None));
+        Ok(())
     }
 
     pub async fn checkpoint(

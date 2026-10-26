@@ -147,6 +147,16 @@ by default. This policy is separate from the coding assistant's model setting.
   1,121 library, 48 main, seven CLI, 25 integration tests, formatting, and all
   Clippy profiles. Dispatch and partial-result API/UI remain pending, so runtime
   sequential selection is still disabled and no live DB deployment was made.
+  The internal SequentialReviewSession now seeds complete context once and
+  advances ordered selected patch requests on the shared bounded engine. Fake
+  providers prove selector order cannot reorder submission review, the entire
+  serialized prompt remains append-only between checkpoints, prior replies
+  remain available, wrong-patch output stops without a repair call, cumulative
+  token overshoot retains trace/usage, and pre-cancellation makes zero calls.
+  Runtime startup remains gated separately from internal budget validation.
+  Full gates passed 1,122 library, 48 main, seven CLI, and 25 integration tests,
+  formatting, and all Clippy profiles. API/UI and daemon/local dispatch are
+  still pending; the runtime continues to reject sequential_patches selection.
   Retain
    instruction/tool declarations and complete series context as a stable prefix;
    append patch requests, prior replies, and source evidence in order. Bind each

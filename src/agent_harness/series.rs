@@ -25,6 +25,128 @@ pub struct SeriesOutcome {
     pub execution: session::HarnessOutcome,
 }
 
+pub struct SequentialReviewSession<'a> {
+    request: SeriesRequest<'a>,
+    session: session::HarnessSession,
+    selected: Vec<i64>,
+    completed: usize,
+    stopped: bool,
+    status: Option<session::HarnessStatus>,
+    instruction_fingerprint: String,
+}
+
+pub struct CheckpointResult {
+    pub patch_index: i64,
+    pub artifacts: Option<ReviewArtifacts>,
+}
+
+impl<'a> SequentialReviewSession<'a> {
+    pub fn new(
+        tools: &ToolBox,
+        instructions: &InstructionSnapshot,
+        request: SeriesRequest<'a>,
+        limits: &AgentHarnessSettings,
+    ) -> Result<Self> {
+        if limits.strategy != HarnessStrategy::SequentialPatches {
+            bail!("Sequential runner requires explicit sequential_patches strategy");
+        }
+        let context = build_sequential_context(&request)?;
+        let selected = request
+            .input
+            .patches
+            .iter()
+            .filter(|patch| request.selected_indexes.contains(&patch.index))
+            .map(|patch| patch.index)
+            .collect();
+        let mut session = session::HarnessSession::new(tools, instructions, limits)?;
+        session.seed_context(&context)?;
+        Ok(Self {
+            request,
+            session,
+            selected,
+            completed: 0,
+            stopped: false,
+            status: None,
+            instruction_fingerprint: instructions.fingerprint.clone(),
+        })
+    }
+
+    pub async fn advance(
+        &mut self,
+        provider: &dyn AiProvider,
+        tools: &ToolBox,
+        cancellation: impl std::future::Future<Output = ()>,
+    ) -> Result<Option<CheckpointResult>> {
+        if self.stopped || self.completed == self.selected.len() {
+            return Ok(None);
+        }
+        let patch_index = self.selected[self.completed];
+        let prompt = build_checkpoint_request(&self.request, patch_index)?;
+        let mut status = self
+            .session
+            .checkpoint(provider, tools, &prompt, cancellation)
+            .await;
+        let artifacts = if let session::HarnessStatus::Completed { report } = &status {
+            match parse_artifacts(report, self.request.input, &[patch_index]) {
+                Ok(artifacts) => Some(artifacts),
+                Err(error) => {
+                    status = session::HarnessStatus::Failed {
+                        reason: format!("Invalid checkpoint artifacts: {error:#}"),
+                    };
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if artifacts.is_some() {
+            self.completed += 1;
+        } else {
+            self.stopped = true;
+        }
+        self.status = Some(status);
+        Ok(Some(CheckpointResult {
+            patch_index,
+            artifacts,
+        }))
+    }
+
+    pub fn trace(&self) -> &session::HarnessTrace {
+        &self.session.trace
+    }
+
+    pub fn status(&self) -> Option<&session::HarnessStatus> {
+        self.status.as_ref()
+    }
+
+    pub fn abort(&mut self, reason: String) {
+        self.stopped = true;
+        self.status = Some(session::HarnessStatus::Failed { reason });
+    }
+
+    pub fn into_outcome(self) -> session::HarnessOutcome {
+        let status = match self.status {
+            Some(session::HarnessStatus::Completed { report })
+                if self.completed == self.selected.len() =>
+            {
+                session::HarnessStatus::Completed { report }
+            }
+            Some(session::HarnessStatus::Completed { .. }) | None => {
+                session::HarnessStatus::Failed {
+                    reason: "Sequential review stopped before all selected checkpoints completed"
+                        .to_string(),
+                }
+            }
+            Some(status) => status,
+        };
+        session::HarnessOutcome {
+            status,
+            trace: self.session.trace,
+            instruction_fingerprint: self.instruction_fingerprint,
+        }
+    }
+}
+
 pub async fn review(
     provider: &dyn AiProvider,
     tools: &ToolBox,
@@ -294,6 +416,183 @@ mod tests {
     use crate::ai::{AiRequest, AiResponse, AiUsage, ProviderCapabilities};
     use crate::worker::PatchInput;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SequentialProvider {
+        calls: AtomicUsize,
+        corrupt_second: bool,
+        prefix: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AiProvider for SequentialProvider {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(request.tools.is_none());
+            let context: serde_json::Value =
+                serde_json::from_str(request.messages[0].content.as_deref().unwrap())?;
+            assert_eq!(context["contract"], "sequential-series-context-v1");
+            let checkpoint: serde_json::Value =
+                serde_json::from_str(request.messages.last().unwrap().content.as_deref().unwrap())?;
+            let index = checkpoint["patch_index"].as_i64().unwrap();
+            assert_eq!(index, i64::try_from(call + 1)?);
+            if call > 0 {
+                assert!(request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|text| text.contains("Notes for patch 1"))
+                }));
+            }
+            let prompt = crate::ai::claude_cli::build_prompt(&request);
+            {
+                let mut prefix = self.prefix.lock().unwrap();
+                if let Some(previous) = prefix.as_ref() {
+                    assert!(prompt.starts_with(previous));
+                }
+                *prefix = Some(prompt);
+            }
+            let content = json!({
+                "reviewer_notes": format!("Notes for patch {index}"),
+                "reply_drafts": [{ "patch_index": if self.corrupt_second && call == 1 { 999 } else { index },
+                    "message_id": checkpoint["message_id"], "body": "Complete reply." }],
+            }).to_string();
+            Ok(AiResponse {
+                content: Some(content),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                truncated: false,
+                usage: Some(AiUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    cached_tokens: Some(5),
+                }),
+            })
+        }
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "fake".to_string(),
+                context_window_size: 10000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_runner_preserves_order_prefix_and_stops_without_repairs() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("agent.md"), "Review source.")?;
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )?;
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        let input = series();
+        let baseline = "a".repeat(40);
+        for (corrupt_second, max_input_tokens) in [(false, 100), (true, 100), (false, 15)] {
+            let limits = AgentHarnessSettings {
+                strategy: HarnessStrategy::SequentialPatches,
+                instruction_files: vec!["agent.md".into()],
+                max_generations: 3,
+                max_tool_calls: 4,
+                max_input_tokens,
+                max_output_tokens: 100,
+                timeout_seconds: 10,
+            };
+            assert!(limits.validate().is_err());
+            let request = SeriesRequest {
+                input: &input,
+                baseline: &baseline,
+                selected_indexes: &[2, 1],
+                cover_letter: None,
+                max_bytes: 100000,
+            };
+            let provider = SequentialProvider {
+                calls: AtomicUsize::new(0),
+                corrupt_second,
+                prefix: std::sync::Mutex::new(None),
+            };
+            let mut runner = SequentialReviewSession::new(&tools, &instructions, request, &limits)?;
+            let first = runner
+                .advance(&provider, &tools, std::future::pending())
+                .await?
+                .unwrap();
+            assert_eq!(first.patch_index, 1);
+            assert!(first.artifacts.is_some());
+            let second = runner
+                .advance(&provider, &tools, std::future::pending())
+                .await?
+                .unwrap();
+            assert_eq!(second.patch_index, 2);
+            let success = !corrupt_second && max_input_tokens == 100;
+            assert_eq!(second.artifacts.is_some(), success);
+            assert!(
+                runner
+                    .advance(&provider, &tools, std::future::pending())
+                    .await?
+                    .is_none()
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(runner.trace().usage.prompt_tokens, 20);
+            let outcome = runner.into_outcome();
+            assert_eq!(
+                matches!(outcome.status, session::HarnessStatus::Completed { .. }),
+                success
+            );
+            assert_eq!(outcome.trace.history.len(), 5);
+            assert_eq!(outcome.trace.call_usage.len(), 2);
+            if max_input_tokens == 15 {
+                assert_eq!(outcome.trace.input_token_overshoot, 5);
+            }
+        }
+        let limits = AgentHarnessSettings {
+            strategy: HarnessStrategy::SequentialPatches,
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 3,
+            max_tool_calls: 4,
+            max_input_tokens: 100,
+            max_output_tokens: 100,
+            timeout_seconds: 10,
+        };
+        let request = SeriesRequest {
+            input: &input,
+            baseline: &baseline,
+            selected_indexes: &[2],
+            cover_letter: None,
+            max_bytes: 100000,
+        };
+        let provider = SequentialProvider {
+            calls: AtomicUsize::new(0),
+            corrupt_second: false,
+            prefix: std::sync::Mutex::new(None),
+        };
+        let mut runner = SequentialReviewSession::new(&tools, &instructions, request, &limits)?;
+        assert!(
+            runner
+                .advance(&provider, &tools, std::future::ready(()))
+                .await?
+                .unwrap()
+                .artifacts
+                .is_none()
+        );
+        assert!(matches!(
+            runner.status(),
+            Some(session::HarnessStatus::Cancelled)
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            runner
+                .advance(&provider, &tools, std::future::pending())
+                .await?
+                .is_none()
+        );
+        assert!(matches!(
+            runner.into_outcome().status,
+            session::HarnessStatus::Cancelled
+        ));
+        Ok(())
+    }
 
     #[test]
     fn checkpoint_contract_binds_selected_patch_parent_and_reply_identity() {

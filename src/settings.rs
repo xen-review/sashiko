@@ -1104,6 +1104,10 @@ impl AgentHarnessSettings {
         if self.strategy != HarnessStrategy::WholeSeries {
             return Err("[review.agent_harness] sequential_patches is not enabled yet; checkpoint continuation and persistence are required".to_string());
         }
+        self.validate_limits()
+    }
+
+    pub(crate) fn validate_limits(&self) -> Result<(), String> {
         if self.instruction_files.is_empty()
             || self
                 .instruction_files
