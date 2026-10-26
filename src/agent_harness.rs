@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod series;
 pub mod session;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
