@@ -44,6 +44,37 @@ No UI or completed-result schema change is needed for this first event increment
 
 ## Remaining Gates
 
+### Concurrent Patch Progress Ownership
+
+The reviewer explicitly spawns sibling patch subprocesses for one series when
+semaphore permits are available. Each subprocess calls begin(patchset_id), so
+the second worker replaces the first entry and silently rejects the first
+worker's later updates as stale. Per-review persisted diagnostics are already
+independent, but active snapshots cannot represent all legitimate siblings.
+
+Scope active entries by patchset and patch index for workflow subprocesses.
+Replacing a worker for the same patch still rejects its older run ID and old
+cleanup cannot clear the replacement. Different patch indexes remain separate;
+one worker's cleanup removes only its own entry. Keep whole-series begin for
+the harness and existing single-run callers. The latest updated nonempty line
+remains the display string; merge active reports deterministically with the
+same 256-report/truncation contract, never summing duplicate snapshots.
+
+First add a registry test with two sibling patch workers: both reports survive
+interleaved updates, dropping one preserves the other, and replacing one patch
+rejects only that patch's stale events. Keep existing single-run/stale-cleanup
+checks and aggregate bounds. No schema, provider, scheduler, model call, review
+replay or delivery behavior changes in this increment.
+
+The focused registry group now passes five tests, including sibling updates,
+cleanup/replacement, aggregate truncation and the original whole-series scope.
+The subprocess reuses review_index for its scope. The display line follows the
+latest updated worker; snapshot aggregation is deterministic and capped at 256
+without summing counters. Full make check-pr passes 1,165 library tests (two
+ignored), 49 main, seven CLI, 28 integration, formatting and all Clippy profiles.
+The first compile check caught a parameter-name mismatch, repaired locally
+before rerunning that same focused group. No live parallel review was induced.
+
 ### Failed-Stage Reporting Increment
 
 SessionFailure already retains provider-reported usage and coverage, but the

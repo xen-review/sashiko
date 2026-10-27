@@ -51,11 +51,13 @@ pub struct ReviewProgressRegistry {
 #[derive(Default)]
 struct ReviewProgressRegistryInner {
     next_run_id: std::sync::atomic::AtomicU64,
-    entries: std::sync::Mutex<std::collections::HashMap<i64, ActiveReviewProgress>>,
+    next_update_id: std::sync::atomic::AtomicU64,
+    entries: std::sync::Mutex<std::collections::HashMap<(i64, Option<i64>), ActiveReviewProgress>>,
 }
 
 struct ActiveReviewProgress {
     run_id: u64,
+    update_id: u64,
     message: String,
     stage_usage: ActiveStageUsageSnapshot,
 }
@@ -126,20 +128,30 @@ impl ReviewProgressRegistry {
     pub fn current(&self, patchset_id: i64) -> Option<String> {
         let entries = self.lock_entries();
         entries
-            .get(&patchset_id)
-            .map(|entry| entry.message.clone())
-            .filter(|message| !message.is_empty())
+            .iter()
+            .filter(|((id, _), entry)| *id == patchset_id && !entry.message.is_empty())
+            .max_by_key(|(_, entry)| entry.update_id)
+            .map(|(_, entry)| entry.message.clone())
     }
 
     pub(crate) fn begin(&self, patchset_id: i64) -> ReviewProgressCleanup {
+        self.begin_scoped(patchset_id, None)
+    }
+
+    fn begin_scoped(&self, patchset_id: i64, patch_index: Option<i64>) -> ReviewProgressCleanup {
         let run_id = self
             .inner
             .next_run_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.lock_entries().insert(
-            patchset_id,
+        let mut entries = self.lock_entries();
+        entries.retain(|(id, scope), _| {
+            *id != patchset_id || (patch_index.is_some() && scope.is_some())
+        });
+        entries.insert(
+            (patchset_id, patch_index),
             ActiveReviewProgress {
                 run_id,
+                update_id: 0,
                 message: String::new(),
                 stage_usage: ActiveStageUsageSnapshot::default(),
             },
@@ -153,20 +165,36 @@ impl ReviewProgressRegistry {
 
     fn update(&self, patchset_id: i64, run_id: u64, message: &str) {
         let mut entries = self.lock_entries();
-        if let Some(entry) = entries.get_mut(&patchset_id)
-            && entry.run_id == run_id
+        if let Some((_, entry)) = entries
+            .iter_mut()
+            .find(|((id, _), entry)| *id == patchset_id && entry.run_id == run_id)
         {
             entry.message = message.to_string();
+            entry.update_id = self
+                .inner
+                .next_update_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     pub fn stage_usage(&self, patchset_id: i64) -> Option<ActiveStageUsageSnapshot> {
         let entries = self.lock_entries();
-        let entry = entries.get(&patchset_id)?;
-        if entry.stage_usage.completed_stages.is_empty() && !entry.stage_usage.truncated {
+        let mut workers = entries
+            .iter()
+            .filter(|((id, _), _)| *id == patchset_id)
+            .collect::<Vec<_>>();
+        workers.sort_by_key(|((_, scope), _)| *scope);
+        let mut snapshot = ActiveStageUsageSnapshot::default();
+        for (_, entry) in workers {
+            snapshot.truncated |= entry.stage_usage.truncated;
+            for report in &entry.stage_usage.completed_stages {
+                snapshot.record(report.clone());
+            }
+        }
+        if snapshot.completed_stages.is_empty() && !snapshot.truncated {
             return None;
         }
-        Some(entry.stage_usage.clone())
+        Some(snapshot)
     }
 
     fn record_stage_usage(
@@ -176,9 +204,9 @@ impl ReviewProgressRegistry {
         usage: crate::local_review::CompletedStageUsage,
     ) {
         let mut entries = self.lock_entries();
-        let Some(entry) = entries
-            .get_mut(&patchset_id)
-            .filter(|entry| entry.run_id == run_id)
+        let Some((_, entry)) = entries
+            .iter_mut()
+            .find(|((id, _), entry)| *id == patchset_id && entry.run_id == run_id)
         else {
             return;
         };
@@ -194,17 +222,15 @@ impl ReviewProgressRegistry {
 
     fn clear(&self, patchset_id: i64, run_id: u64) {
         let mut entries = self.lock_entries();
-        if entries
-            .get(&patchset_id)
-            .is_some_and(|entry| entry.run_id == run_id)
-        {
-            entries.remove(&patchset_id);
-        }
+        entries.retain(|(id, _), entry| *id != patchset_id || entry.run_id != run_id);
     }
 
     fn lock_entries(
         &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<i64, ActiveReviewProgress>> {
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<(i64, Option<i64>), ActiveReviewProgress>,
+    > {
         self.inner
             .entries
             .lock()
@@ -234,6 +260,99 @@ impl Drop for ReviewProgressCleanup {
 #[cfg(test)]
 mod review_progress_tests {
     use super::ReviewProgressRegistry;
+
+    #[test]
+    fn sibling_progress_survives_updates_cleanup_and_replacement() {
+        let registry = ReviewProgressRegistry::default();
+        let first = registry.begin_scoped(1, Some(1));
+        let second = registry.begin_scoped(1, Some(2));
+        let usage = crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "implementation".into(),
+            outcome: crate::workflow::events::StageUsageOutcome::Completed,
+            tokens_in: 7,
+            tokens_out: 2,
+            tokens_cached: 0,
+            usage_coverage: None,
+        };
+        first.report_usage(usage.clone());
+        second.report_usage(crate::local_review::CompletedStageUsage {
+            patch_index: 2,
+            ..usage.clone()
+        });
+        first.report("patch 1: implementation");
+        second.report("patch 2: implementation");
+        first.report("patch 1: verification");
+        assert_eq!(
+            registry.current(1).as_deref(),
+            Some("patch 1: verification")
+        );
+        assert_eq!(
+            registry
+                .stage_usage(1)
+                .unwrap()
+                .completed_stages
+                .iter()
+                .map(|report| report.patch_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let replacement = registry.begin_scoped(1, Some(1));
+        first.report("stale progress");
+        first.report_usage(usage.clone());
+        drop(first);
+        assert_eq!(
+            registry.current(1).as_deref(),
+            Some("patch 2: implementation")
+        );
+        assert_eq!(registry.stage_usage(1).unwrap().completed_stages.len(), 1);
+        replacement.report("replacement patch 1");
+        replacement.report_usage(usage);
+        drop(second);
+        assert_eq!(registry.current(1).as_deref(), Some("replacement patch 1"));
+        assert_eq!(
+            registry.stage_usage(1).unwrap().completed_stages[0].patch_index,
+            1
+        );
+        assert!(registry.stage_usage(2).is_none());
+        drop(replacement);
+        assert!(registry.current(1).is_none());
+        assert!(registry.stage_usage(1).is_none());
+    }
+
+    #[test]
+    fn sibling_stage_aggregation_remains_bounded() {
+        let registry = ReviewProgressRegistry::default();
+        let first = registry.begin_scoped(1, Some(1));
+        let second = registry.begin_scoped(1, Some(2));
+        for stage_index in 0..200 {
+            for (worker, patch_index) in [(&first, 1), (&second, 2)] {
+                worker.report_usage(crate::local_review::CompletedStageUsage {
+                    patch_index,
+                    stage: format!("stage-{stage_index}"),
+                    outcome: crate::workflow::events::StageUsageOutcome::Unknown,
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    tokens_cached: 0,
+                    usage_coverage: None,
+                });
+            }
+        }
+        let snapshot = registry.stage_usage(1).unwrap();
+        assert_eq!(snapshot.completed_stages.len(), 256);
+        assert!(snapshot.truncated);
+        drop(second);
+        let snapshot = registry.stage_usage(1).unwrap();
+        assert_eq!(snapshot.completed_stages.len(), 200);
+        assert!(!snapshot.truncated);
+        let whole = registry.begin(1);
+        first.report("stale patch worker");
+        assert!(registry.current(1).is_none());
+        assert!(registry.stage_usage(1).is_none());
+        whole.report("whole series");
+        drop(first);
+        assert_eq!(registry.current(1).as_deref(), Some("whole series"));
+    }
 
     #[tokio::test]
     async fn retained_stage_usage_is_bounded_and_legacy_unknown() -> anyhow::Result<()> {
@@ -3243,7 +3362,7 @@ async fn run_review_tool_with_cmd_and_overrides(
     cmd.kill_on_drop(true);
 
     let mut child = cmd.spawn()?;
-    let progress_guard = progress_registry.begin(patchset_id);
+    let progress_guard = progress_registry.begin_scoped(patchset_id, review_index);
     let progress_run_id = progress_guard.run_id;
 
     let mut stderr_task = child.stderr.take().map(|stderr| {

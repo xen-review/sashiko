@@ -736,6 +736,17 @@ hostile names and 390/1440-pixel containment. No live failure, model turn,
 replay or cancellation was induced. Complete unreported/in-flight/native and
 harness accounting remain open.
 
+An additional active-progress fix follows the explicit concurrent patch loop:
+workflow subprocesses now own entries scoped by patchset and patch index rather
+than overwriting one patchset entry. Legitimate siblings retain active reports;
+same-patch replacements still reject stale updates/cleanup. The latest updated
+nonempty line remains the display string. Merged active reports stay bounded
+at 256 with deterministic ordering and truncation, without summing duplicates.
+Per-review persisted diagnostics and review scheduling remain unchanged.
+Five focused registry tests and full make check-pr pass: 1,165 library tests
+(two ignored), 49 main, seven CLI, 28 integration and all lint profiles. No
+live parallel series or model call was queued to test this correction.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

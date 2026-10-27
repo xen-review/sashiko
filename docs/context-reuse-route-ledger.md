@@ -5,6 +5,46 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Failed-Stage Rollout and Budget Boundary
+
+At 17:50 CET on 2026-10-27, signed/pushed 5b805bd2 is deployed on schema 18.
+SessionFailure's measured usage now reaches an explicitly failed-stage report
+before returning the original error. Failed accounting never emits successful
+counted-stage completion. Records carry completed/failed/unknown outcomes;
+legacy records default to Unknown, as verified on both live detail routes for
+series 469. Full make check-pr passes 1,163 library tests (two ignored), 49 main,
+seven CLI, 28 integration, formatting and all Clippy profiles. Fake measured
+truncation, unreported provider failure, typed propagation, storage/defaults and
+synthetic 390/1440-pixel outcome/escaping/layout checks pass. A viewport capture
+also succeeds. No live failure, cancellation, replay or model trial was induced.
+
+Private before-failed-stage-usage-20261027-165003.db passed quick_check; matching
+rollback binary and Settings snapshot remain outside Git. Running/release hash:
+026c08aabcf10b521cfbe5dd58bb51b9b480c4020a9f6f1d8c3dbfd1a9d88ee5.
+Review counts and the real retained snapshot are unchanged; Reviewed stays 111
+and the queue is empty. Auth and muted delivery remain unchanged. The private
+fixture is stopped and the shared browser is back on live series 469.
+
+At 17:51:42 CET fresh authenticated metadata reported 27% five-hour/40% weekly,
+reset 19:27:29 CET, following 42% at 17:19 and 29% at 17:45. These shared-account
+percentages include other consumers and are not exact tokens or isolated daemon
+burn. At the verified 17:52 idle boundary, only ai.codex_cli.effort changed from
+medium to low to conserve reserve. gpt-6-luna, 1,800-second review timeout,
+authentication, caching and all delivery safety settings remain. Structured
+before/after TOML equality and no process-level effort overrides are verified;
+service PID 1208577 is active. Private before-luna-low-20261027-165216.db passed
+quick_check and its config snapshot is retained. This is a one-time announced
+operator choice, not automatic effort adaptation or confirmed backend-effective
+effort. No active request was changed and no extra review was queued.
+
+Next local issue: the explicit concurrent patch loop gives sibling workers one
+patchset-only progress entry, so they overwrite each other's active snapshots.
+The selected design scopes workflow entries by patch index while preserving
+stale replacement rejection and bounded aggregation. Persisted per-review
+diagnostics remain independent. Complete in-flight/native/harness counters,
+backend-effective effort, opaque quota-account binding and first live staging
+publication remain separate unfinished gates. Self-review is still prohibited.
+
 ### Completion-Only Profile Correction
 
 At 17:32 CET on 2026-10-27, signed/pushed 379e0805 is deployed with schema 18.
