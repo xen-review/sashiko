@@ -195,7 +195,9 @@ wall-clock reset is never proof that quota reset or that another consumer left
 enough. A late wakeup still needs a fresh sample above the upper threshold.
 
 Low quota records the reported reset as an earliest resume barrier. New credible
-low samples may move the barrier later, never earlier within the same pause.
+samples observed before that barrier may move it later, even when their remaining
+allowance is already above the resume threshold. They never move it earlier
+within the same pause.
 A shifted/late reset therefore cannot accidentally unlock the account. Unknown,
 stale, future-dated, malformed, wrong-account or already-expired-window samples
 pause admission and schedule a bounded retry without busy polling. Preserve an

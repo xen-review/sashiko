@@ -223,6 +223,13 @@ impl CodexAccountQuotaPolicy {
                 Some(barrier.map_or(sample.resets_at, |previous| previous.max(sample.resets_at)));
             return self.pause(now, state, AccountQuotaPauseReason::LowAllowance, barrier);
         }
+        let barrier = barrier.map(|previous| {
+            if sample.observed_at < previous {
+                previous.max(sample.resets_at)
+            } else {
+                previous
+            }
+        });
         if let Some(barrier) = barrier
             && (now < barrier || sample.observed_at < barrier)
         {
@@ -483,6 +490,53 @@ mod tests {
                 resume_not_before: Some(200),
                 next_check_at: 560
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_policy_retains_later_reset_reported_before_barrier() -> Result<()> {
+        let policy = policy();
+        let paused = policy
+            .evaluate(10, &ready(), Some(&sample(10.0, 10, 100)))?
+            .state;
+        let earlier = policy
+            .evaluate(50, &paused, Some(&sample(80.0, 50, 90)))?
+            .state;
+        assert_eq!(
+            earlier.admission,
+            AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::AwaitingResetEvidence,
+                resume_not_before: Some(100),
+                next_check_at: 100,
+            }
+        );
+        let shifted = policy
+            .evaluate(90, &paused, Some(&sample(80.0, 90, 200)))?
+            .state;
+        assert_eq!(
+            shifted.admission,
+            AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::AwaitingResetEvidence,
+                resume_not_before: Some(200),
+                next_check_at: 200,
+            }
+        );
+        let late = policy
+            .evaluate(101, &paused, Some(&sample(80.0, 90, 200)))?
+            .state;
+        assert_eq!(late.admission, shifted.admission);
+        assert_eq!(
+            policy
+                .evaluate(100, &shifted, Some(&sample(80.0, 100, 200)))?
+                .gate,
+            QuotaAdmissionGate::Paused
+        );
+        assert_eq!(
+            policy
+                .evaluate(200, &shifted, Some(&sample(80.0, 200, 300)))?
+                .gate,
+            QuotaAdmissionGate::FiveHourReady
         );
         Ok(())
     }

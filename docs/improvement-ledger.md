@@ -582,6 +582,12 @@ Design decisions and implementation gates:
 
 ### P2: Plan Codex Account Quota and Pause/Resume Hysteresis
 
+The unwired policy also retains a later reset reported by a fresh high-allowance
+sample observed before the existing pause barrier. A fake-clock regression
+reproduced the previous early wakeup and now covers earlier and later resets,
+late evaluation and the post-reset observation; make check-pr also passes. This
+does not enable scheduling or authorize a provider call.
+
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
 a disabled pure five-hour admission policy as the first increment. Its five
