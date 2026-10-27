@@ -171,3 +171,34 @@ existing renderer displays that distinction without inferring uncached input.
 No migration or historical rewrite is performed: older synthetic zero values
 cannot be distinguished retrospectively from measured zeros. This correction
 does not add live harness events or account for an unreported in-flight call.
+
+## Native Harness Live Progress
+
+Add a series-scoped, optional progress callback to the existing harness session.
+Its bounded snapshot reports attempted provider calls, calls with reported
+usage, attempted source-tool calls, whether a provider call is in flight, and
+the aggregate usage from reported calls only. Before the first reported usage,
+the aggregate is absent rather than a measured zero. A missing cached count
+stays unknown; completed reports do not account for an in-flight or failed call
+that never returned usage. Counts describe Sashiko operations, not backend
+generations or billing. Snapshots contain no prompts, source contents, model
+responses, account identifiers or provider error text.
+
+Emit a snapshot before a provider call, after a response's usage is recorded,
+after a source-tool attempt, and when a checkpoint ends or is cancelled. A
+callback is optional and must not affect the session's limits, history, status,
+cancellation or retries. Fake providers must cover known and missing cache
+counts, in-flight state, tool attempts and cancellation without a real call.
+
+The session callback and bounded snapshot are now implemented. Fake-provider
+tests cover provider start and completion, cumulative reported usage, source
+tool attempts, missing usage, missing versus explicit-zero cache counts, and
+cancellation. The callback has no daemon registry, API or UI caller yet.
+
+As a later increment, expose only the latest snapshot through the existing
+run-scoped progress registry and permission-checked detail APIs, with a single
+series attribution for both whole-series and sequential strategies. The UI
+must distinguish reported calls from attempted and in-flight calls and must
+not sum the same series snapshot across patch cards. Retained terminal records,
+backend-native generations, elapsed limits and account admission remain separate
+work; no model or daemon configuration is changed by adding the callback.

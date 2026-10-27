@@ -779,6 +779,13 @@ gate: 1,169 library tests (two ignored), 49 main, seven CLI, 28 integration,
 formatting and all Clippy profiles. Native live progress and complete accounting
 for unreported in-flight calls remain separate open work.
 
+The next native progress foundation adds an optional session callback with
+series-scoped attempted-call and source-tool counts, in-flight state, and usage
+from reported calls only. Fake-provider checks cover missing usage, missing
+versus zero cache counts, tool attempts and cancellation. The callback is not
+yet wired to the daemon registry, API or UI, and does not expose backend-native
+generations or account for unreported in-flight tokens.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

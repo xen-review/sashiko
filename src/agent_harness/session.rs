@@ -40,6 +40,27 @@ pub struct HarnessTrace {
     pub output_token_overshoot: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessProgress {
+    pub provider_calls_attempted: usize,
+    pub provider_calls_with_usage: usize,
+    pub tool_calls_attempted: usize,
+    pub provider_in_flight: bool,
+    pub reported_usage: Option<AiUsage>,
+}
+
+impl HarnessTrace {
+    fn progress(&self, provider_in_flight: bool) -> HarnessProgress {
+        HarnessProgress {
+            provider_calls_attempted: self.provider_calls,
+            provider_calls_with_usage: self.call_usage.len(),
+            tool_calls_attempted: self.tool_calls,
+            provider_in_flight,
+            reported_usage: (!self.call_usage.is_empty()).then(|| self.usage.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HarnessCallUsage {
     pub provider_call: usize,
@@ -60,6 +81,7 @@ pub struct HarnessSession {
     limits: AgentHarnessSettings,
     deadline: tokio::time::Instant,
     stopped: bool,
+    progress: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
     pub trace: HarnessTrace,
 }
 
@@ -94,8 +116,16 @@ impl HarnessSession {
             limits: limits.clone(),
             deadline: tokio::time::Instant::now() + Duration::from_secs(limits.timeout_seconds),
             stopped: false,
+            progress: None,
             trace: HarnessTrace::default(),
         })
+    }
+
+    pub fn set_progress_callback(
+        &mut self,
+        callback: impl Fn(HarnessProgress) + Send + Sync + 'static,
+    ) {
+        self.progress = Some(Box::new(callback));
     }
 
     pub fn seed_context(&mut self, context: &str) -> Result<()> {
@@ -125,6 +155,9 @@ impl HarnessSession {
         }
         if tokio::time::Instant::now() >= self.deadline {
             self.stopped = true;
+            if let Some(callback) = &self.progress {
+                callback(self.trace.progress(false));
+            }
             return HarnessStatus::TimedOut;
         }
         let status = tokio::select! {
@@ -140,6 +173,9 @@ impl HarnessSession {
             },
         };
         self.stopped = !matches!(&status, HarnessStatus::Completed { .. });
+        if let Some(callback) = &self.progress {
+            callback(self.trace.progress(false));
+        }
         status
     }
 }
@@ -204,6 +240,11 @@ async fn run_session(
     let limits = &session.limits;
     let trace = &mut session.trace;
     let declarations = &session.declarations;
+    let report_progress = |trace: &HarnessTrace, provider_in_flight| {
+        if let Some(callback) = &session.progress {
+            callback(trace.progress(provider_in_flight));
+        }
+    };
     trace
         .history
         .push(message(AiRole::User, Some(series_prompt.to_string()), None));
@@ -214,6 +255,7 @@ async fn run_session(
             bail!("harness token threshold reached; refusing another provider call");
         }
         trace.provider_calls += 1;
+        report_progress(trace, true);
         let response = provider
             .generate_content(AiRequest {
                 system: Some(session.system.clone()),
@@ -235,6 +277,7 @@ async fn run_session(
             response_history_end: trace.history.len(),
             usage,
         });
+        report_progress(trace, false);
         trace.input_token_overshoot = trace
             .usage
             .prompt_tokens
@@ -290,6 +333,7 @@ async fn run_session(
                 Some(result.to_string()),
                 Some(call.id),
             ));
+            report_progress(trace, false);
         }
     }
     bail!("harness provider-call limit reached without a final response")
@@ -347,7 +391,7 @@ mod tests {
     use crate::ai::{AiResponse, ProviderCapabilities, ToolCall};
     use std::collections::VecDeque;
     use std::sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -719,6 +763,165 @@ mod tests {
         assert!(matches!(outcome.status, HarnessStatus::TimedOut));
         assert_eq!(outcome.trace.provider_calls, 1);
         assert_eq!(outcome.trace.history.len(), 1);
+    }
+
+    #[test]
+    fn progress_reports_only_recorded_usage() {
+        let mut trace = HarnessTrace {
+            provider_calls: 1,
+            ..Default::default()
+        };
+        let in_flight = trace.progress(true);
+        assert_eq!(in_flight.provider_calls_attempted, 1);
+        assert_eq!(in_flight.provider_calls_with_usage, 0);
+        assert!(in_flight.provider_in_flight);
+        assert!(in_flight.reported_usage.is_none());
+
+        let usage = AiUsage {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            total_tokens: 12,
+            cached_tokens: None,
+        };
+        accumulate_usage(&mut trace.usage, &usage, true).unwrap();
+        trace.call_usage.push(HarnessCallUsage {
+            provider_call: 1,
+            response_history_end: 1,
+            usage,
+        });
+        trace.tool_calls = 2;
+        let reported = trace.progress(false);
+        assert_eq!(reported.provider_calls_with_usage, 1);
+        assert_eq!(reported.tool_calls_attempted, 2);
+        assert!(!reported.provider_in_flight);
+        let reported_usage = reported.reported_usage.unwrap();
+        assert_eq!(reported_usage.prompt_tokens, 10);
+        assert_eq!(reported_usage.cached_tokens, None);
+
+        let mut zero_trace = HarnessTrace::default();
+        let zero = AiUsage {
+            cached_tokens: Some(0),
+            ..Default::default()
+        };
+        accumulate_usage(&mut zero_trace.usage, &zero, true).unwrap();
+        zero_trace.call_usage.push(HarnessCallUsage {
+            provider_call: 1,
+            response_history_end: 1,
+            usage: zero,
+        });
+        let serialized = serde_json::to_value(zero_trace.progress(false)).unwrap();
+        assert_eq!(serialized["reported_usage"]["cached_tokens"], 0);
+    }
+
+    #[tokio::test]
+    async fn progress_callback_tracks_calls_tools_and_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )
+        .unwrap();
+        let limits = AgentHarnessSettings {
+            strategy: Default::default(),
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 2,
+            max_tool_calls: 5,
+            max_input_tokens: 1000,
+            max_output_tokens: 100,
+            timeout_seconds: 10,
+        };
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        let mut first = response(None, 1, 20);
+        first.usage.as_mut().unwrap().cached_tokens = None;
+        let provider = Provider {
+            replies: Mutex::new(VecDeque::from([first, response(Some("Report"), 0, 25)])),
+            calls: AtomicUsize::new(0),
+            stall: false,
+            prompt: Mutex::new(None),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut session = HarnessSession::new(&tools, &instructions, &limits).unwrap();
+        let captured = Arc::clone(&events);
+        session.set_progress_callback(move |progress| captured.lock().unwrap().push(progress));
+        assert!(matches!(
+            session
+                .checkpoint(&provider, &tools, "Review series", std::future::pending())
+                .await,
+            HarnessStatus::Completed { .. }
+        ));
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 6);
+            assert!(events[0].provider_in_flight);
+            assert!(events[0].reported_usage.is_none());
+            assert_eq!(events[1].provider_calls_with_usage, 1);
+            assert_eq!(events[2].tool_calls_attempted, 1);
+            assert!(events[3].provider_in_flight);
+            assert_eq!(events[3].provider_calls_attempted, 2);
+            assert_eq!(events[3].provider_calls_with_usage, 1);
+            assert_eq!(events[4].provider_calls_with_usage, 2);
+            let usage = events[4].reported_usage.as_ref().unwrap();
+            assert_eq!(usage.prompt_tokens, 45);
+            assert_eq!(usage.cached_tokens, None);
+            assert!(!events[5].provider_in_flight);
+        }
+
+        let mut missing = response(Some("Report"), 0, 20);
+        missing.usage = None;
+        let provider = Provider {
+            replies: Mutex::new(VecDeque::from([missing])),
+            calls: AtomicUsize::new(0),
+            stall: false,
+            prompt: Mutex::new(None),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut session = HarnessSession::new(&tools, &instructions, &limits).unwrap();
+        let captured = Arc::clone(&events);
+        session.set_progress_callback(move |progress| captured.lock().unwrap().push(progress));
+        assert!(matches!(
+            session
+                .checkpoint(&provider, &tools, "Review series", std::future::pending())
+                .await,
+            HarnessStatus::Failed { .. }
+        ));
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(events[0].provider_in_flight);
+            assert!(!events[1].provider_in_flight);
+            assert_eq!(events[1].provider_calls_with_usage, 0);
+            assert!(events[1].reported_usage.is_none());
+        }
+
+        let provider = Provider {
+            replies: Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
+            stall: true,
+            prompt: Mutex::new(None),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut session = HarnessSession::new(&tools, &instructions, &limits).unwrap();
+        let captured = Arc::clone(&events);
+        session.set_progress_callback(move |progress| captured.lock().unwrap().push(progress));
+        let cancellation = async {
+            while provider.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        };
+        assert!(matches!(
+            session
+                .checkpoint(&provider, &tools, "Review series", cancellation)
+                .await,
+            HarnessStatus::Cancelled
+        ));
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].provider_in_flight);
+        assert!(!events[1].provider_in_flight);
+        assert_eq!(events[1].provider_calls_attempted, 1);
+        assert!(events[1].reported_usage.is_none());
     }
 
     #[test]
