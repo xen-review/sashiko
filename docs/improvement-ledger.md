@@ -5,11 +5,12 @@ changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Operating Constraints
 
-- Prefer `gpt-6-luna`, low effort by default; the runtime currently uses medium
-  after the malformed-output recovery. Bounded premium Codex subscription trials
-  are now authorized only under the agent's fresh strictly-above-50% gate.
-  Start Terra/Sol at low or medium, never above high. A reset alone does not
-  authorize broad Sol use, metered billing, or paid overages.
+- Prefer verified `gpt-6.1-terra` for Xen reviews, with high effort for review
+  tests and low or medium when appropriate. Bounded premium Codex subscription
+  trials require the agent's fresh strictly-above-50% gate before every call,
+  sufficient weekly and time reserve, and no paid overages. Other Terra/Sol
+  trials start at low or medium, never above high. A reset alone does not
+  authorize broad Sol use or metered billing.
 - Do not run Sashiko self-review through paid Copilot CLI. Do not spend Sol
   quota to investigate or validate these items without fresh authorization.
 - Preserve muted outbound delivery, completed results, review artifacts, and

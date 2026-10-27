@@ -211,6 +211,32 @@ pub struct CodexSubscriptionQuotaSnapshot {
     pub weekly_resets_at: i64,
 }
 
+const PREMIUM_QUOTA_MAX_AGE_SECONDS: i64 = 20;
+
+fn valid_quota_account_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+impl CodexSubscriptionQuotaSnapshot {
+    pub fn has_fresh_premium_quota(
+        &self,
+        expected_account_key: &str,
+        observation_started_at: i64,
+        now: i64,
+    ) -> bool {
+        valid_quota_account_key(expected_account_key)
+            && self.five_hour.account_key == expected_account_key
+            && observation_started_at >= 0
+            && self.five_hour.observed_at >= observation_started_at
+            && self.five_hour.observed_at <= now
+            && now - self.five_hour.observed_at <= PREMIUM_QUOTA_MAX_AGE_SECONDS
+            && self.five_hour.resets_at > now
+            && self.weekly_resets_at > now
+            && self.five_hour.remaining.exceeds(50.0)
+            && self.weekly_remaining.exceeds(0.0)
+    }
+}
+
 const QUOTA_METADATA_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -303,10 +329,7 @@ async fn read_codex_subscription_quota_with_binary(
     deadline: Duration,
 ) -> Result<CodexSubscriptionQuotaSnapshot> {
     ensure!(
-        expected_account_key.len() == 64
-            && expected_account_key
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit()),
+        valid_quota_account_key(expected_account_key),
         "Invalid expected Codex quota account key"
     );
     ensure!(
@@ -894,6 +917,46 @@ while IFS= read -r request; do :; done
             super::super::quota::RemainingQuotaPercent::new(0.0)?
         );
         assert!(decode_codex_subscription_quota(&account, &limits, &key, -1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn premium_call_quota_requires_fresh_matching_positive_allowances() -> Result<()> {
+        use super::super::quota::RemainingQuotaPercent;
+
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let limits = serde_json::json!({"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,
+            "credits":{"hasCredits":false,"unlimited":false},
+            "primary":{"usedPercent":49.9,"windowDurationMins":300,"resetsAt":200},
+            "secondary":{"usedPercent":99.9,"windowDurationMins":10080,"resetsAt":1000}}});
+        let key = codex_quota_account_key(&account)?;
+        let snapshot = decode_codex_subscription_quota(&account, &limits, &key, 100)?;
+        assert!(snapshot.has_fresh_premium_quota(&key, 100, 100));
+        assert!(snapshot.has_fresh_premium_quota(&key, 99, 120));
+        assert!(!snapshot.has_fresh_premium_quota(&key, 101, 101));
+        assert!(!snapshot.has_fresh_premium_quota(&key, 100, 99));
+        assert!(!snapshot.has_fresh_premium_quota(&key, 100, 121));
+        assert!(!snapshot.has_fresh_premium_quota(&key, -1, 100));
+        assert!(!snapshot.has_fresh_premium_quota("", 100, 100));
+        assert!(!snapshot.has_fresh_premium_quota("other-account", 100, 100));
+        let mut malformed_key = snapshot.clone();
+        malformed_key.five_hour.account_key = "not-a-valid-key".into();
+        assert!(!malformed_key.has_fresh_premium_quota("not-a-valid-key", 100, 100));
+
+        for remaining in [0.0, 49.9, 50.0] {
+            let mut blocked = snapshot.clone();
+            blocked.five_hour.remaining = RemainingQuotaPercent::new(remaining)?;
+            assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
+        }
+        let mut blocked = snapshot.clone();
+        blocked.weekly_remaining = RemainingQuotaPercent::new(0.0)?;
+        assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
+        blocked = snapshot.clone();
+        blocked.five_hour.resets_at = 100;
+        assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
+        blocked = snapshot.clone();
+        blocked.weekly_resets_at = 100;
+        assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
         Ok(())
     }
 

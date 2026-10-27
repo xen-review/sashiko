@@ -77,6 +77,24 @@ persisted state, wakeup scheduling and paused-state API/UI remain later gates.
 This reader neither redeems credits nor enables metered billing or automatic
 effort adaptation. The installed daemon continues its existing admission policy.
 
+## Premium Quota Predicate
+
+The separate has_fresh_premium_quota predicate evaluates an already decoded
+snapshot against a caller-supplied account key, observation start and current
+time. It requires an observation from that query no more than 20 seconds old,
+unexpired five-hour and weekly windows, strictly more than 50% five-hour
+remaining and positive weekly remaining. Invalid times, mismatched identities,
+expired windows and exhausted allowances return false. This is separate from the
+lower-threshold scheduler policy and does not change its decisions.
+
+This predicate is unwired and does not authorize a model call. A caller must
+actually initiate a fresh metadata read for each call, verify subscription
+authentication and billing, establish an account binding, check the permitted
+model and effort, and establish enough weekly and time reserve for the bounded
+review. The login/plan key still cannot prove opaque workspace identity, and
+positive weekly allowance alone does not prove sufficient reserve. Tests use
+decoded fake metadata and do not invoke a model or enable the daemon.
+
 ## Evidence and Ownership
 
 The authenticated Codex app-server metadata reader already reports the shared

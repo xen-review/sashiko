@@ -105,6 +105,10 @@ impl RemainingQuotaPercent {
         );
         Ok(Self(value))
     }
+
+    pub(crate) fn exceeds(self, minimum: f64) -> bool {
+        self.0 > minimum
+    }
 }
 
 #[derive(Debug, Clone)]
