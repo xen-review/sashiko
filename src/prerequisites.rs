@@ -1301,6 +1301,16 @@ mod tests {
                     diff TEXT
                 );
                 CREATE TABLE reviews (id INTEGER PRIMARY KEY);
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    message_id TEXT NOT NULL UNIQUE,
+                    author TEXT,
+                    subject TEXT,
+                    in_reply_to TEXT,
+                    body TEXT,
+                    date INTEGER,
+                    git_blob_hash TEXT
+                );
                 PRAGMA user_version = 11;",
             )
             .await?;
@@ -1327,7 +1337,7 @@ mod tests {
 
         let mut version = db.conn.query("PRAGMA user_version", ()).await?;
         let version: u32 = version.next().await?.expect("user version row").get(0)?;
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         Ok(())
     }
 

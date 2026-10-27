@@ -816,6 +816,7 @@ async fn run_daemon(
         }
     };
 
+    let human_review_enabled = settings.server.human_review_evidence;
     let parser_handle = tokio::spawn(async move {
         info!("Parser Dispatcher started");
         while let Some(event) = raw_rx.recv().await {
@@ -843,6 +844,7 @@ async fn run_daemon(
                                 source,
                                 metadata: None,
                                 patch: None,
+                                human_review_input: None,
                                 baseline: None,
                                 failed_error: Some(error),
                                 skip_filters: None,
@@ -920,6 +922,7 @@ async fn run_daemon(
                                 source,
                                 metadata: Some(metadata),
                                 patch,
+                                human_review_input: None,
                                 baseline: base_commit,
                                 failed_error: None,
                                 skip_filters: None,
@@ -967,12 +970,15 @@ async fn run_daemon(
 
                             // Offload parsing
                             let parse_result = tokio::task::spawn_blocking(move || {
-                                sashiko::patch::parse_email(&msg_raw)
+                                sashiko::human_review::parse_ingested_mail(
+                                    &msg_raw,
+                                    human_review_enabled,
+                                )
                             })
                             .await;
 
                             match parse_result {
-                                Ok(Ok((metadata, patch_opt))) => {
+                                Ok(Ok((metadata, patch_opt, human_review_input))) => {
                                     // Do not override group "api-submit" to allow grouping logic to trigger
                                     let effective_group = group_clone;
 
@@ -989,6 +995,7 @@ async fn run_daemon(
                                                 Some(m)
                                             },
                                             patch: patch_opt,
+                                            human_review_input,
                                             baseline: baseline_clone,
                                             failed_error: None,
                                             skip_filters: skip_subjects_clone,
@@ -1028,12 +1035,12 @@ async fn run_daemon(
 
                         // Offload CPU parsing to blocking thread pool
                         let parse_result = tokio::task::spawn_blocking(move || {
-                            sashiko::patch::parse_email(&bytes)
+                            sashiko::human_review::parse_ingested_mail(&bytes, human_review_enabled)
                         })
                         .await;
 
                         match parse_result {
-                            Ok(Ok((metadata, patch_opt))) => {
+                            Ok(Ok((metadata, patch_opt, human_review_input))) => {
                                 // Check cutoff
                                 if let Some(cutoff) = cutoff_timestamp
                                     && metadata.date < cutoff
@@ -1053,6 +1060,7 @@ async fn run_daemon(
                                         source: MessageSource::Nntp,
                                         metadata: Some(metadata),
                                         patch: patch_opt,
+                                        human_review_input,
                                         baseline,
                                         failed_error: None,
                                         skip_filters: None,
@@ -3422,6 +3430,7 @@ async fn process_parsed_article(
         source,
         metadata,
         patch,
+        human_review_input,
         baseline,
         failed_error,
         skip_filters,
@@ -3618,6 +3627,14 @@ async fn process_parsed_article(
             fail_fetching_patchset_logged(worker_db, reply_to, &err_msg).await;
         }
         return ProcessStatus::Error;
+    }
+
+    if let Some(input) = human_review_input
+        && let Err(error) = worker_db
+            .record_direct_review_claims(&metadata, &input, chrono::Utc::now().timestamp())
+            .await
+    {
+        warn!(message_id = %metadata.message_id, %error, "Failed to record optional human-review evidence");
     }
 
     // Subsystem Identification and Linking

@@ -2220,7 +2220,16 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 16.");
+        if current_version < 17 {
+            info!("Applying database migration version 17 (human-review evidence)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/017_human_review_evidence.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 17", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 17.");
 
         Ok(())
     }
@@ -19443,7 +19452,13 @@ mod tests {
             .unwrap();
         db.conn
             .execute_batch(
-                "DROP TABLE staging_targets;
+                "DROP TABLE human_review_evidence;
+                DROP TRIGGER human_review_message_changed;
+                DROP TRIGGER human_review_patch_changed;
+                ALTER TABLE messages DROP COLUMN human_review_source_hash;
+                ALTER TABLE messages DROP COLUMN human_review_revision;
+                ALTER TABLE patches DROP COLUMN human_review_revision;
+                DROP TABLE staging_targets;
                 DROP TABLE staging_patch_evidence;
                 DROP TABLE staging_snapshot_commits;
                 DROP TABLE staging_snapshots;
@@ -23730,6 +23745,12 @@ mod tests {
                 "DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
+                 DROP TABLE human_review_evidence;
+                 DROP TRIGGER human_review_message_changed;
+                 DROP TRIGGER human_review_patch_changed;
+                 ALTER TABLE messages DROP COLUMN human_review_source_hash;
+                 ALTER TABLE messages DROP COLUMN human_review_revision;
+                 ALTER TABLE patches DROP COLUMN human_review_revision;
                  DROP TABLE staging_targets;
                  DROP TABLE staging_patch_evidence;
                  DROP TABLE staging_snapshot_commits;
@@ -23767,6 +23788,12 @@ mod tests {
             .execute_batch(
                 "DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
+                 DROP TABLE human_review_evidence;
+                 DROP TRIGGER human_review_message_changed;
+                 DROP TRIGGER human_review_patch_changed;
+                 ALTER TABLE messages DROP COLUMN human_review_source_hash;
+                 ALTER TABLE messages DROP COLUMN human_review_revision;
+                 ALTER TABLE patches DROP COLUMN human_review_revision;
                  DROP TABLE staging_targets;
                  DROP TABLE staging_patch_evidence;
                  DROP TABLE staging_snapshot_commits;

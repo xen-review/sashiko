@@ -190,6 +190,7 @@ pub struct ParsedArticle {
     pub source: MessageSource,
     pub metadata: Option<PatchsetMetadata>,
     pub patch: Option<Patch>,
+    pub human_review_input: Option<crate::human_review::HumanReviewInput>,
     pub baseline: Option<String>,
     pub failed_error: Option<String>,
     pub skip_filters: Option<Vec<String>>,

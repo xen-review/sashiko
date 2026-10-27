@@ -763,6 +763,20 @@ pub fn inject_changelog_into_git_show(git_show: &str, changelog: &str) -> String
 #[cfg(test)]
 mod tests {
     #[test]
+    fn direct_review_claims_accept_plain_mail_without_mime_headers() -> Result<()> {
+        let raw = b"From: Reviewer <reviewer@example.invalid>\r\nMessage-ID: <review@example.invalid>\r\nIn-Reply-To: <patch@example.invalid>\r\nSubject: Re: [PATCH] change\r\nDate: Thu, 01 Jan 1970 00:00:02 +0000\r\n\r\nReviewed-by: Reviewer <reviewer@example.invalid>\r\n";
+        assert_eq!(extract_direct_review_claims(raw)?.len(), 1);
+        let (metadata, _) = parse_email(raw)?;
+        assert!(!metadata.is_patch_or_cover);
+        assert_eq!(
+            metadata.in_reply_to.as_deref(),
+            Some("patch@example.invalid")
+        );
+        assert!(!metadata.body.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn direct_review_claims_decode_mime_without_trusting_alias_headers() -> Result<()> {
         let raw = concat!(
             "From: =?utf-8?q?Reviewer?= <reviewer@EXAMPLE.invalid>\r\n",

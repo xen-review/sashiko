@@ -1004,6 +1004,9 @@ pub struct ServerSettings {
     pub log_sign_in_links: bool,
 
     #[serde(default)]
+    pub human_review_evidence: bool,
+
+    #[serde(default)]
     pub acl: AclSettings,
 }
 
@@ -1027,6 +1030,7 @@ impl Default for ServerSettings {
             testing_mode: false,
             jwt_secret: None,
             log_sign_in_links: false,
+            human_review_evidence: false,
             acl: AclSettings::default(),
         }
     }
@@ -2557,6 +2561,7 @@ mod tests {
             testing_mode: false,
             jwt_secret: None,
             log_sign_in_links: false,
+            human_review_evidence: false,
             acl: AclSettings::default(),
         };
         assert_eq!(server.sign_in_base_url(), "https://sashiko.example.org");
@@ -2577,6 +2582,7 @@ mod tests {
             testing_mode: false,
             jwt_secret: None,
             log_sign_in_links: false,
+            human_review_evidence: false,
             acl: AclSettings::default(),
         };
         assert_eq!(

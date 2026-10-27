@@ -40,6 +40,8 @@ pub mod forge;
 pub mod git_cmd;
 pub mod git_ops;
 #[cfg(feature = "server")]
+pub mod human_review;
+#[cfg(feature = "server")]
 pub mod ingestor;
 pub mod local_review;
 pub mod maintainers;

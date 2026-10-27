@@ -5,6 +5,18 @@ approved by the operator on 2026-10-27. Implement incrementally with determinist
 tests. Historical backfill bounds still need separate approval before a live
 backfill. Existing Sashiko and staging states are unchanged.
 
+## Implementation Checkpoint
+
+The bounded parser foundation is committed as d1e13b6e. Schema 17 and the
+disabled-by-default server.human_review_evidence setting add normal-ingestion
+recording with exact message/patch revisions and raw-source fingerprints.
+Rejected raw-only changes invalidate old positives. Replaying the same source
+cannot bind an earlier review to changed target content. Prior evidence remains
+stored rather than rewriting reviews or mail. Deterministic parser, persistence,
+opt-out, ambiguity, idempotency, wrong-version, and schema-upgrade tests pass,
+as does make check-pr. No model call, live backfill, or migration has run.
+API/UI enrichment and the positive-only filter are the next increment.
+
 ## Existing Inputs
 
 Messages retain Message-ID, author, direct In-Reply-To, body or archive-blob

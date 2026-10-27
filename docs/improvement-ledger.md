@@ -338,9 +338,14 @@ integrated opt-in store and direct-reply policy on 2026-10-27. The first parser
 increment passes fake-mail checks for exact single reply targets, single matching
 mailboxes, MIME decoding, spoofed display names, duplicate headers, and excluded
 quoted, forwarded, fenced, signature, and patch-submission content. Input and
-decoded body sizes are bounded. No store, live classifier, or automatic backfill
-is enabled by this parser-only increment. Historical backfill remains separately
-bounded and is not run automatically.
+decoded body sizes are bounded. The next storage increment adds schema 17 and
+disabled-by-default normal-ingestion recording. Source fingerprints, mail/patch
+revision guards, exact targets, and idempotent inserts retain provenance without
+rebinding old replies to changed targets. Rejected raw-only source changes also
+invalidate old positives. The focused store, daemon compile, historical schema
+upgrade fixtures, and full make check-pr gate pass. API/UI enrichment is next.
+No live classifier or automatic historical backfill is enabled. Historical
+backfill remains bounded and is not run automatically.
 
 Done when: deterministic fixtures cover exact/upstream-rewritten patch identities,
 partial series, stale/missing refs, staging versus master, and human-review evidence;
