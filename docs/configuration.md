@@ -408,7 +408,7 @@ max_generations = 12
 max_tool_calls = 30
 max_input_tokens = 400000
 max_output_tokens = 20000
-timeout_seconds = 600
+timeout_seconds = 3600
 ```
 
 These sample paths assume the settings file is in the Sashiko checkout and a
@@ -418,20 +418,22 @@ friendly-series-review-with-suggestions skill governs code checking and reply
 content. Its agent selects that procedure, while the style reference governs
 Xen formatting and Sashiko's artifact contract governs transport/storage.
 
-All limits must be positive. The strategy defaults to `whole_series` when
-omitted. Set `strategy = "sequential_patches"` to review selected patches in
-submission order in one shared conversation. Each checkpoint returns notes and
-exactly one validated reply for its original patch identity. Full series context
-and prior investigation remain available, but source tools bind to that patch's
-exact applied commit. Limits and the original deadline apply cumulatively to the
+All limits must be positive. The harness timeout defaults to 3600 seconds; the
+instruction manifest and the generation, tool, input token, and output token
+limits are required. The strategy defaults to `whole_series` when omitted. Set
+`strategy = "sequential_patches"` to review selected patches in submission order
+in one shared conversation. Each checkpoint returns notes and exactly one
+validated reply for its original patch identity. Full series context and prior
+investigation remain available, but source tools bind to that patch's exact
+applied commit. Limits and the original deadline apply cumulatively to the
 entire invocation, not per patch. Unknown strategies fail rather than falling
-back. All other harness fields remain required. The instruction
-manifest is ordered; list all required agents, skills, style guides, and reference
-examples explicitly. Relative paths resolve against the settings file directory,
-not the repository or CLI working directory. Sashiko snapshots original contents
-and hashes them at configuration load; frontmatter does not enable tools. Missing
-files fail configuration loading. Instructions are capped at 1 MiB total and
-serialized series input at 8 MiB; oversized inputs are rejected, not truncated.
+back. The instruction manifest is ordered; list all required agents, skills,
+style guides, and reference examples explicitly. Relative paths resolve against
+the settings file directory, not the repository or CLI working directory.
+Sashiko snapshots original contents and hashes them at configuration load;
+frontmatter does not enable tools. Missing files fail configuration loading.
+Instructions are capped at 1 MiB total and serialized series input at 8 MiB;
+oversized inputs are rejected, not truncated.
 
 Run `sashiko --settings local.toml --project xen review BASE..HEAD --format json`
 for the full result, including instructions, raw conversation, usage, and exact
@@ -482,14 +484,17 @@ Daemon `--no-ai` is not supported with harness mode; local `--no-ai` remains a
 zero-call patch check. An empty eligible scope is an error, not a clean review.
 
 `max_generations` bounds Sashiko provider calls, not hidden backend generations.
-Native CLI tools remain disabled. Token thresholds count all reported input
-(including cached tokens) and output between calls, allowing a single call to
-overshoot; that overshoot fails the review and is recorded. Missing usage also
-fails the review. No repair call or whole-session retry runs automatically.
-The smaller positive whole-review timeout also applies; Codex retains its
-600-second per-call timeout. MAX effort requires separate timeout support and is
-not authorized by this example. Completed-response caching is disabled for this
-mode; provider-side prefix caching may still apply but is not guaranteed.
+`max_tool_calls` bounds local read-only source-tool executions; their results may
+require later provider calls and add to input token use. Native CLI tools remain
+disabled. Token thresholds count all reported input (including cached tokens)
+and output between calls, allowing a single call to overshoot; that overshoot
+fails the review and is recorded. Missing usage also fails the review. No repair
+call or whole-session retry runs automatically. Without a matching Codex timeout
+profile, the smaller positive review or harness timeout applies and the per-call
+timeout is 600 seconds. A matching profile overrides both deadlines as described
+above. MAX effort requires separate timeout support and is not authorized by
+this example. Completed-response caching is disabled for this mode; provider-side
+prefix caching may still apply but is not guaranteed.
 Harness tool instructions precede conversation history so completed tool turns
 append to a stable serialized prompt prefix rather than moving the tool catalog.
 This improves cache eligibility, not a guarantee of provider cache hits or cost.

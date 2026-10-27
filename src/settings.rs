@@ -1212,6 +1212,7 @@ pub struct AgentHarnessSettings {
     pub max_tool_calls: usize,
     pub max_input_tokens: usize,
     pub max_output_tokens: usize,
+    #[serde(default = "default_review_timeout")]
     pub timeout_seconds: u64,
 }
 
@@ -1993,6 +1994,35 @@ mod tests {
         assert_eq!(
             configured.agent_harness.as_ref().unwrap().strategy,
             HarnessStrategy::WholeSeries
+        );
+        assert_eq!(
+            configured.agent_harness.as_ref().unwrap().timeout_seconds,
+            60
+        );
+        let default_timeout: ReviewSettings = toml::from_str(&format!(
+            "concurrency = 1\nmode = 'agent_harness'{}",
+            manifest.replace("timeout_seconds = 60\n", "")
+        ))
+        .unwrap();
+        assert_eq!(
+            default_timeout
+                .agent_harness
+                .as_ref()
+                .unwrap()
+                .timeout_seconds,
+            3600
+        );
+        assert!(default_timeout.validate_mode().is_ok());
+        let zero_timeout: ReviewSettings = toml::from_str(&format!(
+            "concurrency = 1\nmode = 'agent_harness'{}",
+            manifest.replace("timeout_seconds = 60", "timeout_seconds = 0")
+        ))
+        .unwrap();
+        assert!(
+            zero_timeout
+                .validate_mode()
+                .unwrap_err()
+                .contains("positive")
         );
         for strategy in ["whole_series", "sequential_patches"] {
             let selected = format!(
