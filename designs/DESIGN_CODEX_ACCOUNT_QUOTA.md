@@ -91,9 +91,32 @@ This predicate is unwired and does not authorize a model call. A caller must
 actually initiate a fresh metadata read for each call, verify subscription
 authentication and billing, establish an account binding, check the permitted
 model and effort, and establish enough weekly and time reserve for the bounded
-review. The login/plan key still cannot prove opaque workspace identity, and
+review. The older login/plan key cannot prove opaque workspace identity, and
 positive weekly allowance alone does not prove sufficient reserve. Tests use
 decoded fake metadata and do not invoke a model or enable the daemon.
+
+## Workspace-Bound Reader Checkpoint
+
+The earlier metadata inspection missed fields outside the account object. At
+20:03 CET on 2026-10-27, authenticated account/read workspaceRouting reported
+chatgptAccountId and account/rateLimits/read reported accountId. Two successive
+reads had stable matching identifiers and ordinaryUsageAllowed was true. The
+identifiers were compared without logging their values; no model turn was made.
+
+The new opt-in workspace reader derives a separate key from the validated login,
+plan and opaque workspace ID. It requires the workspace key to match before and
+after the quota read, the quota account ID to match that workspace, and explicit
+ordinaryUsageAllowed=true. It also retains the existing subscription, measured
+window and no-paid-credit checks. Missing or malformed identity, a workspace
+switch, mismatched quota identity, denied or unknown included-usage permission,
+and paid credits fail closed. Existing login-bound callers remain unchanged.
+Fake-process tests cover successful reads and changed or denied metadata.
+
+This does not establish that a later model invocation uses the same workspace,
+or wire the reader into scheduler or provider admission. Account changes after
+the metadata read, weekly and time reserves, retries, runtime configuration,
+and durable pause behavior remain separate gates. No raw IDs are persisted or
+logged by this reader and no automatic review is enabled by this checkpoint.
 
 ## Evidence and Ownership
 

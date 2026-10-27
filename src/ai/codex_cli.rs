@@ -323,10 +323,69 @@ pub async fn read_codex_subscription_quota(
     .await
 }
 
+pub async fn read_codex_workspace_quota(
+    expected_workspace_key: &str,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    read_codex_quota_with_binary(
+        std::ffi::OsStr::new("codex"),
+        expected_workspace_key,
+        Duration::from_secs(20),
+        CodexQuotaBinding::Workspace,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum CodexQuotaBinding {
+    Login,
+    Workspace,
+}
+
+impl CodexQuotaBinding {
+    fn account_key(self, account: &Value) -> Result<String> {
+        match self {
+            Self::Login => codex_quota_account_key(account),
+            Self::Workspace => codex_workspace_quota_key(account),
+        }
+    }
+
+    fn decode(
+        self,
+        account: &Value,
+        limits: &Value,
+        expected_key: &str,
+        observed_at: i64,
+    ) -> Result<CodexSubscriptionQuotaSnapshot> {
+        match self {
+            Self::Login => {
+                decode_codex_subscription_quota(account, limits, expected_key, observed_at)
+            }
+            Self::Workspace => {
+                decode_codex_workspace_quota(account, limits, expected_key, observed_at)
+            }
+        }
+    }
+}
+
 async fn read_codex_subscription_quota_with_binary(
     binary: &std::ffi::OsStr,
     expected_account_key: &str,
     deadline: Duration,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    read_codex_quota_with_binary(
+        binary,
+        expected_account_key,
+        deadline,
+        CodexQuotaBinding::Login,
+    )
+    .await
+}
+
+async fn read_codex_quota_with_binary(
+    binary: &std::ffi::OsStr,
+    expected_account_key: &str,
+    deadline: Duration,
+    binding: CodexQuotaBinding,
 ) -> Result<CodexSubscriptionQuotaSnapshot> {
     ensure!(
         valid_quota_account_key(expected_account_key),
@@ -367,18 +426,18 @@ async fn read_codex_subscription_quota_with_binary(
             .await?;
         let before = rpc.request(2, QuotaMetadataMethod::Account).await?;
         ensure!(
-            codex_quota_account_key(&before)? == expected_account_key,
+            binding.account_key(&before)? == expected_account_key,
             "Codex quota account binding changed before observation"
         );
         let observed_at = chrono::Utc::now().timestamp();
         let limits = rpc.request(3, QuotaMetadataMethod::RateLimits).await?;
         let after = rpc.request(4, QuotaMetadataMethod::Account).await?;
         ensure!(
-            codex_quota_account_key(&after)? == expected_account_key
+            binding.account_key(&after)? == expected_account_key
                 && before["account"]["email"] == after["account"]["email"],
             "Codex quota account binding changed during observation"
         );
-        decode_codex_subscription_quota(&after, &limits, expected_account_key, observed_at)
+        binding.decode(&after, &limits, expected_account_key, observed_at)
     })
     .await
     .map_err(|_| anyhow::anyhow!("Codex quota metadata deadline exceeded"));
@@ -421,6 +480,25 @@ pub fn codex_quota_account_key(account_result: &Value) -> Result<String> {
         "codex-chatgpt-v1\n{}\n{plan}",
         email.trim().to_ascii_lowercase()
     );
+    Ok(Sha256::digest(identity.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+pub fn codex_workspace_quota_key(account_result: &Value) -> Result<String> {
+    let login_key = codex_quota_account_key(account_result)?;
+    let workspace_id = account_result["workspaceRouting"]["chatgptAccountId"]
+        .as_str()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 1024
+                && !value
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+        })
+        .context("Codex workspace identity unavailable")?;
+    let identity = format!("codex-chatgpt-workspace-v1\n{login_key}\n{workspace_id}");
     Ok(Sha256::digest(identity.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -490,6 +568,33 @@ pub fn decode_codex_subscription_quota(
         weekly_remaining,
         weekly_resets_at,
     })
+}
+
+pub fn decode_codex_workspace_quota(
+    account_result: &Value,
+    limits_result: &Value,
+    expected_workspace_key: &str,
+    observed_at: i64,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    let workspace_key = codex_workspace_quota_key(account_result)?;
+    ensure!(
+        workspace_key == expected_workspace_key,
+        "Codex workspace binding changed"
+    );
+    ensure!(
+        limits_result["accountId"].as_str()
+            == account_result["workspaceRouting"]["chatgptAccountId"].as_str(),
+        "Codex workspace and quota account differ"
+    );
+    ensure!(
+        limits_result["ordinaryUsageAllowed"].as_bool() == Some(true),
+        "Codex included usage permission unavailable or denied"
+    );
+    let login_key = codex_quota_account_key(account_result)?;
+    let mut snapshot =
+        decode_codex_subscription_quota(account_result, limits_result, &login_key, observed_at)?;
+    snapshot.five_hour.account_key = workspace_key;
+    Ok(snapshot)
 }
 
 fn parse_usage(value: &Value) -> Option<AiUsage> {
@@ -777,6 +882,51 @@ done
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_quota_reader_checks_binding_across_metadata_calls() -> Result<()> {
+        let account = serde_json::json!({
+            "account": {"type": "chatgpt", "email": "reviewer@example.invalid", "planType": "pro"},
+            "workspaceRouting": {"chatgptAccountId": "workspace-a"}
+        });
+        let key = codex_workspace_quota_key(&account)?;
+        for (quota_id, after_id, allowed, expected) in [
+            ("workspace-a", "workspace-a", "true", true),
+            ("workspace-a", "workspace-b", "true", false),
+            ("workspace-b", "workspace-a", "true", false),
+            ("workspace-a", "workspace-a", "false", false),
+        ] {
+            let fixture = tempfile::tempdir()?;
+            let executable = fixture.path().join("codex");
+            let script = r#"#!/bin/sh
+while IFS= read -r request; do
+    case "$request" in
+        *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"},"workspaceRouting":{"chatgptAccountId":"workspace-a"}}}' ;;
+        *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"accountId":"QUOTA_ID","ordinaryUsageAllowed":ALLOWED,"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,"credits":{"hasCredits":false,"unlimited":false},"primary":{"usedPercent":49,"windowDurationMins":300,"resetsAt":4102444800},"secondary":{"usedPercent":47,"windowDurationMins":10080,"resetsAt":4103049600}}}}' ;;
+        *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"},"workspaceRouting":{"chatgptAccountId":"AFTER_ID"}}}' ;;
+    esac
+done
+"#
+            .replace("QUOTA_ID", quota_id)
+            .replace("AFTER_ID", after_id)
+            .replace("ALLOWED", allowed);
+            crate::test_support::write_executable_script(&executable, &script);
+            let result = read_codex_quota_with_binary(
+                executable.as_os_str(),
+                &key,
+                Duration::from_secs(2),
+                CodexQuotaBinding::Workspace,
+            )
+            .await;
+            assert_eq!(result.is_ok(), expected);
+            if let Ok(snapshot) = result {
+                assert_eq!(snapshot.five_hour.account_key, key);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn quota_reader_cancellation_terminates_its_metadata_child() -> Result<()> {
@@ -957,6 +1107,56 @@ while IFS= read -r request; do :; done
         blocked = snapshot.clone();
         blocked.weekly_resets_at = 100;
         assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_quota_requires_matching_backend_identity_and_permission() -> Result<()> {
+        let account = serde_json::json!({
+            "account": {"type": "chatgpt", "email": "reviewer@example.invalid", "planType": "pro"},
+            "workspaceRouting": {"chatgptAccountId": "workspace-a"}
+        });
+        let limits = serde_json::json!({
+            "accountId": "workspace-a", "ordinaryUsageAllowed": true,
+            "rateLimits": {"limitId": "codex", "planType": "pro", "spendControlReached": false,
+                "credits": {"hasCredits": false, "unlimited": false},
+                "primary": {"usedPercent": 49.9, "windowDurationMins": 300, "resetsAt": 200},
+                "secondary": {"usedPercent": 47, "windowDurationMins": 10080, "resetsAt": 1000}}
+        });
+        let key = codex_workspace_quota_key(&account)?;
+        assert_eq!(key.len(), 64);
+        assert!(!key.contains("workspace-a"));
+        let snapshot = decode_codex_workspace_quota(&account, &limits, &key, 100)?;
+        assert_eq!(snapshot.five_hour.account_key, key);
+        assert!(snapshot.has_fresh_premium_quota(&key, 100, 100));
+
+        let mut changed_workspace = account.clone();
+        changed_workspace["workspaceRouting"]["chatgptAccountId"] =
+            serde_json::json!("workspace-b");
+        assert_ne!(codex_workspace_quota_key(&changed_workspace)?, key);
+        assert!(decode_codex_workspace_quota(&changed_workspace, &limits, &key, 100).is_err());
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("bad\nidentity"),
+        ] {
+            let mut invalid = account.clone();
+            invalid["workspaceRouting"]["chatgptAccountId"] = value;
+            assert!(codex_workspace_quota_key(&invalid).is_err());
+        }
+        for (field, value) in [
+            ("accountId", serde_json::Value::Null),
+            ("accountId", serde_json::json!("workspace-b")),
+            ("ordinaryUsageAllowed", serde_json::Value::Null),
+            ("ordinaryUsageAllowed", serde_json::json!(false)),
+        ] {
+            let mut invalid = limits.clone();
+            invalid[field] = value;
+            assert!(decode_codex_workspace_quota(&account, &invalid, &key, 100).is_err());
+        }
+        let mut paid = limits.clone();
+        paid["rateLimits"]["credits"]["hasCredits"] = serde_json::json!(true);
+        assert!(decode_codex_workspace_quota(&account, &paid, &key, 100).is_err());
         Ok(())
     }
 

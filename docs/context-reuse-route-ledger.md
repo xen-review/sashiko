@@ -5,6 +5,18 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Workspace Identity Correction
+
+At 20:03 CET on 2026-10-27, a schema-guided metadata-only check found that the
+previous account-identity assessment was incomplete: account/read exposes
+workspaceRouting.chatgptAccountId and account/rateLimits/read exposes accountId
+outside the account object. Two successive reads showed matching stable IDs and
+ordinaryUsageAllowed=true; raw IDs were not printed. The new opt-in workspace
+reader validates those fields and detects a workspace switch in fake-process
+tests. This corrects the earlier claim that no opaque account ID was exposed.
+It does not yet prove the later model call uses that workspace or enable per-call
+admission, so the daemon remains paused pending those runtime safeguards.
+
 ### Codex Terra Targeted Replay
 
 On 2026-10-27 after the reported reset, the operator requested Codex and a
