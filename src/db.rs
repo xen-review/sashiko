@@ -500,9 +500,35 @@ fn validate_checkpoint_trace(
 }
 
 #[cfg(feature = "server")]
-fn encode_terminal_harness_progress(
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HarnessProgressCapture {
+    #[default]
+    Terminal,
+    Checkpoint,
+}
+
+#[cfg(feature = "server")]
+impl HarnessProgressCapture {
+    fn is_terminal(&self) -> bool {
+        *self == Self::Terminal
+    }
+}
+
+#[cfg(feature = "server")]
+#[derive(Debug, Serialize, Deserialize)]
+struct RetainedHarnessProgress {
+    #[serde(flatten)]
+    progress: crate::agent_harness::session::HarnessProgress,
+    #[serde(default, skip_serializing_if = "HarnessProgressCapture::is_terminal")]
+    capture: HarnessProgressCapture,
+}
+
+#[cfg(feature = "server")]
+fn encode_retained_harness_progress(
     progress: &crate::agent_harness::session::HarnessProgress,
     trace: &crate::agent_harness::session::HarnessTrace,
+    capture: HarnessProgressCapture,
 ) -> Result<String> {
     validate_checkpoint_trace(trace, false)?;
     anyhow::ensure!(
@@ -510,7 +536,7 @@ fn encode_terminal_harness_progress(
             && progress.provider_calls_attempted == trace.provider_calls
             && progress.provider_calls_with_usage == trace.call_usage.len()
             && progress.tool_calls_attempted == trace.tool_calls,
-        "Terminal harness progress does not match its trace"
+        "Retained harness progress does not match its trace"
     );
     match (&progress.reported_usage, trace.call_usage.is_empty()) {
         (None, true) => {}
@@ -519,24 +545,28 @@ fn encode_terminal_harness_progress(
                 && usage.completion_tokens == trace.usage.completion_tokens
                 && usage.total_tokens == trace.usage.total_tokens
                 && usage.cached_tokens == trace.usage.cached_tokens => {}
-        _ => bail!("Terminal harness reported usage does not match its trace"),
+        _ => bail!("Retained harness reported usage does not match its trace"),
     }
-    let payload = serde_json::to_string(progress)?;
+    let payload = serde_json::to_string(&RetainedHarnessProgress {
+        progress: progress.clone(),
+        capture,
+    })?;
     anyhow::ensure!(
         payload.len() <= 4096,
-        "Terminal harness progress exceeds 4 KiB"
+        "Retained harness progress exceeds 4 KiB"
     );
     Ok(payload)
 }
 
 #[cfg(feature = "server")]
-fn prepare_terminal_harness_progress(
+fn prepare_retained_harness_progress(
     review_id: i64,
     progress: Option<&crate::agent_harness::session::HarnessProgress>,
     trace: &crate::agent_harness::session::HarnessTrace,
+    capture: HarnessProgressCapture,
 ) -> Option<String> {
     let progress = progress?;
-    match encode_terminal_harness_progress(progress, trace) {
+    match encode_retained_harness_progress(progress, trace, capture) {
         Ok(payload) => Some(payload),
         Err(error) => {
             warn!(
@@ -549,19 +579,18 @@ fn prepare_terminal_harness_progress(
 }
 
 #[cfg(feature = "server")]
-fn decode_terminal_harness_progress(
-    payload: &str,
-) -> Result<crate::agent_harness::session::HarnessProgress> {
+fn decode_retained_harness_progress(payload: &str) -> Result<RetainedHarnessProgress> {
     anyhow::ensure!(
         payload.len() <= 4096,
-        "Terminal harness progress exceeds 4 KiB"
+        "Retained harness progress exceeds 4 KiB"
     );
-    let progress: crate::agent_harness::session::HarnessProgress = serde_json::from_str(payload)?;
+    let retained: RetainedHarnessProgress = serde_json::from_str(payload)?;
+    let progress = &retained.progress;
     anyhow::ensure!(
         !progress.provider_in_flight
             && progress.provider_calls_with_usage <= progress.provider_calls_attempted
             && progress.reported_usage.is_some() == (progress.provider_calls_with_usage > 0),
-        "Invalid terminal harness progress coverage"
+        "Invalid retained harness progress coverage"
     );
     if let Some(usage) = &progress.reported_usage {
         anyhow::ensure!(
@@ -569,14 +598,14 @@ fn decode_terminal_harness_progress(
                 && usage
                     .cached_tokens
                     .is_none_or(|cached| cached <= usage.prompt_tokens),
-            "Invalid terminal harness token usage"
+            "Invalid retained harness token usage"
         );
     }
-    Ok(progress)
+    Ok(retained)
 }
 
 #[cfg(feature = "server")]
-fn attach_terminal_harness_progress(
+fn attach_retained_harness_progress(
     item: &mut serde_json::Value,
     payload: Option<String>,
     review_id: i64,
@@ -584,7 +613,7 @@ fn attach_terminal_harness_progress(
     let Some(payload) = payload else {
         return Ok(());
     };
-    match decode_terminal_harness_progress(&payload) {
+    match decode_retained_harness_progress(&payload) {
         Ok(progress) => item["harness_progress_snapshot"] = serde_json::to_value(progress)?,
         Err(_) => warn!(
             "Ignoring invalid retained harness progress for review {}",
@@ -2609,6 +2638,15 @@ impl Database {
         &self,
         write: HarnessCheckpointWrite<'_>,
     ) -> Result<HarnessCheckpointCursor> {
+        self.persist_harness_checkpoint_with_progress(write, None)
+            .await
+    }
+
+    pub(crate) async fn persist_harness_checkpoint_with_progress(
+        &self,
+        write: HarnessCheckpointWrite<'_>,
+        progress: Option<&crate::agent_harness::session::HarnessProgress>,
+    ) -> Result<HarnessCheckpointCursor> {
         if write.artifacts.reviewer_notes.trim().is_empty()
             || write.artifacts.reply_drafts.len() != 1
         {
@@ -2646,6 +2684,12 @@ impl Database {
             write.previous.provider_calls,
         )
         .await?;
+        let progress = prepare_retained_harness_progress(
+            write.review_id,
+            progress,
+            trace,
+            HarnessProgressCapture::Checkpoint,
+        );
         let tx = self.begin_transaction().await?;
         let mut rows = tx.query(
             "SELECT r.patchset_id, r.provider, r.model FROM reviews r JOIN patchsets p ON p.id = r.patchset_id
@@ -2693,6 +2737,13 @@ impl Database {
             libsql::params![write.patch.patch_id, patchset_id],
         )
         .await?;
+        if let Some(progress) = progress {
+            tx.execute(
+                "UPDATE reviews SET harness_progress_snapshot = ? WHERE id = ?",
+                libsql::params![progress, write.review_id],
+            )
+            .await?;
+        }
         tx.execute("UPDATE harness_checkpoint_sessions SET checkpoint_count = ?, provider_calls_end = ?, history_end = ? WHERE review_id = ?", libsql::params![i64::try_from(next.checkpoints)?, i64::try_from(next.provider_calls)?, i64::try_from(next.history_end)?, write.review_id]).await?;
         tx.commit().await?;
         Ok(next)
@@ -2739,7 +2790,12 @@ impl Database {
         let logs =
             crate::compression::compress_string_async(&serde_json::to_string(finish.outcome)?)
                 .await;
-        let progress = prepare_terminal_harness_progress(finish.review_id, progress, trace);
+        let progress = prepare_retained_harness_progress(
+            finish.review_id,
+            progress,
+            trace,
+            HarnessProgressCapture::Terminal,
+        );
         let tx = self.begin_transaction().await?;
         let mut rows = tx.query(
             "SELECT r.patchset_id, r.provider, r.model, r.status, p.status,
@@ -2777,7 +2833,7 @@ impl Database {
             _ => "failed",
         };
         insert_checkpoint_calls(&tx, finish.review_id, &provider, &model, calls).await?;
-        tx.execute("UPDATE reviews SET status = ?, logs = ?, result_description = 'Sequential harness output; completed checkpoints preserved; not independently verified', independently_verified = 0, harness_progress_snapshot = ? WHERE id = ?",
+        tx.execute("UPDATE reviews SET status = ?, logs = ?, result_description = 'Sequential harness output; completed checkpoints preserved; not independently verified', independently_verified = 0, harness_progress_snapshot = COALESCE(?, harness_progress_snapshot) WHERE id = ?",
             libsql::params![status.as_str(), logs, progress, finish.review_id]).await?;
         if patchset_status == "In Review" {
             tx.execute("UPDATE patches SET status = ? WHERE patchset_id = ? AND COALESCE(status, '') NOT IN ('Reviewed', 'Skipped', 'Cancelled')
@@ -2831,8 +2887,12 @@ impl Database {
         let output = serde_json::to_string(outcome)?;
         let compressed_input = crate::compression::compress_string_async(input).await;
         let compressed_output = crate::compression::compress_string_async(&output).await;
-        let progress =
-            prepare_terminal_harness_progress(review_id, progress, &outcome.execution.trace);
+        let progress = prepare_retained_harness_progress(
+            review_id,
+            progress,
+            &outcome.execution.trace,
+            HarnessProgressCapture::Terminal,
+        );
         let interaction_id = uuid::Uuid::new_v4().to_string();
         let tx = self.begin_transaction().await?;
         let mut rows = tx.query(
@@ -8913,7 +8973,7 @@ impl Database {
                 }
             }
             if item["review_mode"] == "agent_harness" && item["patch_id"].is_null() {
-                attach_terminal_harness_progress(&mut item, r.get(18)?, r.get(10)?)?;
+                attach_retained_harness_progress(&mut item, r.get(18)?, r.get(10)?)?;
             }
             reviews.push(item);
         }
@@ -9401,8 +9461,11 @@ impl Database {
         let query = format!("SELECT s.review_id, s.state, s.checkpoint_count, s.provider_calls_end, {input_column},
                 COUNT(h.provider_call), COALESCE(SUM(ai.tokens_in), 0), COALESCE(SUM(ai.tokens_out), 0),
                 CASE WHEN COUNT(h.provider_call) > 0 AND COUNT(ai.tokens_cached) = COUNT(h.provider_call)
-                    THEN SUM(ai.tokens_cached) ELSE NULL END
-            FROM harness_checkpoint_sessions s LEFT JOIN harness_provider_calls h ON h.review_id = s.review_id
+                    THEN SUM(ai.tokens_cached) ELSE NULL END,
+                CASE WHEN s.state IN ('completed', 'failed', 'cancelled') AND r.logs IS NOT NULL
+                    THEN 1 ELSE 0 END
+            FROM harness_checkpoint_sessions s JOIN reviews r ON r.id = s.review_id
+            LEFT JOIN harness_provider_calls h ON h.review_id = s.review_id
             LEFT JOIN ai_interactions ai ON ai.id = h.interaction_id
             WHERE s.review_id IN ({placeholders}) GROUP BY s.review_id");
         let mut rows = self.conn.query(&query, params.clone()).await?;
@@ -9411,11 +9474,12 @@ impl Database {
             let state: String = row.get(1)?;
             let calls: i64 = row.get(3)?;
             let recorded: i64 = row.get(5)?;
+            let has_terminal_trace = row.get::<i64>(9)? != 0;
             sessions.insert(row.get::<i64>(0)?, serde_json::json!({
                 "state": state, "completed_count": row.get::<i64>(2)?,
                 "provider_calls_recorded": recorded,
-                "provider_calls_attempted": if state == "active" { None } else { Some(calls) },
-                "usage_complete": state != "active" && calls == recorded,
+                "provider_calls_attempted": has_terminal_trace.then_some(calls),
+                "usage_complete": has_terminal_trace && calls == recorded,
                 "input": crate::compression::get_compressed_string_opt(&row, 4)?,
                 "tokens_in": row.get::<i64>(6)?, "tokens_out": row.get::<i64>(7)?, "tokens_cached": row.get::<Option<i64>>(8)?,
                 "checkpoints": [], "selected_patch_indexes": [], "remaining_patch_indexes": [],
@@ -9561,7 +9625,7 @@ impl Database {
                 "bugs": bugs_json,
             });
             if details["review_mode"] == "agent_harness" && details["patch_id"].is_null() {
-                attach_terminal_harness_progress(&mut details, r.get(24)?, id)?;
+                attach_retained_harness_progress(&mut details, r.get(24)?, id)?;
             }
             self.decorate_checkpoint_reviews(std::slice::from_mut(&mut details), true)
                 .await?;
@@ -12794,34 +12858,46 @@ mod tests {
                 provider_call_timeout_seconds: Some(600),
             },
         };
+        let encode_terminal = |progress: &HarnessProgress, trace: &HarnessTrace| {
+            encode_retained_harness_progress(progress, trace, HarnessProgressCapture::Terminal)
+        };
         let missing: serde_json::Value =
-            serde_json::from_str(&encode_terminal_harness_progress(&progress, &trace)?)?;
+            serde_json::from_str(&encode_terminal(&progress, &trace)?)?;
         assert!(missing["reported_usage"].get("cached_tokens").is_none());
-        assert!(decode_terminal_harness_progress(&" ".repeat(4097)).is_err());
+        let legacy = decode_retained_harness_progress(&serde_json::to_string(&missing)?)?;
+        assert_eq!(legacy.capture, HarnessProgressCapture::Terminal);
+        assert_eq!(serde_json::to_value(legacy)?, missing);
+        let mut checkpoint = missing.clone();
+        checkpoint["capture"] = serde_json::json!("checkpoint");
+        let retained = decode_retained_harness_progress(&serde_json::to_string(&checkpoint)?)?;
+        assert_eq!(retained.capture, HarnessProgressCapture::Checkpoint);
+        assert_eq!(serde_json::to_value(retained)?, checkpoint);
+        checkpoint["capture"] = serde_json::json!("unknown");
+        assert!(decode_retained_harness_progress(&serde_json::to_string(&checkpoint)?).is_err());
+        assert!(decode_retained_harness_progress(&" ".repeat(4097)).is_err());
 
         progress.reported_usage.as_mut().unwrap().cached_tokens = Some(0);
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
         trace.usage.cached_tokens = Some(0);
         trace.call_usage[0].usage.cached_tokens = Some(0);
-        let zero: serde_json::Value =
-            serde_json::from_str(&encode_terminal_harness_progress(&progress, &trace)?)?;
+        let zero: serde_json::Value = serde_json::from_str(&encode_terminal(&progress, &trace)?)?;
         assert_eq!(zero["reported_usage"]["cached_tokens"], 0);
 
         progress.provider_in_flight = true;
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
-        assert!(decode_terminal_harness_progress(&serde_json::to_string(&progress)?).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
+        assert!(decode_retained_harness_progress(&serde_json::to_string(&progress)?).is_err());
         progress.provider_in_flight = false;
         progress.provider_calls_attempted += 1;
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
         progress.provider_calls_attempted -= 1;
         progress.provider_calls_with_usage += 1;
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
         progress.provider_calls_with_usage -= 1;
         progress.tool_calls_attempted += 1;
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
         progress.tool_calls_attempted -= 1;
         progress.reported_usage = None;
-        assert!(encode_terminal_harness_progress(&progress, &trace).is_err());
+        assert!(encode_terminal(&progress, &trace).is_err());
         Ok(())
     }
 
@@ -12853,6 +12929,12 @@ mod tests {
             session::{HarnessCallUsage, HarnessOutcome, HarnessStatus, HarnessTrace},
         };
         use crate::ai::{AiMessage, AiRole, AiUsage};
+        #[derive(PartialEq, Eq)]
+        enum FinalProgress {
+            Valid,
+            Missing,
+            Invalid,
+        }
         let message = |role| AiMessage {
             role,
             content: Some("Retained source evidence".to_string()),
@@ -12861,11 +12943,13 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         };
-        for (terminal, timed_out) in [
-            (ReviewStatus::Reviewed, false),
-            (ReviewStatus::Failed, false),
-            (ReviewStatus::Failed, true),
-            (ReviewStatus::Cancelled, false),
+        for (terminal, timed_out, final_progress) in [
+            (ReviewStatus::Reviewed, false, FinalProgress::Valid),
+            (ReviewStatus::Failed, false, FinalProgress::Valid),
+            (ReviewStatus::Failed, true, FinalProgress::Valid),
+            (ReviewStatus::Cancelled, false, FinalProgress::Valid),
+            (ReviewStatus::Failed, true, FinalProgress::Missing),
+            (ReviewStatus::Failed, true, FinalProgress::Invalid),
         ] {
             let db = setup_db().await;
             let patchset_id = insert_stored_prerequisite_series(&db).await?;
@@ -12934,16 +13018,20 @@ mod tests {
                         body: "Complete reply".to_string(),
                     }],
                 };
+                let checkpoint_progress = terminal_progress_for_trace(&trace);
                 cursor = db
-                    .persist_harness_checkpoint(HarnessCheckpointWrite {
-                        review_id,
-                        patch: &covered[position],
-                        instruction_fingerprint: "snapshot",
-                        series_fingerprint: &fingerprint,
-                        previous: cursor,
-                        artifacts: &artifacts,
-                        trace: &trace,
-                    })
+                    .persist_harness_checkpoint_with_progress(
+                        HarnessCheckpointWrite {
+                            review_id,
+                            patch: &covered[position],
+                            instruction_fingerprint: "snapshot",
+                            series_fingerprint: &fingerprint,
+                            previous: cursor,
+                            artifacts: &artifacts,
+                            trace: &trace,
+                        },
+                        Some(&checkpoint_progress),
+                    )
                     .await?;
                 if position == 0 {
                     let premature = HarnessOutcome {
@@ -12985,7 +13073,9 @@ mod tests {
                 trace,
                 instruction_fingerprint: "snapshot".to_string(),
             };
-            let progress = terminal_progress_for_trace(&outcome.trace);
+            let mut progress = terminal_progress_for_trace(&outcome.trace);
+            progress.provider_in_flight = final_progress == FinalProgress::Invalid;
+            let progress = (final_progress != FinalProgress::Missing).then_some(&progress);
             if terminal == ReviewStatus::Cancelled {
                 db.update_patchset_status(patchset_id, "Cancelled").await?;
             }
@@ -12997,7 +13087,7 @@ mod tests {
                 outcome: &outcome,
             };
             assert!(
-                db.finish_checkpoint_session_with_progress(finish(), Some(&progress))
+                db.finish_checkpoint_session_with_progress(finish(), progress)
                     .await
                     .is_err()
             );
@@ -13014,12 +13104,21 @@ mod tests {
                     1
                 }
             );
-            assert!(row.get::<Option<String>>(1)?.is_none());
+            let retained = decode_retained_harness_progress(&row.get::<String>(1)?)?;
+            assert_eq!(retained.capture, HarnessProgressCapture::Checkpoint);
+            assert_eq!(
+                retained.progress.provider_calls_attempted,
+                if terminal == ReviewStatus::Reviewed {
+                    2
+                } else {
+                    1
+                }
+            );
             drop(rows);
             db.execute_batch("DROP TRIGGER fail_terminal_checkpoint")
                 .await?;
             assert_eq!(
-                db.finish_checkpoint_session_with_progress(finish(), Some(&progress))
+                db.finish_checkpoint_session_with_progress(finish(), progress)
                     .await?,
                 terminal
             );
@@ -13077,8 +13176,23 @@ mod tests {
                 }
             );
             let saved_progress: serde_json::Value = serde_json::from_str(&row.get::<String>(4)?)?;
-            assert_eq!(saved_progress["provider_calls_attempted"], 2);
-            assert_eq!(saved_progress["provider_calls_with_usage"], known_calls);
+            let retained_checkpoint = final_progress != FinalProgress::Valid;
+            assert_eq!(
+                saved_progress["capture"],
+                if retained_checkpoint {
+                    serde_json::json!("checkpoint")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(
+                saved_progress["provider_calls_attempted"],
+                if retained_checkpoint { 1 } else { 2 }
+            );
+            assert_eq!(
+                saved_progress["provider_calls_with_usage"],
+                if retained_checkpoint { 1 } else { known_calls }
+            );
             let expected_cached = if terminal == ReviewStatus::Failed && !timed_out {
                 serde_json::Value::Null
             } else if terminal == ReviewStatus::Reviewed {
@@ -13251,6 +13365,7 @@ mod tests {
         };
         let mut trace = HarnessTrace::default();
         append_call(&mut trace)?;
+        let first_progress = terminal_progress_for_trace(&trace);
         let first_artifacts = artifacts_for(0);
         let second_artifacts = artifacts_for(1);
         let write = HarnessCheckpointWrite {
@@ -13329,16 +13444,23 @@ mod tests {
         )
         .await?;
         db.execute_batch("CREATE TEMP TRIGGER fail_checkpoint_cursor BEFORE UPDATE OF checkpoint_count ON harness_checkpoint_sessions BEGIN SELECT RAISE(ABORT, 'Injected cursor failure'); END;").await?;
-        assert!(db.persist_harness_checkpoint(write).await.is_err());
-        let mut rows = db.conn.query("SELECT (SELECT COUNT(*) FROM ai_interactions), (SELECT COUNT(*) FROM harness_provider_calls), (SELECT COUNT(*) FROM harness_patch_checkpoints), (SELECT COUNT(*) FROM patches WHERE status = 'Reviewed')", ()).await?;
+        assert!(
+            db.persist_harness_checkpoint_with_progress(write, Some(&first_progress))
+                .await
+                .is_err()
+        );
+        let mut rows = db.conn.query("SELECT (SELECT COUNT(*) FROM ai_interactions), (SELECT COUNT(*) FROM harness_provider_calls), (SELECT COUNT(*) FROM harness_patch_checkpoints), (SELECT COUNT(*) FROM patches WHERE status = 'Reviewed'), (SELECT harness_progress_snapshot FROM reviews WHERE id = ?)", libsql::params![review_id]).await?;
         let row = rows.next().await?.unwrap();
         for column in 0..4 {
             assert_eq!(row.get::<i64>(column)?, 0);
         }
+        assert!(row.get::<Option<String>>(4)?.is_none());
         drop(rows);
         db.execute_batch("DROP TRIGGER fail_checkpoint_cursor")
             .await?;
-        let first_cursor = db.persist_harness_checkpoint(write).await?;
+        let first_cursor = db
+            .persist_harness_checkpoint_with_progress(write, Some(&first_progress))
+            .await?;
         assert_eq!(
             first_cursor,
             HarnessCheckpointCursor {
@@ -13349,6 +13471,7 @@ mod tests {
         );
         assert!(db.persist_harness_checkpoint(write).await.is_err());
         append_call(&mut trace)?;
+        let second_progress = terminal_progress_for_trace(&trace);
         let second_write = HarnessCheckpointWrite {
             review_id,
             patch: &covered[1],
@@ -13358,7 +13481,43 @@ mod tests {
             artifacts: &second_artifacts,
             trace: &trace,
         };
-        let second_cursor = db.persist_harness_checkpoint(second_write).await?;
+        db.execute_batch("CREATE TEMP TRIGGER fail_checkpoint_cursor BEFORE UPDATE OF checkpoint_count ON harness_checkpoint_sessions BEGIN SELECT RAISE(ABORT, 'Injected cursor failure'); END;").await?;
+        assert!(
+            db.persist_harness_checkpoint_with_progress(second_write, Some(&second_progress))
+                .await
+                .is_err()
+        );
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT harness_progress_snapshot FROM reviews WHERE id = ?",
+                libsql::params![review_id],
+            )
+            .await?;
+        let retained =
+            decode_retained_harness_progress(&rows.next().await?.unwrap().get::<String>(0)?)?;
+        assert_eq!(retained.capture, HarnessProgressCapture::Checkpoint);
+        assert_eq!(retained.progress.provider_calls_attempted, 1);
+        drop(rows);
+        db.execute_batch("DROP TRIGGER fail_checkpoint_cursor")
+            .await?;
+        let mut invalid_progress = second_progress.clone();
+        invalid_progress.provider_in_flight = true;
+        let second_cursor = db
+            .persist_harness_checkpoint_with_progress(second_write, Some(&invalid_progress))
+            .await?;
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT harness_progress_snapshot FROM reviews WHERE id = ?",
+                libsql::params![review_id],
+            )
+            .await?;
+        let retained =
+            decode_retained_harness_progress(&rows.next().await?.unwrap().get::<String>(0)?)?;
+        assert_eq!(retained.capture, HarnessProgressCapture::Checkpoint);
+        assert_eq!(retained.progress.provider_calls_attempted, 1);
+        drop(rows);
         assert_eq!(
             second_cursor,
             HarnessCheckpointCursor {
@@ -13455,6 +13614,12 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_recovery_preserves_completed_results_without_replay() -> Result<()> {
+        use crate::agent_harness::{
+            series::{ReplyDraft, ReviewArtifacts},
+            session::{HarnessCallUsage, HarnessTrace},
+        };
+        use crate::ai::{AiMessage, AiRole, AiUsage};
+
         for cancelled in [false, true] {
             let db = setup_db().await;
             let patchset_id = insert_stored_prerequisite_series(&db).await?;
@@ -13478,9 +13643,59 @@ mod tests {
                 })
                 .await?
                 .unwrap();
-            db.execute("INSERT INTO harness_checkpoint_sessions (review_id, input_context, series_fingerprint, checkpoint_count, history_end, provider_calls_end, created_at) VALUES (?, 'input', ?, 1, 2, 1, 1)", libsql::params![review_id, "b".repeat(64)]).await?;
-            db.execute("INSERT INTO harness_patch_checkpoints (review_id, checkpoint_index, patch_id, message_id, commit_id, reviewer_notes, reply_body, history_end, provider_calls_end, created_at) VALUES (?, 1, ?, ?, ?, 'Preserved evidence', 'Preserved reply', 2, 1, 1)", libsql::params![review_id, covered[0].patch_id, diffs[0].6.as_str(), covered[0].commit_id.to_string()]).await?;
-            db.execute("UPDATE patches SET status = CASE WHEN id = ? THEN 'Reviewed' ELSE 'In Review' END WHERE patchset_id = ?", libsql::params![covered[0].patch_id, patchset_id]).await?;
+            let fingerprint = db.initialize_checkpoint_session(review_id, "{}").await?;
+            let usage = AiUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                cached_tokens: None,
+            };
+            let trace = HarnessTrace {
+                history: vec![AiMessage {
+                    role: AiRole::Assistant,
+                    content: Some("Retained response".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+                usage: usage.clone(),
+                call_usage: vec![HarnessCallUsage {
+                    provider_call: 1,
+                    response_history_end: 1,
+                    usage,
+                }],
+                provider_calls: 1,
+                tool_calls: 2,
+                ..HarnessTrace::default()
+            };
+            let artifacts = ReviewArtifacts {
+                reviewer_notes: "Preserved evidence".to_string(),
+                reply_drafts: vec![ReplyDraft {
+                    patch_index: diffs[0].1,
+                    message_id: Some(diffs[0].6.clone()),
+                    body: "Preserved reply".to_string(),
+                }],
+            };
+            let progress = terminal_progress_for_trace(&trace);
+            db.persist_harness_checkpoint_with_progress(
+                HarnessCheckpointWrite {
+                    review_id,
+                    patch: &covered[0],
+                    instruction_fingerprint: "snapshot",
+                    series_fingerprint: &fingerprint,
+                    previous: HarnessCheckpointCursor::default(),
+                    artifacts: &artifacts,
+                    trace: &trace,
+                },
+                Some(&progress),
+            )
+            .await?;
+            db.execute(
+                "UPDATE patches SET status = 'In Review' WHERE patchset_id = ? AND id != ?",
+                libsql::params![patchset_id, covered[0].patch_id],
+            )
+            .await?;
             if cancelled {
                 db.update_patchset_status(patchset_id, "Cancelled").await?;
             } else {
@@ -13513,6 +13728,23 @@ mod tests {
             assert_eq!(row.get::<String>(3)?, "Preserved evidence");
             assert_eq!(row.get::<String>(4)?, "Preserved reply");
             drop(rows);
+            let details = db.get_review_details(review_id).await?.unwrap();
+            let snapshot = &details["harness_progress_snapshot"];
+            assert_eq!(snapshot["capture"], "checkpoint");
+            assert_eq!(snapshot["provider_calls_attempted"], 1);
+            assert_eq!(snapshot["provider_calls_with_usage"], 1);
+            assert_eq!(snapshot["tool_calls_attempted"], 2);
+            assert!(snapshot["reported_usage"].get("cached_tokens").is_none());
+            assert!(details["checkpoint_session"]["provider_calls_attempted"].is_null());
+            assert_eq!(details["checkpoint_session"]["usage_complete"], false);
+            let listing = db
+                .get_patchset_details(patchset_id, None, None)
+                .await?
+                .unwrap();
+            assert_eq!(
+                listing["reviews"][0]["harness_progress_snapshot"],
+                *snapshot
+            );
             assert_eq!(
                 db.get_patchset_status(patchset_id).await?.as_deref(),
                 Some(if cancelled { "Cancelled" } else { "Failed" })

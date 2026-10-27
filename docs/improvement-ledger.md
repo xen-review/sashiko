@@ -812,6 +812,17 @@ cancellation, cache-availability and embargo checks pass, as do synthetic
 desktop/mobile renderer checks. This work has not been deployed or tested with
 a live model; backend-native generations and unreported usage remain unknown.
 
+Sequential checkpoints now retain a validated, run-owned progress snapshot in
+the same transaction as their artifacts and cursor. A checkpoint marker prevents
+an interrupted review from presenting those counters as terminal totals; a
+missing later snapshot can leave an earlier one intact. Recovery projections now
+require a persisted terminal trace before reporting total attempted calls or
+complete usage, including when a cancelled session is recovered. Focused fake
+daemon, rollback, recovery, cancellation, embargo and renderer checks pass, as
+does the full make check-pr gate. The integrated browser was unavailable for
+this increment, so its responsive layout was not rechecked. This change is not
+yet deployed or live-tested.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

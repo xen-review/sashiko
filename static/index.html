@@ -4573,6 +4573,7 @@
         function renderActiveHarnessUsage(snapshot, retained = false) {
             const valid = value => Number.isSafeInteger(value) && value >= 0;
             if (!snapshot || !valid(snapshot.provider_calls_attempted) || !valid(snapshot.provider_calls_with_usage) || !valid(snapshot.tool_calls_attempted) || snapshot.provider_calls_with_usage > snapshot.provider_calls_attempted || typeof snapshot.provider_in_flight !== 'boolean' || (retained && snapshot.provider_in_flight)) return '';
+            const checkpoint = retained && snapshot.capture === 'checkpoint';
             const usage = snapshot.reported_usage;
             const hasUsage = snapshot.provider_calls_with_usage > 0 && valid(usage?.prompt_tokens) && valid(usage?.completion_tokens);
             const format = value => value.toLocaleString();
@@ -4582,13 +4583,15 @@
             const providerLimit = valid(limits?.provider_calls) && limits.provider_calls > 0 ? ` / ${format(limits.provider_calls)}` : '';
             const toolLimit = valid(limits?.source_tool_calls) && limits.source_tool_calls > 0 ? ` / ${format(limits.source_tool_calls)}` : '';
             const tokenLimits = valid(limits?.input_tokens) && limits.input_tokens > 0 && valid(limits?.output_tokens) && limits.output_tokens > 0 ? `<div class="text-muted-sm">Between-call token thresholds: input ${format(limits.input_tokens)} &middot; output ${format(limits.output_tokens)}</div>` : '';
-            const elapsed = valid(snapshot.elapsed_seconds) ? `Elapsed: ${format(snapshot.elapsed_seconds)} s (approx.)` : '';
+            const elapsed = valid(snapshot.elapsed_seconds) ? `${checkpoint ? 'Elapsed to checkpoint' : 'Elapsed'}: ${format(snapshot.elapsed_seconds)} s (approx.)` : '';
             const timeLimit = valid(limits?.review_timeout_seconds) && limits.review_timeout_seconds > 0 ? `Review time limit: ${format(limits.review_timeout_seconds)} s` : '';
             const callTimeout = valid(limits?.provider_call_timeout_seconds) && limits.provider_call_timeout_seconds > 0 ? `Provider-call timeout: ${format(limits.provider_call_timeout_seconds)} s (configured)` : '';
             const timing = elapsed || timeLimit || callTimeout ? `<div class="text-muted-sm">${[elapsed, timeLimit, callTimeout].filter(Boolean).join(' &middot; ')}</div>` : '';
             const incomplete = retained && snapshot.provider_calls_with_usage < snapshot.provider_calls_attempted ? '<div class="text-muted-sm">Usage incomplete: some attempted calls did not report tokens.</div>' : '';
+            const checkpointNotice = checkpoint ? '<div class="text-muted-sm">Usage through a completed checkpoint; later activity is not included.</div>' : '';
             return `<div style="margin:16px 0;min-width:0;overflow-wrap:anywhere;">
-                <h3 style="font-size:1rem;">${retained ? 'Retained Harness Progress' : 'Harness Progress'}</h3>
+                <h3 style="font-size:1rem;">${checkpoint ? 'Retained Checkpoint Progress' : retained ? 'Retained Harness Progress' : 'Harness Progress'}</h3>
+                ${checkpointNotice}
                 <div class="text-muted-sm">Provider calls: ${format(snapshot.provider_calls_attempted)}${providerLimit} attempted &middot; ${format(snapshot.provider_calls_with_usage)} reported &middot; Source tools: ${format(snapshot.tool_calls_attempted)}${toolLimit}${snapshot.provider_in_flight ? ' &middot; In flight' : ''}</div>
                 <div class="text-muted-sm">Reported tokens: ${tokens}</div>
                 ${incomplete}

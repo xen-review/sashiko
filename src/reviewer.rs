@@ -2035,17 +2035,23 @@ impl Reviewer {
                 let Some(artifacts) = checkpoint.artifacts else {
                     break;
                 };
+                let checkpoint_progress = ctx
+                    .progress_registry
+                    .harness_usage_for_run(patchset_id, progress.run_id);
                 match ctx
                     .db
-                    .persist_harness_checkpoint(crate::db::HarnessCheckpointWrite {
-                        review_id,
-                        patch: covered,
-                        instruction_fingerprint: &instructions.fingerprint,
-                        series_fingerprint: &fingerprint,
-                        previous: cursor,
-                        artifacts: &artifacts,
-                        trace: runner.trace(),
-                    })
+                    .persist_harness_checkpoint_with_progress(
+                        crate::db::HarnessCheckpointWrite {
+                            review_id,
+                            patch: covered,
+                            instruction_fingerprint: &instructions.fingerprint,
+                            series_fingerprint: &fingerprint,
+                            previous: cursor,
+                            artifacts: &artifacts,
+                            trace: runner.trace(),
+                        },
+                        checkpoint_progress.as_ref(),
+                    )
                     .await
                 {
                     Ok(next) => cursor = next,
@@ -4591,13 +4597,22 @@ mod tests {
             }
             let patch_index = call / 2 + 1;
             let mut rows = self.db.conn.query(
-                "SELECT s.checkpoint_count FROM harness_checkpoint_sessions s JOIN reviews r ON r.id = s.review_id WHERE r.patchset_id = ? AND s.state = 'active'",
+                "SELECT s.checkpoint_count, r.harness_progress_snapshot FROM harness_checkpoint_sessions s JOIN reviews r ON r.id = s.review_id WHERE r.patchset_id = ? AND s.state = 'active'",
                 libsql::params![self.patchset_id],
             ).await?;
-            assert_eq!(
-                rows.next().await?.unwrap().get::<i64>(0)?,
-                (patch_index - 1) as i64
-            );
+            let row = rows.next().await?.unwrap();
+            assert_eq!(row.get::<i64>(0)?, (patch_index - 1) as i64);
+            if patch_index == 1 {
+                assert!(row.get::<Option<String>>(1)?.is_none());
+            } else {
+                let snapshot: Value = serde_json::from_str(&row.get::<String>(1)?)?;
+                assert_eq!(snapshot["capture"], "checkpoint");
+                assert_eq!(snapshot["provider_calls_attempted"], 2);
+                assert_eq!(snapshot["provider_calls_with_usage"], 2);
+                assert_eq!(snapshot["tool_calls_attempted"], 1);
+                assert_eq!(snapshot["reported_usage"]["prompt_tokens"], 80);
+                assert_eq!(snapshot["limits"]["provider_call_timeout_seconds"], 600);
+            }
             let mut response = AiResponse {
                 content: None,
                 thought: None,

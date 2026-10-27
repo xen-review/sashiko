@@ -270,3 +270,28 @@ Synthetic 1280- and 390-pixel browser checks passed without overflow or injected
 markup. No live review, model call, deployment or historical backfill was made.
 Process interruptions before terminal persistence and backend-native generation
 or unreported token usage remain unknown.
+
+## Interrupted Sequential Reviews
+
+Each completed sequential checkpoint already commits its artifacts, interaction
+usage and cursor atomically. Retain the matching run-owned progress snapshot in
+that transaction when it validates. Label its capture as a checkpoint, not a
+terminal snapshot: a later provider call or source-tool attempt may have occurred
+before a crash and cannot be inferred. A missing or invalid later snapshot can
+leave an earlier checkpoint's snapshot in place. Startup recovery must not infer
+the final attempted-call count or resume the remaining work. A terminal snapshot
+replaces it only when validated; missing or invalid terminal diagnostics leave
+the earlier checkpoint intact.
+
+A checkpoint session's attempted-call total and usage-completeness flag require a
+persisted terminal trace, including for a cancelled session. An interrupted or
+recovery-cancelled session has only a checkpoint cursor, even when its recorded
+call count matches that cursor. Keep its attempted total unknown and its usage
+incomplete; do not load the source-bearing trace just to check its presence.
+
+Add a typed capture field to the existing bounded snapshot representation. Rows
+written by the preceding terminal-only implementation omit that field and decode
+as terminal for compatibility. No new schema or historical reconstruction is
+needed. Tests must inject a checkpoint transaction failure, recover a partial
+session, preserve cancellation and later terminal replacement, and show that the
+UI explicitly warns that activity after the retained checkpoint is not included.

@@ -6404,6 +6404,18 @@ F:	*
         )
         .await
         .unwrap();
+        let checkpoint_review_id = db
+            .create_review(ps_id, None, "codex-cli", "model", None, None)
+            .await
+            .unwrap();
+        let mut checkpoint_progress = serde_json::to_value(&terminal_progress).unwrap();
+        checkpoint_progress["capture"] = serde_json::json!("checkpoint");
+        db.execute(
+            "UPDATE reviews SET review_mode = 'agent_harness', status = 'Failed', harness_progress_snapshot = ? WHERE id = ?",
+            libsql::params![checkpoint_progress.to_string(), checkpoint_review_id],
+        )
+        .await
+        .unwrap();
         db.update_patchset_status(ps_id, "In Review").await.unwrap();
         let progress = state.review_progress.begin(ps_id);
         progress.report("active review");
@@ -6483,53 +6495,61 @@ F:	*
             assert_eq!(details["active_review_progress"], "active review");
             assert!(details.get("active_stage_usage").is_some());
             assert!(details.get("active_harness_usage").is_some());
-            let terminal = details["reviews"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|review| review["id"] == terminal_review_id)
-                .unwrap();
+            for review_id in [terminal_review_id, checkpoint_review_id] {
+                let review = details["reviews"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|review| review["id"] == review_id)
+                    .unwrap();
+                let snapshot = &review["harness_progress_snapshot"];
+                assert_eq!(snapshot["provider_calls_attempted"], 2);
+                assert_eq!(snapshot["provider_calls_with_usage"], 1);
+                if review_id == checkpoint_review_id {
+                    assert_eq!(snapshot["capture"], "checkpoint");
+                }
+            }
+        }
+        for review_id in [terminal_review_id, checkpoint_review_id] {
+            let error = get_review(
+                crate::auth::OptionalAuthUser(None),
+                OptionalPrincipal(Principal::anonymous()),
+                headers.clone(),
+                State(state.clone()),
+                Query(ReviewQuery {
+                    id: Some(review_id),
+                    patchset_id: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, StatusCode::NOT_FOUND);
+            let Json(authorized_review) = get_review(
+                auth_for("clm@fb.com"),
+                OptionalPrincipal(Principal::resolve("clm@fb.com", acl, Some(&index))),
+                headers.clone(),
+                State(state.clone()),
+                Query(ReviewQuery {
+                    id: Some(review_id),
+                    patchset_id: None,
+                }),
+            )
+            .await
+            .unwrap();
             assert_eq!(
-                terminal["harness_progress_snapshot"]["provider_calls_attempted"],
+                authorized_review["harness_progress_snapshot"]["provider_calls_attempted"],
                 2
             );
-            assert_eq!(
-                terminal["harness_progress_snapshot"]["provider_calls_with_usage"],
-                1
-            );
+            if review_id == checkpoint_review_id {
+                assert_eq!(
+                    authorized_review["harness_progress_snapshot"]["capture"],
+                    "checkpoint"
+                );
+            }
         }
-        let error = get_review(
-            crate::auth::OptionalAuthUser(None),
-            OptionalPrincipal(Principal::anonymous()),
-            headers.clone(),
-            State(state.clone()),
-            Query(ReviewQuery {
-                id: Some(terminal_review_id),
-                patchset_id: None,
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error, StatusCode::NOT_FOUND);
-        let Json(authorized_terminal) = get_review(
-            auth_for("clm@fb.com"),
-            OptionalPrincipal(Principal::resolve("clm@fb.com", acl, Some(&index))),
-            headers.clone(),
-            State(state.clone()),
-            Query(ReviewQuery {
-                id: Some(terminal_review_id),
-                patchset_id: None,
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            authorized_terminal["harness_progress_snapshot"]["provider_calls_attempted"],
-            2
-        );
         db.execute(
-            "DELETE FROM reviews WHERE id = ?",
-            libsql::params![terminal_review_id],
+            "DELETE FROM reviews WHERE id IN (?, ?)",
+            libsql::params![terminal_review_id, checkpoint_review_id],
         )
         .await
         .unwrap();
