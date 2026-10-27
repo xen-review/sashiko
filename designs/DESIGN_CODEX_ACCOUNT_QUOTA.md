@@ -215,6 +215,22 @@ provider call, queue mutation or historical reconstruction is enabled. Tests mus
 cover migration, process reopen, account isolation, stale competing writes,
 sample preservation, malformed rows, reset barriers and revision overflow.
 
+## Offline Policy Transition
+
+An offline transition combines the existing policy with the durable store. When
+disabled, it bypasses evaluation without reading or writing stored state. When
+enabled in a deterministic test, it loads the account's current revision, uses
+the existing policy to evaluate the supplied observation, and attempts one
+revision-checked write. A missing, mismatched, stale or expired observation is
+treated as unavailable and preserves any previously recorded sample. A rejected
+write is returned as a conflict; it is not retried against an old decision.
+
+The transition returns only the five-hour policy decision, never general model
+authorization. It starts no metadata reader, timer, worker, or provider call and
+has no production caller. Runtime configuration still rejects activation. Fake
+observations and a reopened database must cover bypass, unknown telemetry,
+threshold and reset transitions, account isolation, and rejected stale updates.
+
 ## Pure Decision Contract
 
 Account-scoped state is either Ready or Paused, with a typed reason, earliest

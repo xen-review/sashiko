@@ -207,13 +207,7 @@ impl CodexAccountQuotaPolicy {
                 resume_not_before, ..
             } => resume_not_before,
         };
-        let sample = sample.filter(|sample| {
-            sample.account_key == state.account_key
-                && sample.observed_at >= 0
-                && sample.observed_at <= now
-                && now - sample.observed_at <= self.max_sample_age_seconds
-                && sample.resets_at > now
-        });
+        let sample = self.usable_sample(now, &state.account_key, sample);
         let Some(sample) = sample else {
             return self.pause(
                 now,
@@ -253,6 +247,21 @@ impl CodexAccountQuotaPolicy {
                 account_key: state.account_key.clone(),
                 admission: AccountQuotaAdmission::Ready,
             },
+        })
+    }
+
+    pub(crate) fn usable_sample<'a>(
+        &self,
+        now: i64,
+        account_key: &str,
+        sample: Option<&'a FiveHourQuotaSample>,
+    ) -> Option<&'a FiveHourQuotaSample> {
+        sample.filter(|sample| {
+            sample.account_key == account_key
+                && sample.observed_at >= 0
+                && sample.observed_at <= now
+                && now - sample.observed_at <= self.max_sample_age_seconds
+                && sample.resets_at > now
         })
     }
 

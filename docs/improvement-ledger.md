@@ -604,6 +604,13 @@ reset barriers, and revision overflow; make check-pr passes. This storage does
 not evaluate quota thresholds or authorize model calls, and has no scheduler
 or runtime caller.
 
+An offline transition now combines the pure five-hour policy with the stored
+state using one revision-checked write. Disabled evaluation bypasses storage;
+unknown, stale, expired, future, or wrong-workspace observations pause and retain
+the last credible sample. Fake-clock tests cover reset shifts and reopening a
+database, and make check-pr passes. This transition has no production caller
+and its FiveHourReady result is not authorization for a model call.
+
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
 a disabled pure five-hour admission policy as the first increment. Its five
