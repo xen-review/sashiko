@@ -697,6 +697,12 @@ screenshot timed out and is not counted as a passed capture. No live review,
 model call or cancellation was started; complete final/native usage remains
 open. Deployment requires the usual fresh backup and idle boundary.
 
+Signed commit 9f419024 is now pushed and deployed with schema 18 at an idle
+boundary, with a checked private schema-17 backup and matching rollback binary
+and config. The running binary hash, migration and both detail APIs agree;
+review-state counts and configuration bytes are unchanged. Historical snapshots
+remain null, and no telemetry-specific review or live cancellation was queued.
+
 Show model/provider/actual effort, completed and active turns, tool calls,
 input/output/cached tokens, elapsed time, and budget consumption in the web UI's
 status/progress surface. Preserve final totals on completed, failed, timed-out,

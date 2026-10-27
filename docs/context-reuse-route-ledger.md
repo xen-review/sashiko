@@ -5,6 +5,51 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Retained-Diagnostics Rollout Checkpoint
+
+At 16:50 CET on 2026-10-27, signed/pushed source 9f419024 is deployed with schema
+18. Each workflow worker retains its own completed-stage diagnostics by exact
+review ID as stderr records arrive. Migration 018 leaves historical snapshots
+null. Bounded snapshots survive normal/failed/cancelled completion without
+overwriting final interaction totals, and the timeout regression proves a
+reported stage survives an error while the fake child is reaped promptly.
+Parallel workers do not borrow each other's patchset display-registry state.
+The post-reap stderr drain is bounded at one second and warns on interruption;
+retained records are partial diagnostics, not guaranteed complete final usage.
+
+The existing shared review query exposes snapshots on both detail routes after
+the same permission/embargo boundaries, without per-review queries. Cancelled
+cards render retained records, and their summary stays Cancelled rather than
+In progress. Historical rows remain unknown. Storage bounds, replacement,
+legacy null, cancellation retention, timeout failure/reaping, both projections
+and embargo exclusion pass focused checks. The full gate passes 1,161 library
+tests (two ignored), 49 main, seven CLI, 28 integration, formatting and all
+Clippy profiles. Synthetic terminal-card checks prove hostile names stay text
+and 390/1440-pixel layouts do not overflow. A component screenshot timed out;
+that capture is not claimed as passed. The private fixture is stopped.
+
+Private before-retained-stage-usage-20261027-155045.db passed quick_check;
+matching rollback binary and Settings snapshot are preserved outside Git.
+Installed/running/release SHA-256:
+051280368d05e235c9b9ff488d49ef4f9c834866c49f311618cabe44edac7e12.
+Service active PID 1195489, schema 18 and both APIs verified. Review counts
+remain 110 Reviewed, 90 Cancelled, 27 Failed, 195 Failed To Apply and 46
+Incomplete, with no Pending or In Review. Raw messages numbered 4,285 before
+deployment. Retained snapshots are still zero in live data: no diagnostic
+backfill, feature-specific review or cancellation was started. The seven
+positive human-evidence series and terminal detail provenance remain intact.
+
+Configuration bytes are unchanged: codex-cli / gpt-6-luna / configured medium,
+1,800-second review timeout, backend-effective effort Unknown, existing auth
+and muted delivery. The mirror timer is restored unchanged. Fresh metadata at
+16:51:29 CET reports 45% five-hour and 43% weekly remaining, reset 19:27:29 CET;
+premium calls are ineligible. The observed shared decline from 78% at 15:35
+includes other consumers and is not an isolated daemon burn or exact token
+forecast. No controller, self-review, model turn, benchmark, paid overage,
+public post, PR, queue refill or watcher was started. First live staging
+publication, opaque quota-account binding, complete interrupted/native/harness
+usage and backend-effective effort remain open; do not infer or fabricate them.
+
 ### Daytime Active-Usage Checkpoint
 
 At 16:07 CET on 2026-10-27, source/runtime a535d045 is signed, pushed to
