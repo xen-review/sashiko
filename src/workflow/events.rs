@@ -33,6 +33,7 @@ pub enum WorkflowEvent {
         tokens_in: u32,
         tokens_out: u32,
         tokens_cached: u32,
+        usage_coverage: Option<crate::ai::SessionUsageCoverage>,
     },
     /// A dynamic fan-out resolved the stages it will run. Emitted whether or
     /// not the planning stage ran, so a skipped planner still reports a plan.

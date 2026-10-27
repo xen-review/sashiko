@@ -2475,6 +2475,8 @@
                     if (progress) {
                         progress.textContent = data.active_review_progress || 'Waiting for stage update...';
                     }
+                    const usage = document.getElementById('active-stage-usage');
+                    if (usage) usage.innerHTML = renderActiveStageUsage(data.active_stage_usage);
                 } catch (error) {
                     console.error('Failed to refresh patchset progress', error);
                 } finally {
@@ -4315,12 +4317,12 @@
 
             document.getElementById('app').innerHTML = `
                 <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
-                <h1>
-                    <span>${escapeHtml(data.subject) || '(no subject)'}</span>
-                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0;">
+                <h1 style="flex-wrap:wrap;row-gap:10px;">
+                    <span style="min-width:0;overflow-wrap:anywhere;flex:1 1 280px;">${escapeHtml(data.subject) || '(no subject)'}</span>
+                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0;max-width:100%;margin-left:auto;">
                         <span class="status-badge status-${currentStatus.replace(/ /g, '')}"${embargoBadgeTitle}>${currentStatus}</span>
                         ${currentStatus === 'In Review' ? `
-                            <span id="active-review-progress" aria-live="polite" style="max-width:320px; color:var(--text-muted); font-size:0.8em; font-weight:normal; line-height:1.3; text-align:right;">
+                            <span id="active-review-progress" aria-live="polite" style="max-width:min(320px,100%);overflow-wrap:anywhere; color:var(--text-muted); font-size:0.8em; font-weight:normal; line-height:1.3; text-align:right;">
                                 ${escapeHtml(data.active_review_progress || 'Waiting for stage update...')}
                             </span>
                         ` : ''}
@@ -4331,6 +4333,8 @@
                 </h1>
                 
                 ${failureHtml}
+
+                ${currentStatus === 'In Review' ? `<div id="active-stage-usage">${renderActiveStageUsage(data.active_stage_usage)}</div>` : ''}
 
                 <div class="section">
                     <div class="kv"><div class="label">Author:</div><div>${(() => {
@@ -4556,6 +4560,20 @@
             const format = value => valid(value) ? formatTokenCount(value) : 'Unknown';
             const cached = cachedUnknown ? valid(record?.tokens_cached) && record.tokens_cached > 0 ? `${format(record.tokens_cached)} (partial)` : 'Unknown' : format(record?.tokens_cached);
             return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${format(record?.tokens_out)}${status}`;
+        }
+
+        function renderActiveStageUsage(snapshot) {
+            if (!Array.isArray(snapshot?.completed_stages) || !snapshot.completed_stages.length) return '';
+            const rows = snapshot.completed_stages.slice(0, 256).map(record => {
+                const patch = Number.isSafeInteger(record.patch_index) && record.patch_index >= 0 ? record.patch_index === 0 ? 'Series' : `Patch ${record.patch_index}` : 'Scope unknown';
+                return `<tr><td style="width:35%;overflow-wrap:anywhere;">${escapeHtml(patch)}<br>${escapeHtml(String(record.stage || 'Unknown'))}</td><td style="overflow-wrap:anywhere;">${renderReviewTokens(record)}</td></tr>`;
+            }).join('');
+            return `<div style="margin:16px 0;min-width:0;">
+                <h3 style="font-size:1rem;">Reported Stage Usage</h3>
+                <div class="text-muted-sm" style="overflow-wrap:anywhere;">Latest completed-stage reports, not a workflow total. In-flight and unretained retry usage unavailable.</div>
+                <div style="max-height:320px;overflow:auto;margin-top:8px;"><table style="width:100%;min-width:0;table-layout:fixed;"><thead><tr><th>Stage</th><th>Reported Tokens</th></tr></thead><tbody>${rows}</tbody></table></div>
+                ${snapshot.truncated || snapshot.completed_stages.length > 256 ? '<div class="text-muted-sm">Stage reports truncated at 256 entries.</div>' : ''}
+            </div>`;
         }
 
         function renderReviewEffort(attribution) {

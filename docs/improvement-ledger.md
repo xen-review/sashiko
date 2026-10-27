@@ -638,7 +638,34 @@ before implementation; this ledger entry is not an installed quota controller.
 
 ### P2: Expose Live and Final Review Usage
 
-Status: future task requested on 2026-10-26; not implemented.
+Status: first bounded active-stage increment implemented and validated on
+2026-10-27; full live/final feature remains incomplete. See
+[live usage design](../designs/DESIGN_LIVE_REVIEW_USAGE.md).
+
+Completed workflow stages retain measured SessionUsageCoverage with token
+totals through a separate worker/local accounting event and structured
+subprocess record. The daemon registry keeps latest patch/stage reports per
+worker run, replacing duplicates and ignoring stale runs; 256 entries maximum
+with explicit truncation. Both detail routes enrich only matching active
+patchsets after existing permission/redaction checks. The UI reuses coverage
+rendering, keeps missing usage distinct from measured zero, and labels latest
+reports rather than a workflow total. Preliminary-stage accounting cannot
+advance the counted-stage progress bar. The native harness path emits no such
+snapshot yet, and no whole-series scope is inferred.
+
+Fake-provider, protocol round-trip, registry and API projection checks pass.
+Synthetic browser tests cover updates, reload/reconnect, hostile stage escaping,
+truncation, terminal removal and 390/1440-pixel containment. A 10-second positive
+update wait timed out before matching rendered counters arrived; no fixed
+polling-latency guarantee is claimed. Full make check-pr passes 1,160 library
+tests (two ignored), 49 main, seven CLI, 28 integration, formatting and all
+Clippy profiles. Package-scoped debug cleanup plus CARGO_INCREMENTAL=0 repaired
+an initial disk-full link. Service and mirror timer were restored after checks.
+
+Still required: terminal retention across failed, timed-out and cancelled
+reviews; active/completed turn and tool counters; elapsed/budget data; actual
+backend effort and generation visibility; and native harness/whole-series
+attribution. No model call or automatic quota controller was started.
 
 Show model/provider/actual effort, completed and active turns, tool calls,
 input/output/cached tokens, elapsed time, and budget consumption in the web UI's

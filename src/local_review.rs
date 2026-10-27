@@ -154,6 +154,9 @@ pub enum ProgressEvent {
         patch_index: i64,
         stage: String,
     },
+    AiReviewStageUsage {
+        usage: CompletedStageUsage,
+    },
     AiReviewAttempt {
         patch_index: i64,
         attempt: usize,
@@ -639,6 +642,24 @@ async fn review_single_patch(
                     cb(ProgressEvent::AiReviewStageFinished {
                         patch_index: p_index,
                         stage,
+                    });
+                }
+                crate::worker::WorkerProgressEvent::StageUsage {
+                    stage,
+                    tokens_in,
+                    tokens_out,
+                    tokens_cached,
+                    usage_coverage,
+                } => {
+                    cb(ProgressEvent::AiReviewStageUsage {
+                        usage: CompletedStageUsage {
+                            patch_index: p_index,
+                            stage,
+                            tokens_in,
+                            tokens_out,
+                            tokens_cached,
+                            usage_coverage,
+                        },
                     });
                 }
             }
@@ -1394,11 +1415,36 @@ pub async fn run_worker_from_stdin(options: WorkerOptions, settings: &Settings) 
 /// on when it streams the worker's stderr.
 pub const PROGRESS_LINE_PREFIX: &str = "progress: ";
 
+pub const STAGE_USAGE_LINE_PREFIX: &str = "stage-usage: ";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletedStageUsage {
+    pub patch_index: i64,
+    pub stage: String,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub tokens_cached: u32,
+    pub usage_coverage: Option<crate::ai::SessionUsageCoverage>,
+}
+
+pub fn completed_stage_usage(event: &ProgressEvent) -> Option<CompletedStageUsage> {
+    match event {
+        ProgressEvent::AiReviewStageUsage { usage } => Some(usage.clone()),
+        _ => None,
+    }
+}
+
 /// Renders the AI-phase events as plain lines on stderr, one per event, for
 /// the worker subprocess. Its parent owns the terminal and decides what to
 /// show; without these lines the whole AI phase is silent from outside, and a
 /// slow review is indistinguishable from a hung one.
 pub fn progress_to_stderr(event: ProgressEvent) {
+    if let Some(usage) = completed_stage_usage(&event)
+        && let Ok(record) = serde_json::to_string(&usage)
+    {
+        eprintln!("{STAGE_USAGE_LINE_PREFIX}{record}");
+    }
     if let Some(line) = progress_line(event) {
         eprintln!("{PROGRESS_LINE_PREFIX}{line}");
     }
@@ -1432,7 +1478,9 @@ pub fn progress_line(event: ProgressEvent) -> Option<String> {
             turn,
             max_turns,
         } => format!("patch {patch_index}: {stage} turn {turn}/{max_turns}"),
-        ProgressEvent::AiReviewStageFinished { patch_index, stage } => {
+        ProgressEvent::AiReviewStageFinished {
+            patch_index, stage, ..
+        } => {
             format!("patch {patch_index}: {stage} finished")
         }
         ProgressEvent::AiReviewAttempt {
@@ -2498,6 +2546,47 @@ mod tests {
         assert!(patches[0].get("review_status").is_none());
         assert_eq!(patches[1]["review_status"], "incomplete");
         assert_eq!(patches[1]["review_error"], "output truncated");
+    }
+
+    #[test]
+    fn stage_usage_protocol_keeps_accounting_out_of_display_lines() {
+        for usage_coverage in [
+            None,
+            Some(crate::ai::SessionUsageCoverage {
+                requests: 1,
+                responses_with_usage: 1,
+                responses_without_usage: 0,
+                responses_without_cached_usage: 0,
+            }),
+        ] {
+            let usage = CompletedStageUsage {
+                patch_index: 2,
+                stage: "planning".into(),
+                tokens_in: 0,
+                tokens_out: 0,
+                tokens_cached: 0,
+                usage_coverage,
+            };
+            let event = ProgressEvent::AiReviewStageUsage {
+                usage: usage.clone(),
+            };
+            assert_eq!(completed_stage_usage(&event), Some(usage.clone()));
+            assert!(progress_line(event).is_none());
+            let line = format!(
+                "{STAGE_USAGE_LINE_PREFIX}{}",
+                serde_json::to_string(&usage).unwrap()
+            );
+            let restored: CompletedStageUsage =
+                serde_json::from_str(line.strip_prefix(STAGE_USAGE_LINE_PREFIX).unwrap()).unwrap();
+            assert_eq!(restored, usage);
+        }
+        assert!(
+            completed_stage_usage(&ProgressEvent::AiReviewStageStarted {
+                patch_index: 2,
+                stage: "planning".into(),
+            })
+            .is_none()
+        );
     }
 
     #[test]

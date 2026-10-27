@@ -116,6 +116,13 @@ pub enum WorkerProgressEvent {
     StageFinished {
         stage: String,
     },
+    StageUsage {
+        stage: String,
+        tokens_in: u32,
+        tokens_out: u32,
+        tokens_cached: u32,
+        usage_coverage: Option<crate::ai::SessionUsageCoverage>,
+    },
     StageTurn {
         stage: String,
         turn: usize,
@@ -480,12 +487,25 @@ impl Worker {
                             }
                         }
                     }
-                    WorkflowEvent::StageFinished { stage_name, .. }
-                        if crate::workflows::is_counted_stage(project, stage_name) =>
-                    {
-                        progress_cb(WorkerProgressEvent::StageFinished {
+                    WorkflowEvent::StageFinished {
+                        stage_name,
+                        tokens_in,
+                        tokens_out,
+                        tokens_cached,
+                        usage_coverage,
+                    } => {
+                        progress_cb(WorkerProgressEvent::StageUsage {
                             stage: stage_name.to_string(),
+                            tokens_in,
+                            tokens_out,
+                            tokens_cached,
+                            usage_coverage,
                         });
+                        if crate::workflows::is_counted_stage(project, stage_name) {
+                            progress_cb(WorkerProgressEvent::StageFinished {
+                                stage: stage_name.to_string(),
+                            });
+                        }
                     }
                     WorkflowEvent::StageTurn {
                         stage_name,

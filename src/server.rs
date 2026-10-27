@@ -1247,6 +1247,7 @@ async fn get_patchset(
             )
             .await?;
             redact_embedded_bugs(&state, &principal, &mut details).await?;
+            attach_active_review_progress(&mut details, &state.review_progress);
             if let Err(error) = attach_human_review_evidence(&state, &mut details).await {
                 warn!(
                     "Optional human-review evidence unavailable: {}",
@@ -1413,6 +1414,12 @@ fn attach_active_review_progress(
             serde_json::Value::String(progress),
         );
     }
+    if let Some(usage) = registry.stage_usage(patchset_id)
+        && let Ok(value) = serde_json::to_value(usage)
+        && let Some(object) = details.as_object_mut()
+    {
+        object.insert("active_stage_usage".to_string(), value);
+    }
 }
 
 #[cfg(test)]
@@ -1425,6 +1432,14 @@ mod active_review_progress_tests {
         let registry = ReviewProgressRegistry::default();
         let progress = registry.begin(7);
         progress.report("patch 1: verification turn 1/12");
+        progress.report_usage(crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "planning".to_string(),
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cached: 0,
+            usage_coverage: None,
+        });
 
         let mut active = serde_json::json!({ "id": 7, "status": "In Review" });
         attach_active_review_progress(&mut active, &registry);
@@ -1432,14 +1447,26 @@ mod active_review_progress_tests {
             active["active_review_progress"],
             "patch 1: verification turn 1/12"
         );
+        assert_eq!(
+            active["active_stage_usage"]["completed_stages"][0]["stage"],
+            "planning"
+        );
+        assert!(active["active_stage_usage"]["completed_stages"][0]["usage_coverage"].is_null());
+        assert_eq!(active["active_stage_usage"]["truncated"], false);
 
         let mut other_patchset = serde_json::json!({ "id": 8, "status": "In Review" });
         attach_active_review_progress(&mut other_patchset, &registry);
         assert!(other_patchset.get("active_review_progress").is_none());
+        assert!(other_patchset.get("active_stage_usage").is_none());
 
         let mut completed = serde_json::json!({ "id": 7, "status": "Reviewed" });
         attach_active_review_progress(&mut completed, &registry);
         assert!(completed.get("active_review_progress").is_none());
+        assert!(completed.get("active_stage_usage").is_none());
+        let mut embargoed = serde_json::json!({ "id": 7, "status": "Embargoed" });
+        attach_active_review_progress(&mut embargoed, &registry);
+        assert!(embargoed.get("active_review_progress").is_none());
+        assert!(embargoed.get("active_stage_usage").is_none());
     }
 }
 

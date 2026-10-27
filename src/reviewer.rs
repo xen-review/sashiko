@@ -57,6 +57,15 @@ struct ReviewProgressRegistryInner {
 struct ActiveReviewProgress {
     run_id: u64,
     message: String,
+    completed_stage_usage:
+        std::collections::BTreeMap<(i64, String), crate::local_review::CompletedStageUsage>,
+    usage_truncated: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ActiveStageUsageSnapshot {
+    pub completed_stages: Vec<crate::local_review::CompletedStageUsage>,
+    pub truncated: bool,
 }
 
 pub(crate) struct ReviewProgressCleanup {
@@ -85,6 +94,8 @@ impl ReviewProgressRegistry {
             ActiveReviewProgress {
                 run_id,
                 message: String::new(),
+                completed_stage_usage: std::collections::BTreeMap::new(),
+                usage_truncated: false,
             },
         );
         ReviewProgressCleanup {
@@ -100,6 +111,57 @@ impl ReviewProgressRegistry {
             && entry.run_id == run_id
         {
             entry.message = message.to_string();
+        }
+    }
+
+    pub fn stage_usage(&self, patchset_id: i64) -> Option<ActiveStageUsageSnapshot> {
+        let entries = self.lock_entries();
+        let entry = entries.get(&patchset_id)?;
+        if entry.completed_stage_usage.is_empty() && !entry.usage_truncated {
+            return None;
+        }
+        Some(ActiveStageUsageSnapshot {
+            completed_stages: entry.completed_stage_usage.values().cloned().collect(),
+            truncated: entry.usage_truncated,
+        })
+    }
+
+    fn record_stage_usage(
+        &self,
+        patchset_id: i64,
+        run_id: u64,
+        usage: crate::local_review::CompletedStageUsage,
+    ) {
+        if usage.patch_index < 0
+            || usage.stage.is_empty()
+            || usage.stage.len() > 128
+            || usage.stage.chars().any(char::is_control)
+        {
+            return;
+        }
+        let mut entries = self.lock_entries();
+        let Some(entry) = entries
+            .get_mut(&patchset_id)
+            .filter(|entry| entry.run_id == run_id)
+        else {
+            return;
+        };
+        let key = (usage.patch_index, usage.stage.clone());
+        if entry.completed_stage_usage.len() >= 256
+            && !entry.completed_stage_usage.contains_key(&key)
+        {
+            entry.usage_truncated = true;
+            return;
+        }
+        entry.completed_stage_usage.insert(key, usage);
+    }
+
+    fn record_stage_usage_line(&self, patchset_id: i64, run_id: u64, line: &str) {
+        if let Some(payload) = line.strip_prefix(crate::local_review::STAGE_USAGE_LINE_PREFIX)
+            && payload.len() <= 4096
+            && let Ok(usage) = serde_json::from_str(payload)
+        {
+            self.record_stage_usage(patchset_id, run_id, usage);
         }
     }
 
@@ -128,6 +190,12 @@ impl ReviewProgressCleanup {
     pub(crate) fn report(&self, message: &str) {
         self.registry.update(self.patchset_id, self.run_id, message);
     }
+
+    #[cfg(test)]
+    pub(crate) fn report_usage(&self, usage: crate::local_review::CompletedStageUsage) {
+        self.registry
+            .record_stage_usage(self.patchset_id, self.run_id, usage);
+    }
 }
 
 impl Drop for ReviewProgressCleanup {
@@ -139,6 +207,58 @@ impl Drop for ReviewProgressCleanup {
 #[cfg(test)]
 mod review_progress_tests {
     use super::ReviewProgressRegistry;
+
+    #[test]
+    fn stage_usage_is_bounded_replaced_and_run_scoped() {
+        let registry = ReviewProgressRegistry::default();
+        let first = registry.begin(1);
+        assert!(registry.stage_usage(1).is_none());
+        let usage = crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "planning".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cached: 0,
+            usage_coverage: None,
+        };
+        first.report_usage(usage.clone());
+        let mut replacement = usage.clone();
+        replacement.tokens_in = 7;
+        first.report_usage(replacement.clone());
+        let snapshot = registry.stage_usage(1).unwrap();
+        assert_eq!(snapshot.completed_stages, vec![replacement]);
+        assert!(!snapshot.truncated);
+        assert!(registry.stage_usage(2).is_none());
+        let second = registry.begin(1);
+        first.report_usage(usage.clone());
+        drop(first);
+        assert!(registry.stage_usage(1).is_none());
+        registry.record_stage_usage_line(1, second.run_id, "stage-usage: not-json");
+        registry.record_stage_usage_line(
+            1,
+            second.run_id,
+            &format!("stage-usage: {}", " ".repeat(4097)),
+        );
+        assert!(registry.stage_usage(1).is_none());
+        for patch_index in 1..=257 {
+            second.report_usage(crate::local_review::CompletedStageUsage {
+                patch_index,
+                ..usage.clone()
+            });
+        }
+        let snapshot = registry.stage_usage(1).unwrap();
+        assert_eq!(snapshot.completed_stages.len(), 256);
+        assert!(snapshot.truncated);
+        let mut replacement = usage;
+        replacement.tokens_out = 11;
+        second.report_usage(replacement.clone());
+        assert_eq!(
+            registry.stage_usage(1).unwrap().completed_stages[0],
+            replacement
+        );
+        drop(second);
+        assert!(registry.stage_usage(1).is_none());
+    }
 
     #[test]
     fn progress_is_scoped_to_patchset_and_worker_run() {
@@ -3019,6 +3139,7 @@ async fn run_review_tool_with_cmd_and_overrides(
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                progress_registry.record_stage_usage_line(patchset_id, progress_run_id, &line);
                 if let Some(progress) = line
                     .strip_prefix(crate::local_review::PROGRESS_LINE_PREFIX)
                     .map(str::trim)

@@ -584,6 +584,7 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
                 tokens_in,
                 tokens_out,
                 tokens_cached,
+                usage_coverage: Some(result.usage_coverage),
             });
         }
 
@@ -623,6 +624,88 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct EmptyState;
+
+    #[tokio::test]
+    async fn stage_finished_coverage_distinguishes_missing_and_measured_zero() -> Result<()> {
+        struct UsageProvider(bool);
+        #[async_trait]
+        impl AiProvider for UsageProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                Ok(AiResponse {
+                    content: Some("{}".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: self.0.then_some(crate::ai::AiUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake-usage".into(),
+                    context_window_size: 100_000,
+                }
+            }
+        }
+        for measured in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let env = crate::workflow::WorkflowEnv {
+                provider: Arc::new(UsageProvider(measured)),
+                tools: Arc::new(crate::toolbox::ToolBox::new(
+                    temp.path().to_path_buf(),
+                    None,
+                )),
+                base_dir: temp.path(),
+                context_tag: None,
+            };
+            let workflow = crate::workflow::Workflow::builder("usage-events")
+                .stage(
+                    Stage::builder("measured-stage")
+                        .user_prompt(PromptTemplate::new("Return JSON"))
+                        .output_format(OutputFormat::json())
+                        .reduce(|_: &mut EmptyState, _: Value| {})
+                        .build(),
+                )
+                .build();
+            let events = Mutex::new(Vec::new());
+            let callback = |event| events.lock().unwrap().push(event);
+            let outcome = crate::workflow::WorkflowEngine::execute(
+                &workflow,
+                &env,
+                &mut EmptyState,
+                Some(&callback),
+            )
+            .await?;
+            let events = events.lock().unwrap();
+            let coverage = events
+                .iter()
+                .find_map(|event| match event {
+                    WorkflowEvent::StageFinished {
+                        tokens_in,
+                        tokens_out,
+                        tokens_cached,
+                        usage_coverage,
+                        ..
+                    } => {
+                        assert_eq!((*tokens_in, *tokens_out, *tokens_cached), (0, 0, 0));
+                        *usage_coverage
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("Stage completion usage missing"))?;
+            assert_eq!(coverage.requests, 1);
+            assert_eq!(coverage.responses_with_usage, usize::from(measured));
+            assert_eq!(coverage.responses_without_usage, usize::from(!measured));
+            assert_eq!(coverage.is_complete(), measured);
+            assert_eq!(outcome.usage_coverage, Some(coverage));
+        }
+        Ok(())
+    }
 
     /// Calls a tool on its first turn, then answers. Records every request so a
     /// test can check what the model was told about the tool call.
