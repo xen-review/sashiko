@@ -142,9 +142,14 @@ equivalent evidence or improved full-review quality. These are format replays,
 not complete reviews or independent correctness checks. Do not infer prices,
 general efficiency, or permission for unrestricted Sol use from these samples.
 Artifacts remain outside the repository under the existing effort-trial folder.
-The daemon resumed on its unchanged Luna/medium default. GPT-6 Sol, GPT-6.1 Sol,
-and high-effort premium calls were not tested; no reason to spend on them was
-established by this successful format check.
+The daemon resumed on its unchanged Luna/medium default. At that point GPT-6
+Sol, GPT-6.1 Sol, and high-effort premium calls had not been tested; no reason
+to spend on them was established by this successful format check.
+
+A later targeted gpt-6.1-terra / HIGH replay returned valid stage JSON in one
+6.761-second call using 10,639 uncached input and 322 output tokens. Native
+metadata confirmed the requested model and effort. This was one saved-stage
+format replay, not a complete sequential review or a quality comparison.
 
 ### P1: Configure Model/Effort and Patch-Scaled Timeouts
 
@@ -593,10 +598,8 @@ gates (1,151 library, two ignored; 49 main; seven CLI; 28 integration). It keeps
 measured weekly zero distinct from unknown, requires known windows and matching
 subscription metadata, and rejects malformed, expired or paid/unknown spend
 controls. A metadata-only schema read at 02:10 CET reported 35% five-hour and
-53% weekly remaining. The account endpoint exposes login and plan, not an opaque
-account/workspace ID; the decoder's hashed local comparison key is not enough to
-enable durable cross-process admission. Stable binding and authentication-change
-handling remain gates alongside bounded RPC, weekly reserves and persistence.
+53% weekly remaining. That initial inspection missed workspace fields outside
+the account object; the login/plan key alone cannot establish workspace identity.
 The deployed daemon remains unchanged; no controller or model call was started.
 
 The bounded metadata-only RPC increment now passes four fake-process tests.
@@ -605,11 +608,27 @@ working directory and a fixed 20-second deadline, and bounds stdout bytes,
 line size and notification count. Only metadata methods are emitted. Unexpected
 requests/IDs, malformed responses, RPC errors, changed accounts, timeout and
 early exit fail closed without exposing payloads. Child reaping and cancellation
-cleanup are tested. It remains unwired from admission; opaque workspace binding,
-weekly reserves, persistence, wakeup scheduling and paused-state UI are not
-claimed complete. The full gate passes 1,157 library tests (two ignored), 49 main,
-seven CLI and 28 integration tests, formatting and all Clippy profiles. No live
-model call was needed and the reader is not deployed or wired into scheduling.
+cleanup are tested. It remains unwired from admission; weekly reserves,
+persistence, wakeup scheduling and paused-state UI are not claimed complete.
+The full gate passes 1,157 library tests (two ignored), 49 main, seven CLI and
+28 integration tests, formatting and all Clippy profiles. No live model call
+was needed and the reader is not deployed or wired into scheduling.
+
+A later workspace-bound reader compares the account/read workspace ID with the
+quota response account ID, checks included-usage permission and account stability,
+and keeps raw identifiers out of logs and persistence. Its separate premium
+predicate requires a fresh matching snapshot and strictly more than 50% five-hour
+remaining. Positive weekly allowance alone is not a sufficient reserve, and
+neither reader nor predicate is wired into model-call admission. The latest full
+gate passes 1,168 library tests (two ignored), 49 main, seven CLI and 28
+integration tests, formatting and all Clippy profiles.
+
+Metadata-only thread probes exposed no execution account identity before a turn.
+The saved Terra replay's creator ID matched the observed workspace only after
+model work began. Safe pre-call binding, sufficient weekly and time reserves,
+and preservation of partial work on denial remain required before automatic
+premium reviews can resume. See the quota design for the probe and shared-login
+restrictions; do not interpret a post-call identity match as a pre-call safeguard.
 
 Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
 plan review allocations over the remaining window, retaining a debugging reserve.
