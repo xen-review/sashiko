@@ -214,6 +214,15 @@ pub struct CodexSubscriptionQuotaSnapshot {
 #[derive(Debug, Clone)]
 pub struct CodexWorkspaceQuotaSnapshot(CodexSubscriptionQuotaSnapshot);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexWorkspaceQuotaKey(String);
+
+impl CodexWorkspaceQuotaKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 const PREMIUM_QUOTA_MAX_AGE_SECONDS: i64 = 20;
 
 fn valid_quota_account_key(key: &str) -> bool {
@@ -223,6 +232,10 @@ fn valid_quota_account_key(key: &str) -> bool {
 impl CodexWorkspaceQuotaSnapshot {
     pub fn quota(&self) -> &CodexSubscriptionQuotaSnapshot {
         &self.0
+    }
+
+    pub fn workspace_key(&self) -> CodexWorkspaceQuotaKey {
+        CodexWorkspaceQuotaKey(self.0.five_hour.account_key.clone())
     }
 
     pub fn has_fresh_premium_quota(
@@ -1120,13 +1133,22 @@ while IFS= read -r request; do :; done
         assert!(!key.contains("workspace-a"));
         let snapshot = decode_codex_workspace_quota(&account, &limits, &key, 100)?;
         assert_eq!(snapshot.quota().five_hour.account_key, key);
+        let typed_key = snapshot.workspace_key();
+        assert_eq!(typed_key.as_str(), key);
+        assert_ne!(typed_key.as_str(), codex_quota_account_key(&account)?);
         assert!(snapshot.has_fresh_premium_quota(&key, 100, 100));
 
         let mut changed_workspace = account.clone();
         changed_workspace["workspaceRouting"]["chatgptAccountId"] =
             serde_json::json!("workspace-b");
-        assert_ne!(codex_workspace_quota_key(&changed_workspace)?, key);
+        let changed_key = codex_workspace_quota_key(&changed_workspace)?;
+        assert_ne!(changed_key, key);
         assert!(decode_codex_workspace_quota(&changed_workspace, &limits, &key, 100).is_err());
+        let mut changed_limits = limits.clone();
+        changed_limits["accountId"] = serde_json::json!("workspace-b");
+        let changed_snapshot =
+            decode_codex_workspace_quota(&changed_workspace, &changed_limits, &changed_key, 100)?;
+        assert_ne!(typed_key, changed_snapshot.workspace_key());
         for value in [
             serde_json::Value::Null,
             serde_json::json!(""),

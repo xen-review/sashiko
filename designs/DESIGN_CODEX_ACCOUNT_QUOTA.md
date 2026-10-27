@@ -190,6 +190,31 @@ retry. Settings-loader tests cover omitted and disabled tables, defaults,
 custom values, invalid thresholds and durations, unknown fields, and rejected
 activation. Activation remains a later explicitly verified integration step.
 
+## Durable State Checkpoint
+
+Store one bounded state row per workspace-derived account key. Only a key obtained
+from a validated workspace quota snapshot may be used by the storage API; neither
+the raw workspace identifier nor login or credentials are stored. Persist the
+typed ready/paused state, reason, reset barrier, next check, and latest credible
+five-hour sample when available. Absence of a sample is unknown, not zero.
+
+Every row carries a monotonically increasing revision. Creation and replacement
+use compare-and-swap writes so a decision based on an older row cannot overwrite
+a newer pause. Validate account consistency, state and timestamp invariants on
+both writes and reads; malformed persisted state fails closed rather than becoming
+ready. Writes accept samples only from a matching validated workspace snapshot
+whose observation is fresh and unexpired. Preserve the previous sample when
+telemetry is unavailable, and never replace it with an older observation.
+Exhausted revisions fail rather than wrap.
+
+This is storage only; callers supply the state, and storage does not evaluate the
+policy thresholds. A retained ready row never authorizes a model call, and a
+fresh authenticated observation and the separate premium, execution-account,
+reserve, scheduler and recovery gates remain mandatory. No controller, timer,
+provider call, queue mutation or historical reconstruction is enabled. Tests must
+cover migration, process reopen, account isolation, stale competing writes,
+sample preservation, malformed rows, reset barriers and revision overflow.
+
 ## Pure Decision Contract
 
 Account-scoped state is either Ready or Paused, with a typed reason, earliest

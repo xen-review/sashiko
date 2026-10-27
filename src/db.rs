@@ -450,6 +450,111 @@ pub struct HarnessCheckpointFinish<'a> {
 }
 
 #[cfg(feature = "server")]
+#[derive(Debug, Clone)]
+pub struct StoredCodexAccountQuota {
+    pub revision: i64,
+    pub state: crate::ai::quota::AccountQuotaState,
+    pub sample: Option<crate::ai::quota::FiveHourQuotaSample>,
+}
+
+#[cfg(feature = "server")]
+pub struct CodexAccountQuotaWrite<'a> {
+    pub expected_revision: Option<i64>,
+    pub state: &'a crate::ai::quota::AccountQuotaState,
+    pub snapshot: Option<&'a crate::ai::codex_cli::CodexWorkspaceQuotaSnapshot>,
+    pub now: i64,
+    pub max_sample_age_seconds: i64,
+}
+
+#[cfg(feature = "server")]
+struct CodexQuotaColumns {
+    admission: &'static str,
+    reason: Option<&'static str>,
+    barrier: Option<i64>,
+    next_check: Option<i64>,
+    observed_at: Option<i64>,
+    remaining: Option<f64>,
+    resets_at: Option<i64>,
+}
+
+#[cfg(feature = "server")]
+fn codex_quota_columns(
+    key: &crate::ai::codex_cli::CodexWorkspaceQuotaKey,
+    state: &crate::ai::quota::AccountQuotaState,
+    sample: Option<&crate::ai::quota::FiveHourQuotaSample>,
+) -> Result<CodexQuotaColumns> {
+    use crate::ai::quota::{AccountQuotaAdmission, AccountQuotaPauseReason};
+
+    let account_key = key.as_str();
+    anyhow::ensure!(
+        account_key.len() == 64
+            && account_key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && state.account_key == account_key,
+        "Invalid Codex workspace quota identity"
+    );
+    let (admission, reason, barrier, next_check) = match &state.admission {
+        AccountQuotaAdmission::Ready => {
+            anyhow::ensure!(
+                sample.is_some(),
+                "Ready quota state requires a measured sample"
+            );
+            ("ready", None, None, None)
+        }
+        AccountQuotaAdmission::Paused {
+            reason,
+            resume_not_before,
+            next_check_at,
+        } => {
+            anyhow::ensure!(
+                *next_check_at >= 0
+                    && resume_not_before
+                        .is_none_or(|barrier| barrier >= 0 && *next_check_at >= barrier)
+                    && (matches!(reason, AccountQuotaPauseReason::TelemetryUnavailable)
+                        || resume_not_before.is_some()),
+                "Invalid Codex quota pause state"
+            );
+            let reason = match reason {
+                AccountQuotaPauseReason::LowAllowance => "low_allowance",
+                AccountQuotaPauseReason::AwaitingResetEvidence => "awaiting_reset_evidence",
+                AccountQuotaPauseReason::TelemetryUnavailable => "telemetry_unavailable",
+            };
+            (
+                "paused",
+                Some(reason),
+                *resume_not_before,
+                Some(*next_check_at),
+            )
+        }
+    };
+    let (observed_at, remaining, resets_at) = if let Some(sample) = sample {
+        anyhow::ensure!(
+            sample.account_key == account_key
+                && sample.observed_at >= 0
+                && sample.resets_at > sample.observed_at,
+            "Invalid Codex quota sample"
+        );
+        (
+            Some(sample.observed_at),
+            Some(sample.remaining.as_f64()),
+            Some(sample.resets_at),
+        )
+    } else {
+        (None, None, None)
+    };
+    Ok(CodexQuotaColumns {
+        admission,
+        reason,
+        barrier,
+        next_check,
+        observed_at,
+        remaining,
+        resets_at,
+    })
+}
+
+#[cfg(feature = "server")]
 struct PreparedHarnessCall {
     provider_call: i64,
     history_end: i64,
@@ -2371,9 +2476,137 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 19.");
+        if current_version < 20 {
+            info!("Applying database migration version 20 (Codex account quota state)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/020_codex_account_quota_state.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 20", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 20.");
 
         Ok(())
+    }
+
+    pub async fn get_codex_account_quota_state(
+        &self,
+        key: &crate::ai::codex_cli::CodexWorkspaceQuotaKey,
+    ) -> Result<Option<StoredCodexAccountQuota>> {
+        use crate::ai::quota::{
+            AccountQuotaAdmission, AccountQuotaPauseReason, AccountQuotaState, FiveHourQuotaSample,
+            RemainingQuotaPercent,
+        };
+
+        let mut rows = self.conn.query(
+            "SELECT revision, admission, pause_reason, resume_not_before, next_check_at, sample_observed_at, sample_remaining_percent, sample_resets_at FROM codex_account_quota_state WHERE account_key = ?",
+            libsql::params![key.as_str()],
+        ).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let revision: i64 = row.get(0)?;
+        anyhow::ensure!(revision > 0, "Invalid stored Codex quota revision");
+        let admission: String = row.get(1)?;
+        let reason: Option<String> = row.get(2)?;
+        let barrier: Option<i64> = row.get(3)?;
+        let next_check: Option<i64> = row.get(4)?;
+        let admission = match (admission.as_str(), reason.as_deref(), barrier, next_check) {
+            ("ready", None, None, None) => AccountQuotaAdmission::Ready,
+            ("paused", Some(reason), barrier, Some(next_check_at)) => {
+                let reason = match reason {
+                    "low_allowance" => AccountQuotaPauseReason::LowAllowance,
+                    "awaiting_reset_evidence" => AccountQuotaPauseReason::AwaitingResetEvidence,
+                    "telemetry_unavailable" => AccountQuotaPauseReason::TelemetryUnavailable,
+                    _ => bail!("Invalid stored Codex quota pause reason"),
+                };
+                AccountQuotaAdmission::Paused {
+                    reason,
+                    resume_not_before: barrier,
+                    next_check_at,
+                }
+            }
+            _ => bail!("Invalid stored Codex quota admission"),
+        };
+        let sample = match (
+            row.get::<Option<i64>>(5)?,
+            row.get::<Option<f64>>(6)?,
+            row.get::<Option<i64>>(7)?,
+        ) {
+            (None, None, None) => None,
+            (Some(observed_at), Some(remaining), Some(resets_at)) => Some(FiveHourQuotaSample {
+                account_key: key.as_str().to_string(),
+                observed_at,
+                remaining: RemainingQuotaPercent::new(remaining)?,
+                resets_at,
+            }),
+            _ => bail!("Invalid stored Codex quota sample"),
+        };
+        let state = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission,
+        };
+        codex_quota_columns(key, &state, sample.as_ref())?;
+        Ok(Some(StoredCodexAccountQuota {
+            revision,
+            state,
+            sample,
+        }))
+    }
+
+    pub async fn compare_and_store_codex_account_quota_state(
+        &self,
+        key: &crate::ai::codex_cli::CodexWorkspaceQuotaKey,
+        write: CodexAccountQuotaWrite<'_>,
+    ) -> Result<Option<i64>> {
+        anyhow::ensure!(
+            write
+                .expected_revision
+                .is_none_or(|revision| revision > 0 && revision < i64::MAX),
+            "Invalid or exhausted Codex quota revision"
+        );
+        anyhow::ensure!(
+            write.now >= 0 && (1..=3600).contains(&write.max_sample_age_seconds),
+            "Invalid Codex quota observation clock or age"
+        );
+        let sample = if let Some(snapshot) = write.snapshot {
+            let sample = &snapshot.quota().five_hour;
+            anyhow::ensure!(
+                sample.account_key == key.as_str()
+                    && sample.observed_at >= 0
+                    && sample.observed_at <= write.now
+                    && write.now - sample.observed_at <= write.max_sample_age_seconds
+                    && sample.resets_at > write.now,
+                "Codex workspace quota observation is mismatched, stale or expired"
+            );
+            Some(sample)
+        } else {
+            None
+        };
+        let columns = codex_quota_columns(key, write.state, sample)?;
+        anyhow::ensure!(
+            columns
+                .next_check
+                .is_none_or(|next_check| next_check > write.now),
+            "Codex quota next check must be in the future"
+        );
+        if let Some(revision) = write.expected_revision {
+            self.query_returning_i64(
+                "UPDATE codex_account_quota_state SET revision = revision + 1, admission = ?, pause_reason = ?, resume_not_before = ?, next_check_at = ?, sample_observed_at = COALESCE(?, sample_observed_at), sample_remaining_percent = COALESCE(?, sample_remaining_percent), sample_resets_at = COALESCE(?, sample_resets_at)
+                 WHERE account_key = ? AND revision = ?
+                   AND (? IS NULL OR sample_observed_at IS NULL OR ? > sample_observed_at OR (? = sample_observed_at AND ? = sample_remaining_percent AND ? = sample_resets_at))
+                   AND (? = 'ready' OR admission != 'paused' OR resume_not_before IS NULL OR (? IS NOT NULL AND ? >= resume_not_before))
+                   AND (? != 'ready' OR admission != 'paused' OR resume_not_before IS NULL OR ? >= resume_not_before)
+                 RETURNING revision",
+                libsql::params![columns.admission, columns.reason, columns.barrier, columns.next_check, columns.observed_at, columns.remaining, columns.resets_at, key.as_str(), revision, columns.observed_at, columns.observed_at, columns.observed_at, columns.remaining, columns.resets_at, columns.admission, columns.barrier, columns.barrier, columns.admission, columns.observed_at],
+            ).await
+        } else {
+            self.query_returning_i64(
+                "INSERT INTO codex_account_quota_state (account_key, revision, admission, pause_reason, resume_not_before, next_check_at, sample_observed_at, sample_remaining_percent, sample_resets_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_key) DO NOTHING RETURNING revision",
+                libsql::params![key.as_str(), columns.admission, columns.reason, columns.barrier, columns.next_check, columns.observed_at, columns.remaining, columns.resets_at],
+            ).await
+        }
     }
 
     /// Repeats the borrowed name repair until it stops rewriting rows.
@@ -12784,7 +13017,7 @@ mod tests {
             .create_review(patchset_id, None, "codex-cli", "model", None, None)
             .await?;
         db.execute_batch(
-            "ALTER TABLE reviews DROP COLUMN harness_progress_snapshot; PRAGMA user_version = 18;",
+            "DROP TABLE codex_account_quota_state; ALTER TABLE reviews DROP COLUMN harness_progress_snapshot; PRAGMA user_version = 18;",
         )
         .await?;
 
@@ -12799,7 +13032,7 @@ mod tests {
             .await?;
         assert_eq!(rows.next().await?.unwrap().get::<Option<String>>(0)?, None);
         let mut version = db.conn.query("PRAGMA user_version", ()).await?;
-        assert_eq!(version.next().await?.unwrap().get::<i64>(0)?, 19);
+        assert_eq!(version.next().await?.unwrap().get::<i64>(0)?, 20);
         assert!(
             db.get_review_details(review_id)
                 .await?
@@ -12807,6 +13040,354 @@ mod tests {
                 .get("harness_progress_snapshot")
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn codex_quota_state_migration_preserves_existing_reviews() -> Result<()> {
+        let db = setup_db().await;
+        let patchset_id = insert_stored_prerequisite_series(&db).await?;
+        let review_id = db
+            .create_review(patchset_id, None, "codex-cli", "model", None, None)
+            .await?;
+        db.execute_batch("DROP TABLE codex_account_quota_state; PRAGMA user_version = 19;")
+            .await?;
+
+        db.migrate().await?;
+        db.migrate().await?;
+        let mut rows = db.conn.query("SELECT (SELECT COUNT(*) FROM reviews WHERE id = ?), (SELECT COUNT(*) FROM codex_account_quota_state), (SELECT user_version FROM pragma_user_version)", libsql::params![review_id]).await?;
+        let row = rows.next().await?.unwrap();
+        assert_eq!(row.get::<i64>(0)?, 1);
+        assert_eq!(row.get::<i64>(1)?, 0);
+        assert_eq!(row.get::<i64>(2)?, 20);
+        drop(rows);
+
+        let key = "a".repeat(64);
+        db.execute("INSERT INTO codex_account_quota_state (account_key, revision, admission, pause_reason, resume_not_before, next_check_at, sample_observed_at, sample_remaining_percent, sample_resets_at) VALUES (?, 1, 'paused', 'low_allowance', 100, 100, 10, 19.9, 100)", libsql::params![key]).await?;
+        assert!(db.execute("INSERT INTO codex_account_quota_state (account_key, revision, admission) VALUES ('raw-id', 1, 'ready')", ()).await.is_err());
+        assert!(db.execute("INSERT INTO codex_account_quota_state (account_key, revision, admission, pause_reason, next_check_at) VALUES (?, 1, 'paused', 'low_allowance', 100)", libsql::params!["b".repeat(64)]).await.is_err());
+        assert!(db.execute("INSERT INTO codex_account_quota_state (account_key, revision, admission, sample_observed_at) VALUES (?, 1, 'ready', 10)", libsql::params!["c".repeat(64)]).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn codex_quota_state_survives_reopen_and_rejects_stale_writes() -> Result<()> {
+        use crate::ai::codex_cli::{
+            CodexWorkspaceQuotaSnapshot, codex_workspace_quota_key, decode_codex_workspace_quota,
+        };
+        use crate::ai::quota::{
+            AccountQuotaAdmission, AccountQuotaPauseReason, AccountQuotaState,
+            RemainingQuotaPercent,
+        };
+
+        fn snapshot(
+            workspace: &str,
+            observed_at: i64,
+            used: f64,
+            resets_at: i64,
+        ) -> Result<CodexWorkspaceQuotaSnapshot> {
+            let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"},"workspaceRouting":{"chatgptAccountId":workspace}});
+            let limits = serde_json::json!({"accountId":workspace,"ordinaryUsageAllowed":true,"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,"credits":{"hasCredits":false,"unlimited":false},"primary":{"usedPercent":used,"windowDurationMins":300,"resetsAt":resets_at},"secondary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1000}}});
+            let key = codex_workspace_quota_key(&account)?;
+            decode_codex_workspace_quota(&account, &limits, &key, observed_at)
+        }
+        fn write<'a>(
+            expected_revision: Option<i64>,
+            state: &'a AccountQuotaState,
+            snapshot: Option<&'a CodexWorkspaceQuotaSnapshot>,
+            now: i64,
+        ) -> CodexAccountQuotaWrite<'a> {
+            CodexAccountQuotaWrite {
+                expected_revision,
+                state,
+                snapshot,
+                now,
+                max_sample_age_seconds: 300,
+            }
+        }
+
+        let directory = tempfile::tempdir()?;
+        let settings = DatabaseSettings {
+            url: directory
+                .path()
+                .join("quota.db")
+                .to_string_lossy()
+                .into_owned(),
+            token: String::new(),
+        };
+        let db = Database::new(&settings).await?;
+        db.migrate().await?;
+        let original = snapshot("workspace-a", 10, 90.0, 100)?;
+        let key = original.workspace_key();
+        let other = snapshot("workspace-b", 10, 90.0, 100)?;
+        let other_key = other.workspace_key();
+        let paused = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::LowAllowance,
+                resume_not_before: Some(100),
+                next_check_at: 100,
+            },
+        };
+        assert!(db.get_codex_account_quota_state(&key).await?.is_none());
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &other_key,
+                write(None, &paused, Some(&original), 10)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            db.get_codex_account_quota_state(&other_key)
+                .await?
+                .is_none()
+        );
+        let other_paused = AccountQuotaState {
+            account_key: other_key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::TelemetryUnavailable,
+                resume_not_before: None,
+                next_check_at: 70,
+            },
+        };
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &other_key,
+                write(None, &other_paused, None, 10)
+            )
+            .await?,
+            Some(1)
+        );
+        assert!(
+            db.get_codex_account_quota_state(&other_key)
+                .await?
+                .unwrap()
+                .sample
+                .is_none()
+        );
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(None, &paused, Some(&original), 10)
+            )
+            .await?,
+            Some(1)
+        );
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(None, &paused, Some(&original), 10)
+            )
+            .await?,
+            None
+        );
+
+        drop(db);
+        let reopened = Database::new(&settings).await?;
+        reopened.migrate().await?;
+        let stored = reopened.get_codex_account_quota_state(&key).await?.unwrap();
+        assert_eq!(stored.revision, 1);
+        assert_eq!(stored.state, paused);
+        assert_eq!(
+            stored.sample.unwrap().remaining,
+            RemainingQuotaPercent::new(10.0)?
+        );
+        let db = Database::new(&settings).await?;
+        let shifted = snapshot("workspace-a", 90, 20.0, 200)?;
+        let waiting = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::AwaitingResetEvidence,
+                resume_not_before: Some(200),
+                next_check_at: 200,
+            },
+        };
+        assert_eq!(
+            reopened
+                .compare_and_store_codex_account_quota_state(
+                    &key,
+                    write(Some(1), &waiting, Some(&shifted), 90)
+                )
+                .await?,
+            Some(2)
+        );
+        let ready = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Ready,
+        };
+        let after_reset = snapshot("workspace-a", 200, 20.0, 300)?;
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(1), &ready, Some(&after_reset), 200)
+            )
+            .await?,
+            None
+        );
+        assert!(
+            db.compare_and_store_codex_account_quota_state(&key, write(Some(2), &ready, None, 90))
+                .await
+                .is_err()
+        );
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(2), &ready, Some(&other), 10)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(2), &ready, Some(&original), 100)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(2), &ready, Some(&shifted), 89)
+            )
+            .await
+            .is_err()
+        );
+        let stale = snapshot("workspace-a", 10, 20.0, 1000)?;
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(2), &ready, Some(&stale), 311)
+            )
+            .await
+            .is_err()
+        );
+        let unavailable = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::TelemetryUnavailable,
+                resume_not_before: Some(200),
+                next_check_at: 200,
+            },
+        };
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(2), &unavailable, None, 90)
+            )
+            .await?,
+            Some(3)
+        );
+        let stored = reopened.get_codex_account_quota_state(&key).await?.unwrap();
+        assert_eq!(stored.sample.unwrap().observed_at, 90);
+        assert_eq!(stored.state, unavailable);
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(3), &unavailable, Some(&original), 90)
+            )
+            .await?,
+            None
+        );
+        let same_time_changed = snapshot("workspace-a", 90, 21.0, 200)?;
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(3), &unavailable, Some(&same_time_changed), 90)
+            )
+            .await?,
+            None
+        );
+        let earlier_barrier = AccountQuotaState {
+            account_key: key.as_str().to_string(),
+            admission: AccountQuotaAdmission::Paused {
+                reason: AccountQuotaPauseReason::TelemetryUnavailable,
+                resume_not_before: Some(100),
+                next_check_at: 100,
+            },
+        };
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(3), &earlier_barrier, None, 90)
+            )
+            .await?,
+            None
+        );
+        let before_reset = snapshot("workspace-a", 100, 20.0, 200)?;
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(3), &ready, Some(&before_reset), 100)
+            )
+            .await?,
+            None
+        );
+        assert_eq!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(3), &ready, Some(&after_reset), 200)
+            )
+            .await?,
+            Some(4)
+        );
+        let stored = reopened.get_codex_account_quota_state(&key).await?.unwrap();
+        assert_eq!(stored.state, ready);
+        assert_eq!(stored.sample.unwrap().observed_at, 200);
+        let other_stored = reopened
+            .get_codex_account_quota_state(&other_key)
+            .await?
+            .unwrap();
+        assert_eq!(other_stored.state, other_paused);
+        assert!(other_stored.sample.is_none());
+
+        let (first_write, second_write) = tokio::join!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(4), &ready, Some(&after_reset), 200)
+            ),
+            reopened.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(4), &ready, Some(&after_reset), 200)
+            )
+        );
+        let outcomes = [first_write?, second_write?];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == Some(5))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_none()).count(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .get_codex_account_quota_state(&key)
+                .await?
+                .unwrap()
+                .revision,
+            5
+        );
+
+        db.execute(
+            "UPDATE codex_account_quota_state SET revision = ? WHERE account_key = ?",
+            libsql::params![i64::MAX, key.as_str()],
+        )
+        .await?;
+        assert!(
+            db.compare_and_store_codex_account_quota_state(
+                &key,
+                write(Some(i64::MAX), &ready, Some(&after_reset), 200)
+            )
+            .await
+            .is_err()
+        );
+        db.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE codex_account_quota_state SET admission = 'paused', pause_reason = 'low_allowance', resume_not_before = -1, next_check_at = 0; PRAGMA ignore_check_constraints = OFF;").await?;
+        assert!(reopened.get_codex_account_quota_state(&key).await.is_err());
         Ok(())
     }
 
@@ -20229,7 +20810,8 @@ mod tests {
             .unwrap();
         db.conn
             .execute_batch(
-                "ALTER TABLE reviews DROP COLUMN harness_progress_snapshot;
+                "DROP TABLE codex_account_quota_state;
+                ALTER TABLE reviews DROP COLUMN harness_progress_snapshot;
                 ALTER TABLE reviews DROP COLUMN stage_usage_snapshot;
                 DROP TABLE human_review_evidence;
                 DROP TRIGGER human_review_message_changed;
@@ -24521,7 +25103,8 @@ mod tests {
         // and verify migrations 8, 9, and 10 apply cleanly.
         db.conn
             .execute_batch(
-                "DROP TABLE IF EXISTS meta;
+                "DROP TABLE codex_account_quota_state;
+                 DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
                  ALTER TABLE reviews DROP COLUMN harness_progress_snapshot;
@@ -24567,7 +25150,8 @@ mod tests {
         // Migration 10 must create forge_outbox without re-executing migration 9.
         db.conn
             .execute_batch(
-                "DROP TABLE patchset_maintainer_sections;
+                "DROP TABLE codex_account_quota_state;
+                 DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
                  ALTER TABLE reviews DROP COLUMN harness_progress_snapshot;
                  ALTER TABLE reviews DROP COLUMN stage_usage_snapshot;

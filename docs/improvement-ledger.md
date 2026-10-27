@@ -595,6 +595,15 @@ integration remain unfinished. Loader tests cover omitted and custom settings,
 invalid and non-finite values, and rejected activation; make check-pr passes.
 There are no runtime behavior or provider authorization changes.
 
+The next offline foundation stores a bounded workspace-scoped account state in
+schema 20. Revision-checked writes preserve reset barriers and the last credible
+sample, reject stale competing updates, and require a fresh matching workspace
+snapshot when storing a new sample. File-backed tests cover database reopen,
+concurrent connections, unavailable or corrupt telemetry, account isolation,
+reset barriers, and revision overflow; make check-pr passes. This storage does
+not evaluate quota thresholds or authorize model calls, and has no scheduler
+or runtime caller.
+
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
 a disabled pure five-hour admission policy as the first increment. Its five

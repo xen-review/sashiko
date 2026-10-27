@@ -110,6 +110,11 @@ impl RemainingQuotaPercent {
     pub(crate) fn exceeds(self, minimum: f64) -> bool {
         self.0 > minimum
     }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn as_f64(self) -> f64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]
