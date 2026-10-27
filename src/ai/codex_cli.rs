@@ -60,6 +60,7 @@ fn build_codex_args(
     for feature in [
         "shell_tool",
         "code_mode_host",
+        "view_image",
         "apps",
         "hooks",
         "multi_agent",
@@ -81,7 +82,6 @@ fn build_codex_args(
         "project_doc_max_bytes=0".to_string(),
         "developer_instructions=\"\"".to_string(),
         "web_search=\"disabled\"".to_string(),
-        "tools.view_image=false".to_string(),
         format!(
             "model_instructions_file={}",
             toml::Value::String(instructions.to_string_lossy().into_owned())
@@ -509,7 +509,7 @@ impl AiProvider for CodexCliProvider {
             &self.model,
             &[
                 ("effort", self.effort.as_deref()),
-                ("completion_profile", Some("restricted-v1")),
+                ("completion_profile", Some("restricted-v2")),
                 ("usage_profile", Some("measured-v1")),
             ],
         )
@@ -954,6 +954,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         for feature in [
             "shell_tool",
             "code_mode_host",
+            "view_image",
             "hooks",
             "apps",
             "multi_agent",
@@ -971,11 +972,15 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             "project_doc_max_bytes=0",
             "developer_instructions=\"\"",
             "web_search=\"disabled\"",
-            "tools.view_image=false",
             "model_reasoning_effort=low",
         ] {
             assert!(arguments.windows(2).any(|pair| pair == ["-c", setting]));
         }
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("tools.view_image="))
+        );
         assert!(
             arguments
                 .windows(2)
@@ -1198,5 +1203,16 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             timeout_seconds: 600,
         };
         assert_ne!(plain.cache_identity(), raised.cache_identity());
+        assert_ne!(
+            plain.cache_identity(),
+            cache_identity_with(
+                &plain.model,
+                &[
+                    ("effort", None),
+                    ("completion_profile", Some("restricted-v1")),
+                    ("usage_profile", Some("measured-v1")),
+                ],
+            )
+        );
     }
 }
