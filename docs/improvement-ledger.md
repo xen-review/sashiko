@@ -662,8 +662,9 @@ tests (two ignored), 49 main, seven CLI, 28 integration, formatting and all
 Clippy profiles. Package-scoped debug cleanup plus CARGO_INCREMENTAL=0 repaired
 an initial disk-full link. Service and mirror timer were restored after checks.
 
-Still required: terminal retention across failed, timed-out and cancelled
-reviews; active/completed turn and tool counters; elapsed/budget data; actual
+Still required: complete final accounting across failed, timed-out and cancelled
+reviews, including failed-stage/in-flight usage; active/completed turn and tool
+counters; elapsed/budget data; actual
 backend effort and generation visibility; and native harness/whole-series
 attribution. No model call or automatic quota controller was started.
 
@@ -674,6 +675,27 @@ preserve human provenance and omit active snapshots on terminal records. The
 synthetic fixture is stopped. Existing authentication, muted delivery and
 codex-cli / gpt-6-luna / configured medium settings are unchanged; effective
 backend effort remains Unknown. No telemetry-specific live review was queued.
+
+The next retained-diagnostic increment adds migration 018: nullable compressed
+stage snapshots on the exact review row. A worker-owned accumulator prevents
+parallel patch workers from borrowing each other's display-registry snapshot;
+duplicate reports replace prior values. Writes are capped at 256 reports and
+256 KiB. Stderr drains under a one-second post-reap deadline; warnings preserve
+honest partial state if persistence or drain fails. Terminal completion does
+not clear the snapshot, and no ai_interaction or final total is fabricated.
+Both existing detail projections include bounded retained reports through the
+same query and embargo boundary. Cancelled cards show them too; cancelled
+summaries no longer fall through to In progress.
+
+The fake timeout remains an error, reaps promptly and retains the completed
+stage's reported usage. Round-trip, legacy unknown, cancellation completion,
+oversize rejection, both detail projections and embargo exclusion pass. Full
+make check-pr passes 1,161 library tests (two ignored), 49 main, seven CLI,
+28 integration, formatting and all Clippy profiles. Synthetic terminal-card
+and escaping checks pass at 390/1440 pixels without overflow. A component
+screenshot timed out and is not counted as a passed capture. No live review,
+model call or cancellation was started; complete final/native usage remains
+open. Deployment requires the usual fresh backup and idle boundary.
 
 Show model/provider/actual effort, completed and active turns, tool calls,
 input/output/cached tokens, elapsed time, and budget consumption in the web UI's

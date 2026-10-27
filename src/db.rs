@@ -2229,7 +2229,16 @@ impl Database {
             tx.commit().await?;
         }
 
-        info!("Database schema is up to date at version 17.");
+        if current_version < 18 {
+            info!("Applying database migration version 18 (retained stage usage)...");
+            let tx = self.begin_transaction().await?;
+            tx.execute_batch(include_str!("migrations/018_review_stage_usage.sql"))
+                .await?;
+            tx.execute("PRAGMA user_version = 18", ()).await?;
+            tx.commit().await?;
+        }
+
+        info!("Database schema is up to date at version 18.");
 
         Ok(())
     }
@@ -2857,6 +2866,47 @@ impl Database {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn save_review_stage_usage(
+        &self,
+        review_id: i64,
+        snapshot: &crate::reviewer::ActiveStageUsageSnapshot,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            snapshot.completed_stages.len() <= 256,
+            "Stage usage exceeds 256 reports"
+        );
+        let payload = serde_json::to_string(snapshot)?;
+        anyhow::ensure!(payload.len() <= 256 * 1024, "Stage usage exceeds 256 KiB");
+        let compressed = crate::compression::compress_string_async(&payload).await;
+        self.execute(
+            "UPDATE reviews SET stage_usage_snapshot = ? WHERE id = ?",
+            libsql::params![compressed, review_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_review_stage_usage(
+        &self,
+        review_id: i64,
+    ) -> Result<Option<crate::reviewer::ActiveStageUsageSnapshot>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT stage_usage_snapshot FROM reviews WHERE id = ?",
+                libsql::params![review_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let Some(payload) = crate::compression::get_compressed_string_opt(&row, 0)? else {
+            return Ok(None);
+        };
+        let snapshot = crate::reviewer::ActiveStageUsageSnapshot::decode(&payload)?;
+        Ok(Some(snapshot))
     }
 
     pub async fn create_ai_interaction(&self, params: AiInteractionParams<'_>) -> Result<()> {
@@ -8682,7 +8732,8 @@ impl Database {
             "SELECT r.summary, r.created_at, ai.output_raw,
                     r.result_description, r.status, r.inline_review, {},
                     ai.tokens_in, ai.tokens_out, r.patch_id, r.id, ai.tokens_cached,
-                    r.review_mode, r.independently_verified, r.model, r.provider, r.prompts_hash
+                    r.review_mode, r.independently_verified, r.model, r.provider, r.prompts_hash,
+                    r.stage_usage_snapshot
              FROM reviews r
              LEFT JOIN ai_interactions ai ON r.interaction_id = ai.id
              WHERE r.patchset_id = ? AND (r.patch_id IS NULL OR r.patch_id IN ({}))
@@ -8721,6 +8772,16 @@ impl Database {
                     "logs".to_string(),
                     serde_json::json!(crate::compression::get_compressed_string_opt(&r, 6)?),
                 );
+            }
+            if let Some(payload) = crate::compression::get_compressed_string_opt(&r, 17)? {
+                match crate::reviewer::ActiveStageUsageSnapshot::decode(&payload) {
+                    Ok(snapshot) => item["stage_usage_snapshot"] = serde_json::to_value(snapshot)?,
+                    Err(error) => warn!(
+                        "Invalid retained stage usage for review {}: {}",
+                        r.get::<i64>(10)?,
+                        crate::utils::redact_secret(&error.to_string())
+                    ),
+                }
             }
             reviews.push(item);
         }
@@ -19502,7 +19563,8 @@ mod tests {
             .unwrap();
         db.conn
             .execute_batch(
-                "DROP TABLE human_review_evidence;
+                "ALTER TABLE reviews DROP COLUMN stage_usage_snapshot;
+                DROP TABLE human_review_evidence;
                 DROP TRIGGER human_review_message_changed;
                 DROP TRIGGER human_review_patch_changed;
                 ALTER TABLE messages DROP COLUMN human_review_source_hash;
@@ -23795,6 +23857,7 @@ mod tests {
                 "DROP TABLE IF EXISTS meta;
                  DROP TABLE IF EXISTS patchset_maintainer_sections;
                  DROP TABLE IF EXISTS forge_outbox;
+                 ALTER TABLE reviews DROP COLUMN stage_usage_snapshot;
                  DROP TABLE human_review_evidence;
                  DROP TRIGGER human_review_message_changed;
                  DROP TRIGGER human_review_patch_changed;
@@ -23838,6 +23901,7 @@ mod tests {
             .execute_batch(
                 "DROP TABLE patchset_maintainer_sections;
                  DROP TABLE forge_outbox;
+                 ALTER TABLE reviews DROP COLUMN stage_usage_snapshot;
                  DROP TABLE human_review_evidence;
                  DROP TRIGGER human_review_message_changed;
                  DROP TRIGGER human_review_patch_changed;

@@ -1,6 +1,6 @@
 # Live Review Usage Attribution
 
-Status: active workflow stage snapshots implemented and validated on 2026-10-27.
+Status: active and retained workflow stage snapshots validated on 2026-10-27.
 No model test, historical backfill, billing change or public posting is included.
 
 ## Existing Boundary
@@ -43,6 +43,37 @@ stages remain unknown unless their existing contract establishes no requests.
 No UI or completed-result schema change is needed for this first event increment.
 
 ## Remaining Gates
+
+### Terminal-Retention Increment
+
+The worker timeout/cancellation boundary drops the progress guard, and
+complete_review stores no interaction for a subprocess error. Migration 018
+adds one nullable compressed snapshot column to reviews, leaving historical
+rows unknown. Each worker's stderr reader now owns its own bounded accumulator
+and persists it by exact review ID as stage records arrive, independently of
+the patchset display registry. Attempts do not merge with sibling worker data.
+ai_interactions and final token totals are not overwritten. Normal completion,
+timeout and cancellation do not clear the diagnostic snapshot.
+
+The stderr reader drains for at most one second after child reaping; a blocked
+reader is aborted with a warning. Persistence failures warn without converting
+a successful model review into a failure. Original status/error and kill/reap
+semantics remain intact. The fake stuck-child test emits a stage record before
+blocking and proves the snapshot survives the returned timeout error. Storage
+tests cover legacy null, bounded round trip, cancellation retention, rejected
+oversized writes, both detail projections and embargo exclusion. Both routes
+reuse the existing paginated review query, without N+1 enrichment. The UI renders
+retained reports outside the terminal-result gate, including cancelled reviews,
+and keeps partial reports separate from final totals. The summary classifier
+also preserves Cancelled instead of falling through to In progress.
+
+The full gate passes 1,161 library tests (two ignored), 49 main, seven CLI and
+28 integration tests, formatting and all Clippy profiles. Synthetic terminal
+cards show escaped stage names and have no overflow at 390/1440 pixels. A
+component screenshot timed out waiting for stability; it is not claimed as a
+passed capture. No live review, model call, replay or cancellation was started.
+Missing failed-stage/in-flight telemetry is still unknown; these diagnostics
+are not complete final usage or native/harness generation attribution.
 
 The first four increments are implemented for workflow worker subprocesses.
 Coverage is a separate accounting event, so preliminary stages do not advance

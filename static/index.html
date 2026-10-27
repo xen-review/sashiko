@@ -4069,6 +4069,7 @@
                         let hasSuccessful = false;
                         let hasSkipped = false;
                         let hasInProgress = false;
+                        let hasCancelled = false;
                         let skippedReason = '';
                         let errors = [];
 
@@ -4109,6 +4110,8 @@
                                errors.push(r.status);
                            } else if (r.status === 'Pending' || r.status === 'In Review') {
                                hasInProgress = true;
+                           } else if (r.status === 'Cancelled') {
+                               hasCancelled = true;
                            }
                         });
 
@@ -4119,6 +4122,8 @@
                            }
                         } else if (errors.length > 0) {
                            summaryStatus = `<span class="text-error-bold">${escapeHtml(errors[0])}</span>`;
+                                } else if (hasCancelled && !hasInProgress) {
+                                    summaryStatus = '<span style="color:var(--text-dim)">Cancelled</span>';
                         } else if (hasSkipped && !hasInProgress) {
                            // Only skipped
                             summaryStatus = `<span style="color:var(--text-dim)" title="${escapeHtml(skippedReason)}">Skipped</span>`;
@@ -4562,15 +4567,15 @@
             return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${format(record?.tokens_out)}${status}`;
         }
 
-        function renderActiveStageUsage(snapshot) {
+        function renderActiveStageUsage(snapshot, retained = false) {
             if (!Array.isArray(snapshot?.completed_stages) || !snapshot.completed_stages.length) return '';
             const rows = snapshot.completed_stages.slice(0, 256).map(record => {
                 const patch = Number.isSafeInteger(record.patch_index) && record.patch_index >= 0 ? record.patch_index === 0 ? 'Series' : `Patch ${record.patch_index}` : 'Scope unknown';
                 return `<tr><td style="width:35%;overflow-wrap:anywhere;">${escapeHtml(patch)}<br>${escapeHtml(String(record.stage || 'Unknown'))}</td><td style="overflow-wrap:anywhere;">${renderReviewTokens(record)}</td></tr>`;
             }).join('');
             return `<div style="margin:16px 0;min-width:0;">
-                <h3 style="font-size:1rem;">Reported Stage Usage</h3>
-                <div class="text-muted-sm" style="overflow-wrap:anywhere;">Latest completed-stage reports, not a workflow total. In-flight and unretained retry usage unavailable.</div>
+                <h3 style="font-size:1rem;">${retained ? 'Retained Stage Reports' : 'Reported Stage Usage'}</h3>
+                <div class="text-muted-sm" style="overflow-wrap:anywhere;">${retained ? 'Retained completed-stage diagnostics' : 'Latest completed-stage reports'}, not a workflow total. In-flight and unretained retry usage unavailable.</div>
                 <div style="max-height:320px;overflow:auto;margin-top:8px;"><table style="width:100%;min-width:0;table-layout:fixed;"><thead><tr><th>Stage</th><th>Reported Tokens</th></tr></thead><tbody>${rows}</tbody></table></div>
                 ${snapshot.truncated || snapshot.completed_stages.length > 256 ? '<div class="text-muted-sm">Stage reports truncated at 256 entries.</div>' : ''}
             </div>`;
@@ -4798,6 +4803,7 @@
                         <div><span class="status-badge status-${(statusRaw || '').replace(/ /g, '')}">${statusRaw}</span></div>
                         `}
                     </div>
+                    ${renderActiveStageUsage(r.stage_usage_snapshot, true)}
                     ${showDetails ? `
                     ${checkpointHtml}
                     ${summaryHtml}

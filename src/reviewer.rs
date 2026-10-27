@@ -57,15 +57,62 @@ struct ReviewProgressRegistryInner {
 struct ActiveReviewProgress {
     run_id: u64,
     message: String,
-    completed_stage_usage:
-        std::collections::BTreeMap<(i64, String), crate::local_review::CompletedStageUsage>,
-    usage_truncated: bool,
+    stage_usage: ActiveStageUsageSnapshot,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActiveStageUsageSnapshot {
     pub completed_stages: Vec<crate::local_review::CompletedStageUsage>,
     pub truncated: bool,
+}
+
+impl ActiveStageUsageSnapshot {
+    pub(crate) fn decode(payload: &str) -> Result<Self> {
+        anyhow::ensure!(
+            payload.len() <= 256 * 1024,
+            "Stored stage usage exceeds 256 KiB"
+        );
+        let snapshot: Self = serde_json::from_str(payload)?;
+        anyhow::ensure!(
+            snapshot.completed_stages.len() <= 256,
+            "Stored stage usage exceeds 256 reports"
+        );
+        Ok(snapshot)
+    }
+
+    fn record(&mut self, usage: crate::local_review::CompletedStageUsage) -> bool {
+        if usage.patch_index < 0
+            || usage.stage.is_empty()
+            || usage.stage.len() > 128
+            || usage.stage.chars().any(char::is_control)
+        {
+            return false;
+        }
+        if let Some(existing) = self.completed_stages.iter_mut().find(|existing| {
+            existing.patch_index == usage.patch_index && existing.stage == usage.stage
+        }) {
+            if *existing == usage {
+                return false;
+            }
+            *existing = usage;
+        } else if self.completed_stages.len() >= 256 {
+            let changed = !self.truncated;
+            self.truncated = true;
+            return changed;
+        } else {
+            self.completed_stages.push(usage);
+        }
+        true
+    }
+}
+
+fn parse_stage_usage_line(line: &str) -> Option<crate::local_review::CompletedStageUsage> {
+    let payload = line.strip_prefix(crate::local_review::STAGE_USAGE_LINE_PREFIX)?;
+    if payload.len() > 4096 {
+        return None;
+    }
+    serde_json::from_str(payload).ok()
 }
 
 pub(crate) struct ReviewProgressCleanup {
@@ -94,8 +141,7 @@ impl ReviewProgressRegistry {
             ActiveReviewProgress {
                 run_id,
                 message: String::new(),
-                completed_stage_usage: std::collections::BTreeMap::new(),
-                usage_truncated: false,
+                stage_usage: ActiveStageUsageSnapshot::default(),
             },
         );
         ReviewProgressCleanup {
@@ -117,13 +163,10 @@ impl ReviewProgressRegistry {
     pub fn stage_usage(&self, patchset_id: i64) -> Option<ActiveStageUsageSnapshot> {
         let entries = self.lock_entries();
         let entry = entries.get(&patchset_id)?;
-        if entry.completed_stage_usage.is_empty() && !entry.usage_truncated {
+        if entry.stage_usage.completed_stages.is_empty() && !entry.stage_usage.truncated {
             return None;
         }
-        Some(ActiveStageUsageSnapshot {
-            completed_stages: entry.completed_stage_usage.values().cloned().collect(),
-            truncated: entry.usage_truncated,
-        })
+        Some(entry.stage_usage.clone())
     }
 
     fn record_stage_usage(
@@ -132,13 +175,6 @@ impl ReviewProgressRegistry {
         run_id: u64,
         usage: crate::local_review::CompletedStageUsage,
     ) {
-        if usage.patch_index < 0
-            || usage.stage.is_empty()
-            || usage.stage.len() > 128
-            || usage.stage.chars().any(char::is_control)
-        {
-            return;
-        }
         let mut entries = self.lock_entries();
         let Some(entry) = entries
             .get_mut(&patchset_id)
@@ -146,21 +182,12 @@ impl ReviewProgressRegistry {
         else {
             return;
         };
-        let key = (usage.patch_index, usage.stage.clone());
-        if entry.completed_stage_usage.len() >= 256
-            && !entry.completed_stage_usage.contains_key(&key)
-        {
-            entry.usage_truncated = true;
-            return;
-        }
-        entry.completed_stage_usage.insert(key, usage);
+        entry.stage_usage.record(usage);
     }
 
+    #[cfg(test)]
     fn record_stage_usage_line(&self, patchset_id: i64, run_id: u64, line: &str) {
-        if let Some(payload) = line.strip_prefix(crate::local_review::STAGE_USAGE_LINE_PREFIX)
-            && payload.len() <= 4096
-            && let Ok(usage) = serde_json::from_str(payload)
-        {
+        if let Some(usage) = parse_stage_usage_line(line) {
             self.record_stage_usage(patchset_id, run_id, usage);
         }
     }
@@ -207,6 +234,90 @@ impl Drop for ReviewProgressCleanup {
 #[cfg(test)]
 mod review_progress_tests {
     use super::ReviewProgressRegistry;
+
+    #[tokio::test]
+    async fn retained_stage_usage_is_bounded_and_legacy_unknown() -> anyhow::Result<()> {
+        let mut settings = crate::settings::Settings::new()?;
+        settings.database.url = ":memory:".into();
+        let db = crate::db::Database::new(&settings.database).await?;
+        db.migrate().await?;
+        let thread = db.create_thread("usage", "Usage", 1000).await?;
+        let patchset = db
+            .create_patchset(
+                thread, None, "usage", "Usage", "Author", 1000, 1, 1, "", "", None, 1, None, false,
+                None, None,
+            )
+            .await?
+            .unwrap();
+        let review = db
+            .create_review(patchset, None, "mock", "mock", None, None)
+            .await?;
+        assert!(db.get_review_stage_usage(review).await?.is_none());
+        let usage = crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "planning".into(),
+            tokens_in: 7,
+            tokens_out: 0,
+            tokens_cached: 0,
+            usage_coverage: None,
+        };
+        let mut snapshot = super::ActiveStageUsageSnapshot {
+            completed_stages: vec![usage.clone()],
+            truncated: false,
+        };
+        db.save_review_stage_usage(review, &snapshot).await?;
+        assert_eq!(
+            db.get_review_stage_usage(review).await?,
+            Some(snapshot.clone())
+        );
+        db.complete_review(review, "Cancelled", "Cancelled", None, None, None, None)
+            .await?;
+        assert_eq!(
+            db.get_review_stage_usage(review).await?,
+            Some(snapshot.clone())
+        );
+        for details in [
+            db.get_patchset_details(patchset, None, None).await?,
+            db.get_patchset_summary(patchset, None, None).await?,
+        ] {
+            let details = details.expect("Patchset details must exist");
+            assert_eq!(details["reviews"][0]["id"], review);
+            assert_eq!(
+                details["reviews"][0]["stage_usage_snapshot"],
+                serde_json::to_value(&snapshot)?
+            );
+        }
+        db.execute(
+            "UPDATE patchsets SET embargo_until = ? WHERE id = ?",
+            libsql::params![i64::MAX, patchset],
+        )
+        .await?;
+        for details in [
+            db.get_patchset_details(patchset, None, None).await?,
+            db.get_patchset_summary(patchset, None, None).await?,
+        ] {
+            assert!(
+                details.unwrap()["reviews"].as_array().unwrap().is_empty(),
+                "Embargoed reviews must not expose retained diagnostics"
+            );
+        }
+        snapshot.completed_stages = vec![usage.clone(); 257];
+        assert!(db.save_review_stage_usage(review, &snapshot).await.is_err());
+        snapshot.completed_stages = vec![crate::local_review::CompletedStageUsage {
+            stage: "x".repeat(256 * 1024),
+            ..usage
+        }];
+        assert!(db.save_review_stage_usage(review, &snapshot).await.is_err());
+        assert_eq!(
+            db.get_review_stage_usage(review)
+                .await?
+                .unwrap()
+                .completed_stages[0]
+                .tokens_in,
+            7
+        );
+        Ok(())
+    }
 
     #[test]
     fn stage_usage_is_bounded_replaced_and_run_scoped() {
@@ -3133,13 +3244,32 @@ async fn run_review_tool_with_cmd_and_overrides(
     let progress_guard = progress_registry.begin(patchset_id);
     let progress_run_id = progress_guard.run_id;
 
-    if let Some(stderr) = child.stderr.take() {
+    let mut stderr_task = child.stderr.take().map(|stderr| {
         let progress_registry = progress_registry.clone();
+        let stderr_db = db.clone();
         tokio::spawn(async move {
+            let mut retained = ActiveStageUsageSnapshot::default();
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                progress_registry.record_stage_usage_line(patchset_id, progress_run_id, &line);
+                if let Some(usage) = parse_stage_usage_line(&line) {
+                    progress_registry.record_stage_usage(
+                        patchset_id,
+                        progress_run_id,
+                        usage.clone(),
+                    );
+                    if retained.record(usage)
+                        && let Err(error) = stderr_db
+                            .save_review_stage_usage(review_id, &retained)
+                            .await
+                    {
+                        warn!(
+                            "Could not retain stage usage for review {}: {}",
+                            review_id,
+                            crate::utils::redact_secret(&error.to_string())
+                        );
+                    }
+                }
                 if let Some(progress) = line
                     .strip_prefix(crate::local_review::PROGRESS_LINE_PREFIX)
                     .map(str::trim)
@@ -3158,8 +3288,8 @@ async fn run_review_tool_with_cmd_and_overrides(
                     info!("[review-bin] {}", line);
                 }
             }
-        });
-    }
+        })
+    });
 
     let stdin = child
         .stdin
@@ -3533,6 +3663,19 @@ async fn run_review_tool_with_cmd_and_overrides(
         let _ = timeout(Duration::from_secs(5), child.wait()).await;
     } else {
         let _ = child.wait().await; // Reap zombie
+    }
+
+    if let Some(mut task) = stderr_task.take()
+        && tokio::time::timeout(Duration::from_secs(1), &mut task)
+            .await
+            .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+        warn!(
+            "Stage usage diagnostic drain timed out for review {}",
+            review_id
+        );
     }
 
     match interaction_result {
@@ -5054,6 +5197,7 @@ fi
         let bin_path = temp_dir.path().join("mock_review");
         let mock_script = r#"#!/bin/bash
 read -r input
+    echo 'stage-usage: {"patch_index":1,"stage":"planning","tokens_in":7,"tokens_out":2,"tokens_cached":0,"usage_coverage":null}' >&2
 sleep 30
 "#;
 
@@ -5104,7 +5248,7 @@ sleep 30
                 ps_id,
                 &json!({}),
                 &settings,
-                db,
+                db.clone(),
                 "HEAD",
                 Some(1),
                 None,
@@ -5121,6 +5265,17 @@ sleep 30
             completed.is_ok(),
             "run_review_tool should kill/reap a timed-out child promptly"
         );
+        assert!(
+            completed.unwrap().is_err(),
+            "The timed-out review must remain a failure"
+        );
+        let retained = db
+            .get_review_stage_usage(review_id)
+            .await?
+            .expect("Stage usage must survive timeout");
+        assert_eq!(retained.completed_stages.len(), 1);
+        assert_eq!(retained.completed_stages[0].tokens_in, 7);
+        assert!(retained.completed_stages[0].usage_coverage.is_none());
         Ok(())
     }
 
