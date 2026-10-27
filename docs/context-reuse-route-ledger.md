@@ -51,6 +51,15 @@ human-evidence release stays unchanged. Authenticated metadata adapter, weekly
 reserve checks, settings, persisted state, cancellation, wakeup scheduling and
 paused-state UI remain future gates. No automatic controller is enabled.
 
+Quota policy source is committed as 88243c76. The subsequent pure Codex metadata
+decoder passes fake-response and full gates (1,151 library, two ignored; 49 main,
+seven CLI, 28 integration). The metadata-only schema read at 02:10 CET reports
+35% five-hour and 53% weekly, with the same 05:03 CET five-hour reset. Premium
+calls are ineligible. Runtime binding is unresolved because account/read exposes
+login/plan but no opaque workspace ID. A derived hash is not a substitute for
+that missing binding. No account controller, paid self-review, benchmark, public
+post, backfill, or watcher is enabled. Deployment remains 47cdd5c1/schema 17.
+
 ### Earlier Exact-Ancestry Checkpoint
 
 Latest source/runtime at 00:38 CET: exact-ancestry increment 113b83a5 is signed,

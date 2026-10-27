@@ -17,6 +17,28 @@ All five fake-clock tests and make check-pr pass, including 1,150 library tests
 state testing, not proof of database restart recovery. No runtime caller or
 settings toggle is installed, and the deployed daemon remains unchanged.
 
+## Metadata Decoder Checkpoint
+
+The next pure decoder is in src/ai/codex_cli.rs. A bounded metadata-only schema
+read verified type=chatgpt, 300-minute primary and 10,080-minute secondary windows,
+usedPercent/resetsAt, and the codex limit identity. The observed endpoint exposes
+email and planType, not an opaque account/workspace ID. At 02:10 CET the readings
+were 35% five-hour and 53% weekly remaining; no model turn was started.
+
+The decoder requires matching account/limit plans, complete known windows,
+finite measured percentages, future resets and conservative false paid/spend
+flags. Missing, malformed, metered, expired and unsupported results are errors.
+An explicit weekly zero stays zero rather than becoming unknown or spendable.
+The derived SHA-256 login/plan key is a local comparison key, not proof of an
+allowance-owning workspace. Do not persist or enable cross-process admission on
+that key without resolving this identity limitation and authentication changes
+between account/rate-limit reads. No raw account identity or credentials are
+logged. The decoder takes supplied JSON only; it launches no process and makes
+no model call. Its fake-response checks and full make check-pr gate pass:
+1,151 library tests (two ignored), 49 main, seven CLI and 28 integration tests.
+Process/RPC bounds, verified runtime binding, weekly reserve and durable state
+remain unimplemented integration gates.
+
 ## Evidence and Ownership
 
 The authenticated Codex app-server metadata reader already reports the shared

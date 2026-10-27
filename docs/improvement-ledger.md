@@ -587,6 +587,17 @@ formatting and all Clippy profiles. The existing transient QuotaManager remains
 unchanged. No account adapter, persisted controller, automatic pause/resume or
 watcher is implemented or enabled; the pure policy has no runtime caller.
 
+The next Codex metadata decoder also passes fake-response and full deterministic
+gates (1,151 library, two ignored; 49 main; seven CLI; 28 integration). It keeps
+measured weekly zero distinct from unknown, requires known windows and matching
+subscription metadata, and rejects malformed, expired or paid/unknown spend
+controls. A metadata-only schema read at 02:10 CET reported 35% five-hour and
+53% weekly remaining. The account endpoint exposes login and plan, not an opaque
+account/workspace ID; the decoder's hashed local comparison key is not enough to
+enable durable cross-process admission. Stable binding and authentication-change
+handling remain gates alongside bounded RPC, weekly reserves and persistence.
+The deployed daemon remains unchanged; no controller or model call was started.
+
 Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
 plan review allocations over the remaining window, retaining a debugging reserve.
 Start with Codex subscription-backed accounts only, not generic assumptions

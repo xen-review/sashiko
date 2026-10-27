@@ -15,9 +15,10 @@
 //! AI provider that shells out to the `codex` CLI (OpenAI Codex/GPT).
 //! Uses the local Codex CLI installation with subscription auth.
 
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -203,6 +204,114 @@ impl CodexCliProvider {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CodexSubscriptionQuotaSnapshot {
+    pub five_hour: super::quota::FiveHourQuotaSample,
+    pub weekly_remaining: super::quota::RemainingQuotaPercent,
+    pub weekly_resets_at: i64,
+}
+
+pub fn codex_quota_account_key(account_result: &Value) -> Result<String> {
+    let account = &account_result["account"];
+    ensure!(
+        account["type"].as_str() == Some("chatgpt"),
+        "Codex subscription account metadata required"
+    );
+    let email = account["email"]
+        .as_str()
+        .filter(|value| {
+            value.contains('@')
+                && value.len() <= 1024
+                && !value
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+        })
+        .context("Codex login identity unavailable")?;
+    let plan = account["planType"]
+        .as_str()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        .context("Codex subscription plan unavailable")?;
+    let identity = format!(
+        "codex-chatgpt-v1\n{}\n{plan}",
+        email.trim().to_ascii_lowercase()
+    );
+    Ok(Sha256::digest(identity.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn decode_quota_window(
+    value: &Value,
+    minutes: i64,
+    observed_at: i64,
+) -> Result<(super::quota::RemainingQuotaPercent, i64)> {
+    ensure!(
+        value["windowDurationMins"].as_i64() == Some(minutes),
+        "Unsupported Codex quota window duration"
+    );
+    let used = value["usedPercent"]
+        .as_f64()
+        .context("Measured Codex quota percentage unavailable")?;
+    let remaining = super::quota::RemainingQuotaPercent::new(100.0 - used)?;
+    let resets_at = value["resetsAt"]
+        .as_i64()
+        .context("Codex quota reset unavailable")?;
+    ensure!(
+        resets_at > observed_at,
+        "Codex quota window already expired"
+    );
+    Ok((remaining, resets_at))
+}
+
+pub fn decode_codex_subscription_quota(
+    account_result: &Value,
+    limits_result: &Value,
+    expected_account_key: &str,
+    observed_at: i64,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    ensure!(observed_at >= 0, "Invalid Codex quota observation time");
+    let account_key = codex_quota_account_key(account_result)?;
+    ensure!(
+        account_key == expected_account_key,
+        "Codex quota account binding changed"
+    );
+    let limits = &limits_result["rateLimits"];
+    ensure!(
+        limits["limitId"].as_str() == Some("codex"),
+        "Codex account quota limit identity unavailable"
+    );
+    ensure!(
+        limits["planType"].as_str() == account_result["account"]["planType"].as_str(),
+        "Codex account and quota plans differ"
+    );
+    ensure!(
+        limits["spendControlReached"].as_bool() == Some(false)
+            && limits["credits"]["hasCredits"].as_bool() == Some(false)
+            && limits["credits"]["unlimited"].as_bool() == Some(false),
+        "Paid, exhausted or unknown Codex spend controls are unsupported"
+    );
+    let (remaining, resets_at) = decode_quota_window(&limits["primary"], 300, observed_at)?;
+    let (weekly_remaining, weekly_resets_at) =
+        decode_quota_window(&limits["secondary"], 10080, observed_at)?;
+    Ok(CodexSubscriptionQuotaSnapshot {
+        five_hour: super::quota::FiveHourQuotaSample {
+            account_key,
+            observed_at,
+            remaining,
+            resets_at,
+        },
+        weekly_remaining,
+        weekly_resets_at,
+    })
+}
+
 fn parse_usage(value: &Value) -> Option<AiUsage> {
     let prompt_tokens = usize::try_from(value["input_tokens"].as_u64()?).ok()?;
     let completion_tokens = usize::try_from(value["output_tokens"].as_u64()?).ok()?;
@@ -320,6 +429,105 @@ fn is_effort_substitution(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subscription_quota_decoder_binds_known_windows_without_authorizing_spend() -> Result<()> {
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let limits = serde_json::json!({"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,
+            "credits":{"hasCredits":false,"unlimited":false},
+            "primary":{"usedPercent":65,"windowDurationMins":300,"resetsAt":200},
+            "secondary":{"usedPercent":47,"windowDurationMins":10080,"resetsAt":1000}}});
+        let key = codex_quota_account_key(&account)?;
+        assert_eq!(key.len(), 64);
+        assert!(!key.contains("reviewer"));
+        let decoded = decode_codex_subscription_quota(&account, &limits, &key, 100)?;
+        assert_eq!(decoded.five_hour.account_key, key);
+        assert_eq!(
+            decoded.five_hour.remaining,
+            super::super::quota::RemainingQuotaPercent::new(35.0)?
+        );
+        assert_eq!(
+            decoded.weekly_remaining,
+            super::super::quota::RemainingQuotaPercent::new(53.0)?
+        );
+        assert_eq!(decoded.weekly_resets_at, 1000);
+        let policy = super::super::quota::CodexAccountQuotaPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let state = super::super::quota::AccountQuotaState {
+            account_key: key.clone(),
+            admission: super::super::quota::AccountQuotaAdmission::Ready,
+        };
+        assert_eq!(
+            policy.evaluate(100, &state, Some(&decoded.five_hour))?.gate,
+            super::super::quota::QuotaAdmissionGate::FiveHourReady
+        );
+        assert!(decode_codex_subscription_quota(&account, &limits, "other-account", 100).is_err());
+        let mut metered = account.clone();
+        metered["account"]["type"] = serde_json::json!("apiKey");
+        assert!(codex_quota_account_key(&metered).is_err());
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({"account":{"type":"chatgpt","email":""}}),
+            serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid\npro","planType":"pro"}}),
+        ] {
+            assert!(codex_quota_account_key(&invalid).is_err());
+        }
+        let mut changed = account.clone();
+        changed["account"]["email"] = serde_json::json!("other@example.invalid");
+        assert!(decode_codex_subscription_quota(&changed, &limits, &key, 100).is_err());
+        for pointer in [
+            "/rateLimits/primary/usedPercent",
+            "/rateLimits/primary/windowDurationMins",
+            "/rateLimits/secondary",
+            "/rateLimits/spendControlReached",
+            "/rateLimits/credits/hasCredits",
+        ] {
+            let mut malformed = limits.clone();
+            *malformed.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
+            assert!(
+                decode_codex_subscription_quota(&account, &malformed, &key, 100).is_err(),
+                "{pointer}"
+            );
+        }
+        for (pointer, value) in [
+            ("/rateLimits/primary/usedPercent", serde_json::json!(-0.1)),
+            ("/rateLimits/primary/usedPercent", serde_json::json!(100.1)),
+            ("/rateLimits/secondary/usedPercent", serde_json::json!("47")),
+            (
+                "/rateLimits/primary/windowDurationMins",
+                serde_json::json!(60),
+            ),
+            (
+                "/rateLimits/secondary/windowDurationMins",
+                serde_json::json!(300),
+            ),
+            ("/rateLimits/primary/resetsAt", serde_json::json!(100)),
+            ("/rateLimits/primary/resetsAt", serde_json::json!(200.5)),
+            ("/rateLimits/secondary/resetsAt", serde_json::json!(99)),
+            ("/rateLimits/planType", serde_json::json!("team")),
+            ("/rateLimits/limitId", serde_json::json!("other-model")),
+            ("/rateLimits/spendControlReached", serde_json::json!(true)),
+            ("/rateLimits/credits/hasCredits", serde_json::json!(true)),
+            ("/rateLimits/credits/unlimited", serde_json::json!(true)),
+        ] {
+            let mut malformed = limits.clone();
+            *malformed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                decode_codex_subscription_quota(&account, &malformed, &key, 100).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut exhausted = limits.clone();
+        exhausted["rateLimits"]["secondary"]["usedPercent"] = serde_json::json!(100);
+        assert_eq!(
+            decode_codex_subscription_quota(&account, &exhausted, &key, 100)?.weekly_remaining,
+            super::super::quota::RemainingQuotaPercent::new(0.0)?
+        );
+        assert!(decode_codex_subscription_quota(&account, &limits, &key, -1).is_err());
+        Ok(())
+    }
+
     use super::*;
 
     #[cfg(unix)]
