@@ -5,6 +5,43 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Daytime Maintenance Checkpoint
+
+At 15:15 CET on 2026-10-27, source/runtime 2fbfa794 is signed, pushed and
+deployed. A repeating RepackWorker failure was reproduced in a temporary
+blob:none clone: Git rejects geometric stdin packs with promisor exclusion.
+Full clones retain geometric packing; partial clones now use supported
+incremental packing without pruning or changing remote configuration. Both
+Git 2.39.5 and 2.56.0 pass object retention, reachable loose packing and real
+filtered-clone missing-blob tests. The full gate passes 1,153 library tests
+(two ignored), 49 main, seven CLI and 28 integration, formatting and all Clippy
+profiles. A disk-full link was repaired by deleting only regenerable Cargo
+incremental cache; operational backups, review artifacts and user files remain.
+
+Private before-promisor-repack-20261027-151506.db passed quick_check; matching
+rollback binary and Settings snapshot are retained. Installed/release SHA-256:
+2e26c91a3607447c4737d226faf9407725ea2c3accea46dac9f8809490d40db6.
+At the checked idle boundary, live incremental maintenance moved 204 loose
+objects into a pack, retained all 23 promisor markers, and left refs and
+repository configuration unchanged. API healthy, schema 17, service active
+PID 1168273. All 110 Reviewed series are preserved; no Pending or In Review.
+No active review was interrupted, no model turn was started for the repair,
+and provider/model/effort, auth and muted delivery settings are unchanged.
+
+Normal ingestion now has six human-review evidence records on six series.
+The live positive filter and both detail routes agree on exact targets and
+provenance. A Failed To Apply series remains in that independent AI state.
+The real mobile disclosure renders its source link and caveat without overflow
+after DOM activation. Pointer activation timed out and keyboard automation was
+inconclusive; neither is claimed as a passed live interaction test.
+No historical backfill was run. Staging publication is still unobserved. A
+user-owned mirror-refresh timer runs every 30 minutes and the upstream fetch
+timestamp is recent; do not change that timer or force-fetch to manufacture
+snapshot evidence. Latest fresh quota at 14:56 CET: 99% five-hour, 51% weekly,
+five-hour reset 19:27:29 CET. No reset credit, premium experiment, benchmark,
+self-review, public post or watcher was started. The quota foundations remain
+unwired; bounded metadata RPC is the next independently testable increment.
+
 ### Deployed Human-Evidence Checkpoint
 
 Latest deployed source/runtime at 01:53 CET on 2026-10-27: 47cdd5c1 is signed, pushed to

@@ -699,7 +699,14 @@ clone whose missing blob remains unfetched with an unavailable remote. The full
 make check-pr gate passes 1,153 library tests (two ignored), 49 main, seven CLI,
 28 integration, formatting and all Clippy profiles. An initial disk-full link
 was repaired by removing only regenerable incremental build cache, preserving
-review artifacts and operational backups. Backed-up deployment is next.
+review artifacts and operational backups. Source 2fbfa794 is signed, pushed and
+deployed at 15:15 CET after an idle checked database backup and matching binary
+hashes. Live incremental maintenance packs 204 loose objects, retains all 23
+promisor markers, and leaves refs/configuration unchanged. API is healthy,
+schema 17 and all 110 Reviewed series remain intact; no active review was
+interrupted. Six normal-ingestion human-evidence records now appear in the live
+positive filter independently of AI state. First staging publication remains
+unobserved. The user-owned mirror refresh timer is preserved.
 This maintenance repair does not change
 review scheduling or erase previous failures.
 
