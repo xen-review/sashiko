@@ -343,7 +343,16 @@ disabled-by-default normal-ingestion recording. Source fingerprints, mail/patch
 revision guards, exact targets, and idempotent inserts retain provenance without
 rebinding old replies to changed targets. Rejected raw-only source changes also
 invalidate old positives. The focused store, daemon compile, historical schema
-upgrade fixtures, and full make check-pr gate pass. API/UI enrichment is next.
+upgrade fixtures, and full make check-pr gate pass. API/UI enrichment now includes
+the positive-only human_review=recorded filter, independent current-state
+predicates before row/count pagination, distinct recorded-part counts, and
+bounded native provenance on both detail routes. Real-router checks cover
+partial series, disabled mode, cache freshness, invalid/duplicate values, and
+stale exclusion. Synthetic desktop/mobile disclosures escape hostile strings,
+fit 1280/390 pixels, restore/Clear URLs, and isolate Messages requests. The full
+API/UI make check-pr gate passes: 1,145 library tests (two ignored), 49 main,
+seven CLI, and 28 integration tests, plus formatting and all Clippy profiles.
+Backed-up live deployment is next.
 No live classifier or automatic historical backfill is enabled. Historical
 backfill remains bounded and is not run automatically.
 

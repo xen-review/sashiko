@@ -499,6 +499,191 @@ async fn test_patchset_review_state_filter_counts_pages_and_cache_isolation() {
 }
 
 #[tokio::test]
+async fn test_human_review_evidence_is_opt_in_positive_partial_and_current() {
+    let mut settings = test_settings(false);
+    settings.server.human_review_evidence = true;
+    let server = spawn_test_server_with_settings(settings).await;
+    server.db.conn.execute_batch("INSERT INTO patchsets (id,status,subject,date,total_parts,received_parts)
+        VALUES (1,'Reviewed','human series',100,2,2), (2,'Failed','other series',200,1,1);
+        INSERT INTO messages (message_id,subject) VALUES ('human-part-1@example.invalid','first'), ('human-part-2@example.invalid','second'), ('human-part-3@example.invalid','other');
+        INSERT INTO patches (id,patchset_id,message_id,part_index,diff) VALUES
+        (1,1,'human-part-1@example.invalid',1,'first diff'), (2,1,'human-part-2@example.invalid',2,'second diff'), (3,2,'human-part-3@example.invalid',1,'other diff');").await.unwrap();
+    let thread = server
+        .db
+        .create_thread("human-part-1@example.invalid", "human series", 1)
+        .await
+        .unwrap();
+    for raw in [
+        "From: Author <author@example.invalid>\r\nMessage-ID: <human-part-1@example.invalid>\r\nSubject: [PATCH 1/2] first\r\n\r\nReviewed-by: Author <author@example.invalid>\r\n",
+        "From: Reviewer <reviewer@example.invalid>\r\nMessage-ID: <human-reply@example.invalid>\r\nIn-Reply-To: <human-part-1@example.invalid>\r\nSubject: Re: [PATCH 1/2] first\r\n\r\nReviewed-by: Reviewer <reviewer@example.invalid>\r\n",
+    ] {
+        let (metadata, _, input) =
+            sashiko::human_review::parse_ingested_mail(raw.as_bytes(), true).unwrap();
+        server
+            .db
+            .create_message_with_references(
+                &metadata.message_id,
+                thread,
+                metadata.in_reply_to.as_deref(),
+                &metadata.author,
+                &metadata.subject,
+                metadata.date,
+                &metadata.body,
+                "",
+                "",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        server
+            .db
+            .record_direct_review_claims(&metadata, &input.unwrap(), 300)
+            .await
+            .unwrap();
+    }
+    let client = reqwest::Client::new();
+    let get = |query: &str| {
+        let client = client.clone();
+        let url = format!("{}/api/{query}", server.base_url);
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let default = get("patchsets").await;
+    assert_eq!(default["total"], 2);
+    assert_eq!(default["human_review"]["series"]["1"]["recorded_parts"], 1);
+    assert_eq!(default["human_review"]["series"]["1"]["present_parts"], 2);
+    let first = get("patchsets?human_review=recorded&per_page=1").await;
+    assert_eq!(first["total"], 1);
+    assert_eq!(first["items"][0]["id"], 1);
+    assert_eq!(first["items"][0]["status"], "Reviewed");
+    let second = get("patchsets?human_review=recorded&per_page=1&page=2").await;
+    assert_eq!(second["total"], 1);
+    assert!(second["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        get("patchsets?human_review=recorded&review_state=Failed").await["total"],
+        0
+    );
+    assert_eq!(
+        get("patchsets?human_review=recorded&review_state=Reviewed&q=human").await["total"],
+        1
+    );
+    for route in ["patchset", "patch"] {
+        let details = get(&format!("{route}?id=1&per_page=1")).await;
+        assert_eq!(details["human_review"]["page_only"], true);
+        assert_eq!(details["human_review"]["available"], true);
+        let records = details["patches"][0]["human_review_evidence"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["source_message_id"],
+            "human-reply@example.invalid"
+        );
+        assert_eq!(
+            records[0]["target_message_id"],
+            "human-part-1@example.invalid"
+        );
+        assert_eq!(records[0]["reviewer_mailbox"], "reviewer@example.invalid");
+        assert_eq!(records[0]["extraction_version"], 1);
+        assert_eq!(records[0]["source_hash"].as_str().unwrap().len(), 64);
+        let next = get(&format!("{route}?id=1&per_page=1&page=2")).await;
+        assert!(
+            next["patches"][0]["human_review_evidence"]["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for query in [
+        "human_review=absent",
+        "human_review=none",
+        "human_review=recorded&human_review=recorded",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{}/api/patchsets?{query}", server.base_url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+    }
+    server.db.conn.execute_batch("WITH RECURSIVE extra(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM extra WHERE n<205)
+        INSERT INTO messages (message_id,author,subject,date,body,in_reply_to,human_review_source_hash)
+        SELECT 'bounded-'||n||'@example.invalid',author,subject,date,body,in_reply_to,printf('%064d',n)
+        FROM extra CROSS JOIN messages WHERE message_id='human-reply@example.invalid';
+        INSERT INTO human_review_evidence (source_id,target_patch_id,target_message_id,source_revision,target_revision,
+            target_message_revision,extraction_version,source_hash,target_diff_hash,reviewer_mailbox,trailer,body_line,recorded_at)
+        SELECT source.id,h.target_patch_id,h.target_message_id,source.human_review_revision,h.target_revision,
+            h.target_message_revision,h.extraction_version,source.human_review_source_hash,h.target_diff_hash,h.reviewer_mailbox,h.trailer,h.body_line,h.recorded_at
+        FROM messages source CROSS JOIN human_review_evidence h WHERE source.message_id LIKE 'bounded-%' AND h.id=1;").await.unwrap();
+    let bounded = get("patchset?id=1&per_page=1").await;
+    assert_eq!(
+        bounded["patches"][0]["human_review_evidence"]["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        200
+    );
+    assert_eq!(
+        bounded["patches"][0]["human_review_evidence"]["truncated"],
+        true
+    );
+    assert_eq!(
+        get("patchsets?human_review=recorded").await["human_review"]["series"]["1"]["recorded_parts"],
+        1
+    );
+    assert!(server.db.human_review_patch_batch(&[1; 101]).await.is_err());
+    assert!(
+        server
+            .db
+            .human_review_series_batch(&[1; 101])
+            .await
+            .is_err()
+    );
+    server.db.execute("UPDATE messages SET body = 'withdrawn' WHERE message_id = 'human-reply@example.invalid' OR message_id LIKE 'bounded-%'", ()).await.unwrap();
+    assert_eq!(get("patchsets?human_review=recorded").await["total"], 0);
+    let after = get("patchsets").await;
+    assert_eq!(after["total"], 2);
+    assert_eq!(after["human_review"]["series"]["1"]["recorded_parts"], 0);
+    let disabled = spawn_test_server(false).await;
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/api/patchsets?human_review=recorded",
+                disabled.base_url
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let default_disabled: serde_json::Value = client
+        .get(format!("{}/api/patchsets", disabled.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(default_disabled.get("human_review").is_none());
+}
+
+#[tokio::test]
 async fn test_patchset_staging_evidence_is_batched_paginated_and_read_only() {
     use sashiko::staging::{CommitIdentity, INDEX_VERSION, IndexEntry, StagingSnapshot};
     let repo = tempfile::tempdir().unwrap();

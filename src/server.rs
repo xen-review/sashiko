@@ -707,6 +707,9 @@ async fn list_patchsets(
     if pagination.staging_state.is_some() && state.settings.git.staging.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    if pagination.human_review.is_some() && !state.settings.server.human_review_evidence {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let staging = if let Some(settings) = &state.settings.git.staging {
         let snapshot = match tokio::fs::canonicalize(&state.settings.git.repository_path).await {
             Ok(repository) => state
@@ -729,10 +732,16 @@ async fn list_patchsets(
         None
     };
 
+    let filters = crate::api::PatchsetFilters {
+        review_state: pagination.review_state,
+        staging: staging.as_ref(),
+        human_review: pagination.human_review,
+    };
     let mut items = if pagination.q.is_none()
         && pagination.mailing_list.is_none()
         && pagination.review_state.is_none()
         && staging.is_none()
+        && !state.settings.server.human_review_evidence
         && page == 1
         && per_page == 50
     {
@@ -749,13 +758,12 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .get_patchsets_classified(
+            .get_patchsets_with_filters(
                 per_page,
                 offset,
                 pagination.q.clone(),
                 pagination.mailing_list.clone(),
-                pagination.review_state,
-                staging.as_ref(),
+                &filters,
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -767,6 +775,7 @@ async fn list_patchsets(
         && pagination.mailing_list.is_none()
         && pagination.review_state.is_none()
         && staging.is_none()
+        && !state.settings.server.human_review_evidence
     {
         state
             .patchsets_count_cache
@@ -781,16 +790,27 @@ async fn list_patchsets(
     } else {
         state
             .db
-            .count_patchsets_classified(
+            .count_patchsets_with_filters(
                 pagination.q.clone(),
                 pagination.mailing_list.clone(),
-                pagination.review_state,
-                staging.as_ref(),
+                &filters,
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    let human_review = if state.settings.server.human_review_evidence {
+        Some(crate::api::HumanReviewPageEvidence {
+            extraction_version: crate::human_review::EXTRACTION_VERSION,
+            series: state
+                .db
+                .human_review_series_batch(&items.iter().map(|item| item.id).collect::<Vec<_>>())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        })
+    } else {
+        None
+    };
     let evidence = if let Some(query) = staging {
         let series = if let Some(snapshot) = &query.snapshot {
             state
@@ -833,6 +853,7 @@ async fn list_patchsets(
         page,
         per_page,
         staging: evidence,
+        human_review,
     }))
 }
 
@@ -1106,6 +1127,35 @@ async fn attach_patchset_flags(
     Ok(())
 }
 
+async fn attach_human_review_evidence(
+    state: &AppState,
+    details: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    if !state.settings.server.human_review_evidence {
+        return Ok(());
+    }
+    details["human_review"] = serde_json::json!({"extraction_version": crate::human_review::EXTRACTION_VERSION, "page_only": true, "available": false});
+    let ids: Vec<i64> = details["patches"]
+        .as_array()
+        .map(|patches| {
+            patches
+                .iter()
+                .filter_map(|patch| patch["id"].as_i64())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut evidence = state.db.human_review_patch_batch(&ids).await?;
+    if let Some(patches) = details["patches"].as_array_mut() {
+        for patch in patches {
+            if let Some(item) = patch["id"].as_i64().and_then(|id| evidence.remove(&id)) {
+                patch["human_review_evidence"] = serde_json::to_value(item)?;
+            }
+        }
+    }
+    details["human_review"]["available"] = serde_json::json!(true);
+    Ok(())
+}
+
 async fn attach_staging_evidence(
     state: &AppState,
     details: &mut serde_json::Value,
@@ -1197,6 +1247,12 @@ async fn get_patchset(
             )
             .await?;
             redact_embedded_bugs(&state, &principal, &mut details).await?;
+            if let Err(error) = attach_human_review_evidence(&state, &mut details).await {
+                warn!(
+                    "Optional human-review evidence unavailable: {}",
+                    crate::utils::redact_secret(&error.to_string())
+                );
+            }
             if let Err(error) = attach_staging_evidence(&state, &mut details).await {
                 warn!(
                     "Optional staging evidence unavailable: {}",
@@ -1314,6 +1370,12 @@ async fn get_patchset_summary(
             )
             .await?;
             attach_active_review_progress(&mut details, &state.review_progress);
+            if let Err(error) = attach_human_review_evidence(&state, &mut details).await {
+                warn!(
+                    "Optional human-review evidence unavailable: {}",
+                    crate::utils::redact_secret(&error.to_string())
+                );
+            }
             if let Err(error) = attach_staging_evidence(&state, &mut details).await {
                 warn!(
                     "Optional staging evidence unavailable: {}",
@@ -5900,6 +5962,7 @@ F:	*
             mailing_list: None,
             review_state: None,
             staging_state: None,
+            human_review: None,
         };
 
         // 1. Anonymous caller sees Embargoed with empty reviews, zeroed list counts,

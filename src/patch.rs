@@ -70,7 +70,7 @@ fn review_mailbox(address: &str) -> Option<String> {
 }
 
 fn review_trailer_mailbox(value: &str) -> Option<String> {
-    if value.chars().any(char::is_control) {
+    if value.len() > 4096 || value.chars().any(char::is_control) {
         return None;
     }
     let raw = format!("From: {value}\r\n\r\n");

@@ -15,7 +15,18 @@ cannot bind an earlier review to changed target content. Prior evidence remains
 stored rather than rewriting reviews or mail. Deterministic parser, persistence,
 opt-out, ambiguity, idempotency, wrong-version, and schema-upgrade tests pass,
 as does make check-pr. No model call, live backfill, or migration has run.
-API/UI enrichment and the positive-only filter are the next increment.
+API/UI enrichment and the positive-only human_review=recorded filter are
+implemented in the next increment. The shared current-evidence predicate is
+applied before pagination to both rows and counts, independently of review and
+staging states. Batched list enrichment counts distinct saved parts, not tags.
+Both detail routes read only their requested page, at most 100 patch IDs and
+200 provenance records, with explicit truncation. Enabled requests bypass default
+caches. Disabled configurations reject the positive filter rather than imply
+that no human reviewed a patch. Native disclosures retain exact source links,
+hashes, extraction version and attribution/withdrawal caveats. The synthetic
+desktop/mobile checks at 1280/390 pixels pass with hostile strings escaped,
+working URL restoration/Clear, no Messages filter leakage, and no page overflow.
+The private fixture is stopped. No live backfill or model call was needed.
 
 ## Existing Inputs
 

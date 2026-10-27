@@ -249,6 +249,16 @@ Settings for the goose provider (`provider = "goose"`).
 | `log_sign_in_links` | bool | `false` | Writes sign-in links to the log. For a developer machine with no real users; a link in a log is a credential anyone reading the log can spend. |
 | `human_review_evidence` | bool | `false` | Records bounded, directly replied Reviewed-by evidence during normal raw-mail ingestion. The single trailer mailbox must match the actual single From mailbox. Exact target and source revisions must remain unchanged. This is recorded mail attribution, not authenticated identity or proof that no later reply withdrew the review. No historical scan, network fetch, scheduling change, or outbound delivery is enabled. |
 
+When enabled, `GET /api/patchsets?human_review=recorded` selects series with
+current evidence on at least one saved part. It composes with `review_state`,
+`staging_state`, list/search, and pagination. There is no negative human-review
+filter: unavailable or unprocessed replies cannot prove absence. Disabled
+configurations reject this query. List responses expose distinct recorded-part
+counts; both detail routes include exact provenance for their requested page,
+bounded to 100 patch IDs and 200 records with an explicit truncation flag.
+The web state selector labels this as Recorded Human-Review Evidence, separately
+from Sashiko's AI status and staging history.
+
 ### `[server.acl]`
 
 Capability lists, matched against the address a caller signed in with. Every

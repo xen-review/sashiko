@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use crate::db::Database;
 use crate::patch::{DirectReviewClaim, PatchsetMetadata};
@@ -54,12 +55,98 @@ pub const CURRENT_EVIDENCE_SQL: &str = "SELECT h.* FROM human_review_evidence h
     JOIN messages target_message ON target_message.id = h.target_message_id
     WHERE h.extraction_version = 1
       AND source.human_review_revision = h.source_revision
+    AND source.human_review_source_hash = h.source_hash
       AND target.human_review_revision = h.target_revision
       AND target_message.human_review_revision = h.target_message_revision
       AND source.in_reply_to = target_message.message_id
       AND target.message_id = target_message.message_id AND target.part_index > 0";
 
 impl Database {
+    pub async fn human_review_series_batch(
+        &self,
+        series_ids: &[i64],
+    ) -> Result<BTreeMap<i64, crate::api::HumanSeriesEvidence>> {
+        ensure!(
+            series_ids.len() <= 100,
+            "Human evidence pages are limited to 100 series"
+        );
+        let sql = format!(
+            "SELECT p.patchset_id, count(DISTINCT p.id),
+            count(DISTINCT CASE WHEN h.id IS NOT NULL THEN p.id END)
+            FROM patches p JOIN json_each(?) requested ON requested.value = p.patchset_id
+            LEFT JOIN ({CURRENT_EVIDENCE_SQL}) h ON h.target_patch_id = p.id
+            WHERE p.part_index > 0 GROUP BY p.patchset_id"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, [serde_json::to_string(series_ids)?])
+            .await?;
+        let mut result = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            result.insert(
+                row.get(0)?,
+                crate::api::HumanSeriesEvidence {
+                    present_parts: row.get::<i64>(1)?.try_into()?,
+                    recorded_parts: row.get::<i64>(2)?.try_into()?,
+                },
+            );
+        }
+        Ok(result)
+    }
+
+    pub async fn human_review_patch_batch(
+        &self,
+        patch_ids: &[i64],
+    ) -> Result<BTreeMap<i64, crate::api::HumanPatchEvidence>> {
+        ensure!(
+            patch_ids.len() <= 100,
+            "Human evidence pages are limited to 100 patches"
+        );
+        let sql = format!("SELECT h.target_patch_id, source.message_id, substr(source.author,1,1024), source.date,
+            target.message_id, h.reviewer_mailbox, h.trailer, h.body_line,
+            h.source_hash, h.target_diff_hash, h.extraction_version, h.recorded_at
+            FROM ({CURRENT_EVIDENCE_SQL}) h
+            JOIN messages source ON source.id = h.source_id
+            JOIN messages target ON target.id = h.target_message_id
+            JOIN json_each(?) requested ON requested.value = h.target_patch_id
+            ORDER BY h.recorded_at DESC, h.id DESC LIMIT 201");
+        let mut rows = self
+            .conn
+            .query(&sql, [serde_json::to_string(patch_ids)?])
+            .await?;
+        let mut result: BTreeMap<_, crate::api::HumanPatchEvidence> = patch_ids
+            .iter()
+            .map(|id| (*id, Default::default()))
+            .collect();
+        let mut count = 0;
+        while let Some(row) = rows.next().await? {
+            if count == 200 {
+                for evidence in result.values_mut() {
+                    evidence.truncated = true;
+                }
+                break;
+            }
+            let id = row.get::<i64>(0)?;
+            if let Some(evidence) = result.get_mut(&id) {
+                evidence.records.push(crate::api::HumanReviewRecord {
+                    source_message_id: row.get(1)?,
+                    source_author: row.get(2)?,
+                    source_date: row.get(3)?,
+                    target_message_id: row.get(4)?,
+                    reviewer_mailbox: row.get(5)?,
+                    trailer: row.get(6)?,
+                    body_line: row.get(7)?,
+                    source_hash: row.get(8)?,
+                    target_diff_hash: row.get(9)?,
+                    extraction_version: row.get(10)?,
+                    recorded_at: row.get(11)?,
+                });
+            }
+            count += 1;
+        }
+        Ok(result)
+    }
+
     pub async fn record_direct_review_claims(
         &self,
         metadata: &PatchsetMetadata,
@@ -75,7 +162,7 @@ impl Database {
         let mut rows = tx
             .query(
                 "SELECT id, human_review_revision, body FROM messages
-            WHERE message_id = ? AND author = ? AND subject = ? AND date = ? AND in_reply_to = ?",
+            WHERE message_id = ? AND author = ? AND subject = ? AND date = ? AND in_reply_to IS ?",
                 libsql::params![
                     metadata.message_id.as_str(),
                     metadata.author.as_str(),
@@ -282,12 +369,37 @@ mod tests {
             0
         );
         assert_eq!(db.current_human_review_count(1).await?, 1);
+        let filters = crate::api::PatchsetFilters {
+            human_review: Some(crate::api::HumanReviewFilter::Recorded),
+            ..Default::default()
+        };
+        assert_eq!(
+            db.count_patchsets_with_filters(None, None, &filters)
+                .await?,
+            1
+        );
+        let page = db
+            .get_patchsets_with_filters(1, 0, None, None, &filters)
+            .await?;
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, 1);
         db.execute(
             "UPDATE messages SET body = 'Withdrawn' WHERE message_id = 'review@example.invalid'",
             (),
         )
         .await?;
         assert_eq!(db.current_human_review_count(1).await?, 0);
+        assert_eq!(
+            db.count_patchsets_with_filters(None, None, &filters)
+                .await?,
+            0
+        );
+        assert!(
+            db.get_patchsets_with_filters(1, 0, None, None, &filters)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(db.count_patchsets(None, None).await?, 1);
         assert!(
             db.record_direct_review_claims(&metadata, &input, 5)
                 .await

@@ -2525,7 +2525,7 @@
                  state.selectedList = route.query.list;
             }
             if (route.view === 'list') {
-                state.reviewState = route.query?.staging_state ? `staging:${route.query.staging_state}` : (route.query?.review_state || '');
+                state.reviewState = route.query?.human_review ? `human:${route.query.human_review}` : route.query?.staging_state ? `staging:${route.query.staging_state}` : (route.query?.review_state || '');
             }
 
             // Clear ECharts cache if navigating to stats from elsewhere
@@ -3191,7 +3191,9 @@
         function setStateFilterParams(params, value) {
             params.delete('review_state');
             params.delete('staging_state');
+            params.delete('human_review');
             if (value.startsWith('staging:')) params.set('staging_state', value.slice(8));
+            else if (value.startsWith('human:')) params.set('human_review', value.slice(6));
             else if (value) params.set('review_state', value);
         }
 
@@ -3200,7 +3202,7 @@
             const queryIndex = url.hash.indexOf('?');
             const hash = (queryIndex === -1 ? url.hash : url.hash.substring(0, queryIndex)) || '#/';
             const hashParams = new URLSearchParams(queryIndex === -1 ? '' : url.hash.substring(queryIndex + 1));
-            const useSearch = url.searchParams.has('list') || url.searchParams.has('review_state') || url.searchParams.has('staging_state');
+            const useSearch = url.searchParams.has('list') || url.searchParams.has('review_state') || url.searchParams.has('staging_state') || url.searchParams.has('human_review');
             const params = useSearch ? url.searchParams : hashParams;
             if (state.selectedList) {
                 params.set('list', state.selectedList);
@@ -3212,6 +3214,7 @@
                 hashParams.delete('list');
                 hashParams.delete('review_state');
                 hashParams.delete('staging_state');
+                hashParams.delete('human_review');
             }
             url.hash = hash + (hashParams.size ? '?' + hashParams.toString() : '');
             window.history.replaceState(null, null, url.pathname + url.search + url.hash);
@@ -3268,6 +3271,9 @@
                     </select>
                     <select id="reviewStateSelector" aria-label="Review state" title="Recorded review state" onchange="setReviewState(this.value)" style="${state.listMode === 'patchsets' ? '' : 'display:none;'}max-width:100%;">
                         ${reviewStateOptions}
+                        <optgroup id="humanReviewOptions" label="Human-review evidence" hidden>
+                            <option value="human:recorded" ${state.reviewState === 'human:recorded' ? 'selected' : ''}>Recorded Human-Review Evidence</option>
+                        </optgroup>
                         <optgroup id="stagingStateOptions" label="Staging history" hidden>
                             ${[['all_matched', 'All Patches Matched in Staging History'], ['partially_matched', 'Some Patches Matched in Staging History'], ['no_match_in_checked_range', 'No Match in Checked Staging Range'], ['unknown', 'Staging Evidence Unknown']].map(([value, label]) => `<option value="staging:${value}" ${state.reviewState === `staging:${value}` ? 'selected' : ''}>${label}</option>`).join('')}
                         </optgroup>
@@ -3468,6 +3474,8 @@
                 const total = data.total || 0;
                 const stagingOptions = document.getElementById('stagingStateOptions');
                 if (stagingOptions && state.listMode === 'patchsets') stagingOptions.hidden = !data.staging;
+                const humanOptions = document.getElementById('humanReviewOptions');
+                if (humanOptions && state.listMode === 'patchsets') humanOptions.hidden = !data.human_review;
 
                 state.totalPages = Math.ceil(total / state.perPage) || 1;
 
@@ -3535,7 +3543,7 @@
                         }
 
                         row.innerHTML = `
-                            <td><div>${escapeHtml(p.subject) || '(no subject)'}</div>${tagsHtml}${data.staging ? renderStagingSeriesEvidence(data.staging.series?.[p.id], data.staging) : ''}</td>
+                            <td><div>${escapeHtml(p.subject) || '(no subject)'}</div>${tagsHtml}${data.staging ? renderStagingSeriesEvidence(data.staging.series?.[p.id], data.staging) : ''}${data.human_review ? renderHumanSeriesEvidence(data.human_review.series?.[p.id]) : ''}</td>
                             <td style="line-height:1.2;">${authorHtml}</td>
                             <td style="line-height:1.2;">${dateHtml}</td>
                             <td>${parts}</td>
@@ -4039,6 +4047,7 @@
                             <span>${header}</span>
                         </h3>
                         ${renderStagingEvidence(patch?.staging_evidence)}
+                        ${renderHumanPatchEvidence(patch?.human_review_evidence)}
                         ${statusHtml}
                         ${listHtml}
                     </div>
@@ -4454,6 +4463,36 @@
             if (!Number.isFinite(timestamp)) return 'Unknown';
             const date = new Date(timestamp * 1000);
             return Number.isNaN(date.getTime()) ? 'Unknown' : date.toISOString();
+        }
+
+        function renderHumanSeriesEvidence(evidence) {
+            const recorded = Number.isSafeInteger(evidence?.recorded_parts) ? evidence.recorded_parts : 0;
+            if (!recorded) return '';
+            const present = Number.isSafeInteger(evidence?.present_parts) ? evidence.present_parts : '?';
+            return `<div class="text-muted-sm" style="margin-top:4px;overflow-wrap:anywhere;">Recorded human-review evidence: ${recorded}/${present} saved parts</div>`;
+        }
+
+        function renderHumanPatchEvidence(evidence) {
+            if (!evidence || !Array.isArray(evidence.records)) return '';
+            if (!evidence.records.length) return `<div class="text-muted-sm" style="margin:8px 0;">${evidence.truncated ? 'Human-review provenance is incomplete for this page.' : 'No current human-review evidence recorded; earlier or unavailable replies remain unknown.'}</div>`;
+            return `<details style="margin:8px 0;overflow-wrap:anywhere;min-width:0;">
+                <summary>Recorded human-review evidence (${evidence.records.length}${evidence.truncated ? '+' : ''})</summary>
+                <div class="text-muted-sm" style="margin-top:6px;overflow-wrap:anywhere;">
+                    ${evidence.records.map(record => `<div style="margin:8px 0;">
+                        <div>From mailbox: <code>${escapeHtml(record.reviewer_mailbox || 'Unknown')}</code></div>
+                        <div>Stored author: ${escapeHtml(record.source_author || 'Unknown')}</div>
+                        <div>Source: <a href="#/message/${encodeURIComponent(record.source_message_id || '')}">${escapeHtml(record.source_message_id || 'Unknown')}</a></div>
+                        <div>Exact target: <code>${escapeHtml(record.target_message_id || 'Unknown')}</code></div>
+                        <div>Sent: ${escapeHtml(formatEvidenceTime(record.source_date))}; recorded: ${escapeHtml(formatEvidenceTime(record.recorded_at))}</div>
+                        <div>Body line ${escapeHtml(String(record.body_line ?? '?'))}: <code>${escapeHtml(record.trailer || '')}</code></div>
+                        <div>Source SHA-256: <code>${escapeHtml(record.source_hash || 'Unknown')}</code></div>
+                        <div>Target diff SHA-256: <code>${escapeHtml(record.target_diff_hash || 'Unknown')}</code></div>
+                        <div>Extraction version: ${escapeHtml(String(record.extraction_version ?? '?'))}</div>
+                    </div>`).join('')}
+                    <div>Mail attribution is not authenticated identity. Only this exact saved part is covered; later withdrawal or unavailable replies remain unknown.</div>
+                    ${evidence.truncated ? '<div>Additional provenance records are omitted from this bounded page.</div>' : ''}
+                </div>
+            </details>`;
         }
 
         function renderStagingSeriesEvidence(evidence, provenance) {

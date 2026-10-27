@@ -40,6 +40,20 @@ impl TryFrom<String> for PatchsetReviewFilter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanReviewFilter {
+    Recorded,
+}
+
+#[cfg(feature = "server")]
+#[derive(Default)]
+pub struct PatchsetFilters<'a> {
+    pub review_state: Option<PatchsetReviewFilter>,
+    pub staging: Option<&'a crate::staging::StagingQuery>,
+    pub human_review: Option<HumanReviewFilter>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SeriesState {
@@ -78,6 +92,40 @@ pub struct Pagination {
     pub mailing_list: Option<String>,
     pub review_state: Option<PatchsetReviewFilter>,
     pub staging_state: Option<SeriesState>,
+    pub human_review: Option<HumanReviewFilter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanReviewRecord {
+    pub source_message_id: String,
+    pub source_author: String,
+    pub source_date: i64,
+    pub target_message_id: String,
+    pub reviewer_mailbox: String,
+    pub trailer: String,
+    pub body_line: i64,
+    pub source_hash: String,
+    pub target_diff_hash: String,
+    pub extraction_version: i64,
+    pub recorded_at: i64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct HumanPatchEvidence {
+    pub records: Vec<HumanReviewRecord>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanSeriesEvidence {
+    pub present_parts: u64,
+    pub recorded_parts: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct HumanReviewPageEvidence {
+    pub extraction_version: i64,
+    pub series: std::collections::BTreeMap<i64, HumanSeriesEvidence>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +146,8 @@ pub struct PatchsetsResponse {
     pub per_page: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staging: Option<StagingPageEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_review: Option<HumanReviewPageEvidence>,
 }
 
 #[derive(Serialize, Deserialize)]
