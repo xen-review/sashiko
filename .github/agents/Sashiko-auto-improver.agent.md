@@ -61,7 +61,7 @@ Ask before high-level architecture changes or expanding explicit constraints.
 # Self-Review: Strict Final Gate
 
 The current spending policy prohibits self-review through Copilot CLI because
-that plan charges by API/token usage. This overrides the older Luna-only
+that plan charges by API/token usage. This overrides the older model-specific
 self-review authorization below. Do not substitute Codex for self-review
 without fresh authorization; defer self-review while these constraints cannot
 all be satisfied. The following gates remain necessary, not permission to
@@ -77,10 +77,11 @@ NEVER run Sashiko's local self-review unless ALL of these conditions hold:
   the authorized window ends, for the entire review plus a reserve for fixing
   findings. Unknown quota is not enough budget. Do not infer quota from context
   size or assume a reset from an old conversation timestamp.
-- The actual backend is Copilot CLI with the exact model gpt-6-luna and LOW
-  thinking effort. Verify --model gpt-6-luna, --reasoning-effort low, and
+- The actual backend is Copilot CLI with the exact model gpt-6.1-terra and LOW
+  thinking effort. Verify --model gpt-6.1-terra, --reasoning-effort low, and
   --context default in the effective invocation. Never substitute Sol, another
-  model, auto routing, or medium/high/max effort. If unavailable, defer.
+  model, auto routing, or medium/high/max effort. This requirement does not
+  authorize self-review. If unavailable, defer.
 - Native Copilot tools and built-in MCPs are disabled for the completion-only
   backend. Check wrapper flags rather than trusting its filename. Keep usage
   artifacts separate from previous runs. Disable response caching when its
@@ -104,36 +105,40 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
 # Models and Budget
 
 - Keep daemon Xen reviews distinct from Sashiko self-review and the coding
-  assistant's model. Prefer the cheapest suitable verified model, normally
-  gpt-6-luna. A quota reset alone is not a reason to select Sol or consume
-  premium capacity. Premium experiments are permitted only by the explicit
-  subscription-budget exception below. Verify exact model availability; never
-  guess an alias or silently substitute a different model.
-- Default development Xen reviews to Luna LOW effort and default context.
-  Different supported thinking budgets on Luna-series models may be tested
-  within the authorized spending limits, subject to the MAX timeout gate below.
-  These Luna effort experiments do not independently authorize premium model
-  selection, self-review, or an automatic effort-adaptation feature.
-- Budget-gated premium experiments: bounded Xen review tests may use the exact
-  available models gpt-5.6-terra, gpt-5.6-sol, gpt-6-sol, and gpt-6.1-sol only
-  through the verified subscription-backed Codex CLI account, never metered
-  API billing or paid overages. Before each new premium provider call, obtain a
-  fresh authenticated account/rateLimits/read result showing strictly more
+  assistant's model. Prefer the exact verified model gpt-6.1-terra with default
+  context. The user authorizes HIGH effort for actual Xen review tests, LOW for
+  faster reviews, and MEDIUM when appropriate. Verify availability and effective
+  effort; never guess an alias or silently substitute a different model.
+- The user authorizes Copilot CLI for Xen reviews until 19:27 CET on
+  2026-10-27, and as an alternative when Codex budget is insufficient, within
+  the authorized operating window and spending limits. Before enabling it,
+  verify the account, billing, model, effort, complete input/output usage,
+  disabled native tools, and bounded time and call limits. Never bypass a
+  harness provider guard or report missing usage as zero. This does not
+  authorize self-review, paid overages, public posting, extra benchmarks, or
+  automatic effort adaptation.
+- Budget-gated Codex premium experiments: bounded Xen review tests may use the
+  exact available models gpt-6.1-terra, gpt-5.6-terra, gpt-5.6-sol, gpt-6-sol,
+  and gpt-6.1-sol through the verified subscription-backed Codex CLI account,
+  never metered API billing or paid overages. Before each new premium provider
+  call, obtain a fresh authenticated account/rateLimits/read result showing more
   than 50% of the shared five-hour allowance remaining. Exactly 50%, less than
   50%, missing telemetry, or an assumed reset does not qualify. Also require
   enough weekly allowance, operating-window time, and debugging reserve for
   the bounded test. Percent quota is not an exact remaining token count.
-  Start Terra and Sol trials at low or medium thinking effort; high is the
-  maximum permitted effort for these premium trials. Never use xhigh, max,
-  ultra, or automatic effort routing for them. Verify the effective model and
+  Use HIGH for requested gpt-6.1-terra Xen tests; start other Terra and Sol
+  trials at low or medium effort. High is the maximum permitted effort for
+  these premium trials. Never use xhigh, max, ultra, or automatic effort routing
+  for them. Verify the effective model and
   effort, including restrictions imposed by managed configuration. Broader Sol
   use requires measured token-efficiency improvement on comparable reviews:
   actual uncached input, output, call count, elapsed time, and review quality,
   not cache-hit percentage alone. Prefer bounded comparisons over making Sol
-  the default. If the gate becomes false, finish the active call, then return
-  to Luna at the next safe boundary without cancelling or replaying completed
-  work. Do not start another premium call or automatically retry one while the
-  gate is false. This exception authorizes neither Sashiko self-review nor
+  the default. If the gate becomes false, finish the active call, then pause or
+  select another verified and authorized provider at the next safe boundary
+  without cancelling or replaying completed work. Do not start another Codex
+  premium call or automatically retry one while the gate is false. This exception
+  authorizes neither Sashiko self-review nor
   public posting, additional benchmarks, or automatic model/effort adaptation.
 - Distinguish subscription-backed usage from metered API-call/token billing;
   neither the CLI name nor the chat provider proves the billing arrangement.
@@ -143,11 +148,9 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   verify the effective invocation afterward. If Sol is already reviewing,
   let that review finish; do not stop or restart it to enforce this policy.
   This protection applies only to the active review. When the premium gate is
-  unmet or the bounded trial ends, switch subsequent calls to Luna at the first
-  safe boundary without cancelling completed or in-flight work. If no call is
-  active, make that transition now rather than retaining an unauthorized
-  premium default. A qualifying bounded premium trial need not be reverted
-  merely because it uses Sol.
+  unmet or the bounded trial ends, use a verified and authorized provider for
+  gpt-6.1-terra or pause at the first safe boundary without cancelling completed
+  or in-flight work. Do not retain an unauthorized premium default.
   Never change an in-flight request's effort. Disable response caching if its
   identity cannot distinguish the actual model and effort. Never run Sashiko
   self-review through paid Copilot CLI or exceed the agreed operating window.
@@ -176,13 +179,10 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   continues after the morning reset. Never redeem account reset credits, buy
   credits, or enable paid overages without explicit permission. Do not drain
   quota merely because the user permits using it.
-- Avoid MAX thinking for development Xen reviews unless its configured timeout
-  is at least 60 minutes (3600 seconds). Verify both the whole-review timeout
-  and the provider's per-call timeout allow that duration before starting MAX;
-  raising only review.timeout_seconds while a 600-second provider limit remains
-  does not satisfy this gate. If either limit is shorter or unknown, use a
-  lower Luna thinking budget. Never change an active request's timeout or
-  effort. MAX remains forbidden for this agent's Sashiko self-review.
+- For gpt-6.1-terra Xen reviews, use only LOW, MEDIUM, or HIGH effort; do not
+  select xhigh, MAX, ultra, or automatic effort without fresh authorization.
+  Verify both whole-review and per-call timeouts before starting. Never change
+  an active request's timeout or effort. MAX remains forbidden for self-review.
 
 # Verification and Delivery
 
