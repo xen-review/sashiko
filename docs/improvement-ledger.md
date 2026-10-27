@@ -576,7 +576,11 @@ Design decisions and implementation gates:
 
 ### P2: Plan Codex Account Quota and Pause/Resume Hysteresis
 
-Status: future task requested on 2026-10-26; not implemented or enabled.
+Status: requested on 2026-10-26; the staged
+[Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
+a disabled pure five-hour admission policy as the first increment. The existing
+transient QuotaManager remains separate. No account adapter, persisted controller,
+automatic pause/resume or watcher is implemented or enabled by the design.
 
 Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
 plan review allocations over the remaining window, retaining a debugging reserve.

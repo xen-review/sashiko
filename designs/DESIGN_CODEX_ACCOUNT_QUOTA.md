@@ -1,0 +1,112 @@
+# Codex Subscription Quota Admission
+
+Status: selected for incremental implementation under the operator's 2026-10-27
+no-ask directive. The first increment is a disabled, pure five-hour admission
+policy with deterministic tests. It is not an enabled controller, account reader,
+scheduler, model-call authorization, or overnight watcher.
+
+## Evidence and Ownership
+
+The authenticated Codex app-server metadata reader already reports the shared
+five-hour and weekly windows without a model turn. At 00:57, 01:38, and 01:53
+CET on 2026-10-27, shared five-hour remaining allowance was 67%, 51%, and 43%.
+The last reading reported 54% weekly and a five-hour reset at 05:03:09 CET.
+Other consumers contribute to these percentages. They are not exact token
+counts, an isolated Sashiko burn rate, or a reason to drain the allowance.
+
+The existing ai::quota::QuotaManager handles transient request backoff, capped
+at five minutes. BackoffProvider owns rate-limit retries. Neither is a durable,
+account-specific subscription admission policy. Do not lengthen transient
+backoff into a reset scheduler or turn subscription exhaustion into a retry
+storm. Keep per-review token/tool/call limits independent of account resets.
+
+## Selected Stages
+
+1. Add a pure policy beside the existing quota abstraction, disabled by default.
+   Supply time and samples explicitly; never sleep or read the network inside
+   it. Preserve the existing QuotaManager unchanged. Test decisions before any
+   scheduler integration or settings promise.
+2. Add an authenticated metadata-only account adapter with bounded RPC, process,
+   time and output limits. It must establish subscription-backed authentication,
+   account identity, five-hour and weekly readings, freshness and reset times.
+   Reject API-key/metered/unknown billing for this subscription-only policy.
+   Do not expose raw credentials or start a model turn to read quota.
+3. Add validated Codex-specific settings and persisted per-account admission
+   state before enabling scheduler integration. Keep disabled behavior exactly
+   as it is today. Gate new automatic reviews only at admission boundaries;
+   never stop an in-flight request or automatically replay completed work.
+4. Integrate one bounded wakeup path and paused-state API/UI. Record the account
+   key, reason, reset barrier, next refresh and last credible sample. Resume only
+   after fresh authenticated evidence. Runtime activation is a separate explicit
+   deployment decision, not a consequence of adding the pure policy.
+5. Extend the same state with typed subscription-exhaustion deferral. Preserve
+   stages/checkpoints, cancellation and diagnostics; do not mark failed analysis
+   successful or silently restart terminal harness sessions. Test durable resume
+   and usage attribution before any separately authorized live exhaustion trial.
+
+## Pure Decision Contract
+
+Account-scoped state is either Ready or Paused, with a typed reason, earliest
+resume time and next check time. A sample names the same opaque account key and
+contains its observation time, measured five-hour percentage and reported reset.
+Account identifiers are not tokens. A sample from another account cannot resume
+this one. Policy decisions do not authorize a premium model or paid overage.
+
+Defaults are pause below 20%, resume above 30%, sample maximum age 300 seconds,
+and unavailable-telemetry retry 60 seconds. Require finite percentages in 0..100,
+ordered thresholds in that range, and positive bounded refresh/age durations.
+Reject invalid enabled configuration rather than clamp it silently.
+
+When Ready, a fresh valid sample at exactly 20% does not pause; below 20% does.
+When Paused, exactly 30% does not resume; above 30% may resume only after the
+stored reset barrier and a sample observed at or after that barrier. Reaching a
+wall-clock reset is never proof that quota reset or that another consumer left
+enough. A late wakeup still needs a fresh sample above the upper threshold.
+
+Low quota records the reported reset as an earliest resume barrier. New credible
+low samples may move the barrier later, never earlier within the same pause.
+A shifted/late reset therefore cannot accidentally unlock the account. Unknown,
+stale, future-dated, malformed, wrong-account or already-expired-window samples
+pause admission and schedule a bounded retry without busy polling. Preserve an
+existing later barrier. Do not reuse a pre-reset high sample after reset.
+
+Once the barrier passes, a fresh reading at or below 30% keeps the pause and
+adopts its next credible reset. A fresh reading above 30% opens admission.
+While waiting, the next check is the future barrier; unavailable telemetry after
+the barrier uses a bounded retry. All timestamp arithmetic must be checked or
+saturating. An injected clock makes thresholds and late wakeups deterministic.
+
+When disabled, report Bypassed and leave the saved state intact. No quota read,
+timer, scheduling, active-call, model/effort, retry, delivery or posting change is
+implied. Re-enabling must not discard a retained pause barrier.
+
+## Runtime Boundaries Still Required
+
+- The metadata adapter must apply separate weekly allowance/debugging reserve
+  gates; the first pure five-hour policy is not a complete budget allocator.
+- Validate configuration without recompilation, persist state across restarts,
+  and bind it to provider/account before admitting real work.
+- Use one scheduled wakeup with bounded metadata refreshes, not polling sleeps
+  or service restarts. Refresh after reset and before resuming.
+- Cancelled work stays cancelled. A reset cannot recreate a cancelled task or
+  weaken per-review limits. Expose an honest paused reason and next check time.
+- Preserve muted delivery, access controls, successful results and original
+  failure artifacts. Do not refill an exhausted queue just to consume budget.
+- No premium trial at 50% or below; no self-review, live exhaustion trial,
+  credits, metered billing, paid overages or overnight job follows from this
+  design. Separate spending and operating-window gates remain mandatory.
+
+## Design Checks and Verification
+
+The design separates observation, pure admission, scheduling and continuation,
+so missing data cannot require a model call and a pause cannot cancel active
+analysis. A persisted earliest-resume barrier prevents restarts, stale samples
+or clock/reset assumptions from bypassing hysteresis. Keeping the first module
+unwired makes its disabled behavior falsifiable without installing a watcher.
+
+Use the existing quota test home. Cover 19.9/20/20.1 and 29.9/30/30.1 percent,
+fresh/stale/future observations, exact reset and late wakeups, changed resets,
+another account, another consumer, missing/invalid readings, invalid settings,
+disabled state retention and timestamp overflow. Subsequent runtime work must
+add fake-provider/RPC tests, restart recovery, cancellation, no duplicate calls
+or usage, API/UI pause visibility and all existing deterministic gates.
