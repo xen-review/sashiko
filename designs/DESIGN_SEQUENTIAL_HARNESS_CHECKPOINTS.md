@@ -6,9 +6,14 @@ persistence, daemon/local dispatch, and partial-result API/UI are implemented.
 Sequential execution is now an explicit supported opt-in with fake-CLI checks
 for complete and partial JSON/agent/human output, zero-call no-AI preparation,
 and exact prior-prompt prefix retention. Deployment and representative measured
-comparisons are still pending. This extends the approved
+comparisons were initially pending. On 2026-10-27 the operator explicitly
+selected this strategy for normal daemon reviews; it is now configured and
+deployed, with exact three-patch zero-AI preparation verified. A successful
+representative measured cost/quality comparison remains pending. This extends the approved
 whole-series harness route, not the existing multiphase workflow. No runtime
-default change, automatic retry, public posting, or effort adaptation is proposed.
+compatibility-default change, automatic retry, public posting, or effort
+adaptation is proposed. The daemon's explicit mode selection does not change
+the workflow default used by otherwise unconfigured installations.
 
 ## Motivation and Evidence
 

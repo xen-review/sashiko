@@ -5,6 +5,62 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Sequential Harness Activated by Request
+
+On 2026-10-27 the operator requested agent_harness / sequential_patches for the
+running daemon and for ordinary manual reviews unless testing workflow mode.
+This is the stable-prefix shared conversation: instructions, tools and full
+series context stay fixed; investigation history and the next patch request
+are appended. It is not a guarantee of one backend generation or lower cost.
+Use the private runtime configuration explicitly for manual Xen reviews rather
+than changing the repository's workflow compatibility default. Keep tests that
+exercise workflow mode explicit. No self-review was authorized or started;
+the preference for a future sequential self-review does not waive its current
+spending, model, project-instruction and final-gate restrictions.
+
+At the 18:27 CET idle boundary, running configuration selected agent_harness
+with strategy sequential_patches and retained codex-cli / gpt-6-luna / LOW,
+concurrency one, normal authentication and muted delivery. Structural TOML
+comparison proves that only review.mode and review.agent_harness changed.
+Nine explicit agent/skill/style/example/policy files total 47,555 bytes and are
+snapshotted by the existing loader. A persistent private daemon policy replaces
+the temporary comparison scope: functional-only source review at exact commits,
+no cover review, no source edits, native tools, delegation, builds or posting,
+and separate reviewer notes and complete body-only question-led reply drafts.
+
+Cumulative series limits are 12 provider calls, 30 source-tool calls, 400,000
+reported input tokens, 20,000 output tokens and 1,800 seconds. Checkpoints do
+not reset the counters or deadline. Input includes cached tokens; one-call
+overshoot and unavailable in-flight counters retain their existing semantics.
+Application response caching is unchanged. Prefix stability supports backend
+cache reuse but is not measured cost savings or an equivalent quality result.
+
+The signed sibling-progress fix 5ea6c557 was built and deployed in the same
+boundary; its prior full gate passes 1,165 library tests (two ignored), 49 main,
+seven CLI, 28 integration, formatting and all Clippy profiles. Exact saved
+three-patch preparation with the new config and --no-ai succeeds: three applied
+patches, zero input/output tokens and no review. Private artifacts remain at
+/tmp/sashiko-sequential-daemon-20261027-172705. No model call, synthetic live
+mail, queue refill, review retry or completed-work replay was started.
+
+Private before-sequential-harness-20261027-172705.db passed quick_check;
+the matching rollback binary and the pre-change configuration snapshot
+Settings-before-sequential-harness-20261027-172315.toml remain outside Git.
+Running/release SHA-256:
+d8bfa5a47a12545c5f521edd3bdc3ea39e7b0efa5c8760a45fbbb15ffb63144f.
+PID 1216068 reads the requested settings path with no review-mode override.
+Schema 18, all review counts and the four real retained reports for series 469
+are preserved; 111 Reviewed, no Pending or In Review. Both detail APIs and
+service/timer health pass. The first new sequential daemon review and a
+successful representative cost/quality comparison are still unobserved.
+
+Fresh authenticated metadata at 18:21:44 CET reported 17% five-hour and 39%
+weekly remaining, resetting 19:27:29 CET. No premium trial, self-review, quota
+redemption, overage or automatic effort controller is enabled. Startup retains
+the known missing staging-fetch evidence and intermittent NNTP welcome timeout;
+no new harness configuration failure is present. Preserve the operator's new
+edits in the open single-prompt design; they are not this task's changes.
+
 ### Failed-Stage Rollout and Budget Boundary
 
 At 17:50 CET on 2026-10-27, signed/pushed 5b805bd2 is deployed on schema 18.
