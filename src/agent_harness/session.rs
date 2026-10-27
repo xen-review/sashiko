@@ -47,18 +47,35 @@ pub struct HarnessProgress {
     pub tool_calls_attempted: usize,
     pub provider_in_flight: bool,
     pub reported_usage: Option<AiUsage>,
+    pub limits: HarnessProgressLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessProgressLimits {
+    pub provider_calls: usize,
+    pub source_tool_calls: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub review_timeout_seconds: u64,
 }
 
 pub(crate) type HarnessProgressCallback = Box<dyn Fn(HarnessProgress) + Send + Sync>;
 
 impl HarnessTrace {
-    fn progress(&self, provider_in_flight: bool) -> HarnessProgress {
+    fn progress(&self, provider_in_flight: bool, limits: &AgentHarnessSettings) -> HarnessProgress {
         HarnessProgress {
             provider_calls_attempted: self.provider_calls,
             provider_calls_with_usage: self.call_usage.len(),
             tool_calls_attempted: self.tool_calls,
             provider_in_flight,
             reported_usage: (!self.call_usage.is_empty()).then(|| self.usage.clone()),
+            limits: HarnessProgressLimits {
+                provider_calls: limits.max_generations,
+                source_tool_calls: limits.max_tool_calls,
+                input_tokens: limits.max_input_tokens,
+                output_tokens: limits.max_output_tokens,
+                review_timeout_seconds: limits.timeout_seconds,
+            },
         }
     }
 }
@@ -158,7 +175,7 @@ impl HarnessSession {
         if tokio::time::Instant::now() >= self.deadline {
             self.stopped = true;
             if let Some(callback) = &self.progress {
-                callback(self.trace.progress(false));
+                callback(self.trace.progress(false, &self.limits));
             }
             return HarnessStatus::TimedOut;
         }
@@ -176,7 +193,7 @@ impl HarnessSession {
         };
         self.stopped = !matches!(&status, HarnessStatus::Completed { .. });
         if let Some(callback) = &self.progress {
-            callback(self.trace.progress(false));
+            callback(self.trace.progress(false, &self.limits));
         }
         status
     }
@@ -268,7 +285,7 @@ async fn run_session(
     let declarations = &session.declarations;
     let report_progress = |trace: &HarnessTrace, provider_in_flight| {
         if let Some(callback) = &session.progress {
-            callback(trace.progress(provider_in_flight));
+            callback(trace.progress(provider_in_flight, limits));
         }
     };
     trace
@@ -793,15 +810,29 @@ mod tests {
 
     #[test]
     fn progress_reports_only_recorded_usage() {
+        let limits = AgentHarnessSettings {
+            strategy: Default::default(),
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 30,
+            max_tool_calls: 400,
+            max_input_tokens: 400_000,
+            max_output_tokens: 20_000,
+            timeout_seconds: 3600,
+        };
         let mut trace = HarnessTrace {
             provider_calls: 1,
             ..Default::default()
         };
-        let in_flight = trace.progress(true);
+        let in_flight = trace.progress(true, &limits);
         assert_eq!(in_flight.provider_calls_attempted, 1);
         assert_eq!(in_flight.provider_calls_with_usage, 0);
         assert!(in_flight.provider_in_flight);
         assert!(in_flight.reported_usage.is_none());
+        assert_eq!(in_flight.limits.provider_calls, 30);
+        assert_eq!(in_flight.limits.source_tool_calls, 400);
+        assert_eq!(in_flight.limits.input_tokens, 400_000);
+        assert_eq!(in_flight.limits.output_tokens, 20_000);
+        assert_eq!(in_flight.limits.review_timeout_seconds, 3600);
 
         let usage = AiUsage {
             prompt_tokens: 10,
@@ -816,7 +847,7 @@ mod tests {
             usage,
         });
         trace.tool_calls = 2;
-        let reported = trace.progress(false);
+        let reported = trace.progress(false, &limits);
         assert_eq!(reported.provider_calls_with_usage, 1);
         assert_eq!(reported.tool_calls_attempted, 2);
         assert!(!reported.provider_in_flight);
@@ -835,7 +866,7 @@ mod tests {
             response_history_end: 1,
             usage: zero,
         });
-        let serialized = serde_json::to_value(zero_trace.progress(false)).unwrap();
+        let serialized = serde_json::to_value(zero_trace.progress(false, &limits)).unwrap();
         assert_eq!(serialized["reported_usage"]["cached_tokens"], 0);
     }
 

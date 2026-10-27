@@ -789,8 +789,11 @@ matching patchset. Fake-daemon and projection checks cover call progression,
 stale-run rejection, cleanup, terminal states and embargo. The patchset header
 now shows that series snapshot once and refreshes it during active review;
 synthetic desktop/mobile checks cover missing versus zero cache values, polling,
-terminal cleanup and layout. The snapshot does not expose backend-native
-generations or account for unreported in-flight tokens.
+terminal cleanup and layout. Resolved call/tool limits, input/output thresholds
+and the review timeout are also displayed exactly. Token thresholds are checked
+between calls and can be overshot by one response, not hard generation caps.
+The snapshot does not expose elapsed time, the per-call timeout, backend-native
+generations or unreported in-flight tokens.
 
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 

@@ -204,9 +204,15 @@ projection tests cover other patchsets, terminal state and embargo redaction.
 The patchset header now displays the series snapshot once, distinguishing
 attempted calls, calls with reported usage, source-tool attempts and an
 in-flight call. Reported input is labeled as a total that includes any cached
-prefix; missing cache counts remain Unknown. Initial rendering and polling use
-the same renderer, and a terminal refresh removes the active summary. Synthetic
-desktop and mobile checks cover layout, updates and terminal cleanup; no live
-review was queued. Retained terminal records, backend-native generations,
-elapsed limits and account admission remain separate work; no model or daemon
-configuration is changed by adding this display.
+prefix; missing cache counts remain Unknown. Each snapshot carries the resolved
+series provider-call and source-tool limits, input/output token thresholds and
+review timeout. Counts and limits are displayed exactly. Token limits are
+between-call thresholds, not hard per-response caps: one response can overshoot.
+The review timeout is distinct from the provider's per-call timeout.
+
+Initial rendering and polling use the same renderer, and a terminal refresh
+removes the active summary. Synthetic desktop and mobile checks cover layout,
+updates and terminal cleanup; no live review was queued. Retained terminal
+records, backend-native generations, elapsed time, per-call timeout display and
+account admission remain separate work; no model or daemon configuration is
+changed by adding this display.

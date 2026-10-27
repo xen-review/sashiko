@@ -1453,6 +1453,13 @@ mod active_review_progress_tests {
             tool_calls_attempted: 3,
             provider_in_flight: true,
             reported_usage: None,
+            limits: crate::agent_harness::session::HarnessProgressLimits {
+                provider_calls: 30,
+                source_tool_calls: 400,
+                input_tokens: 400_000,
+                output_tokens: 20_000,
+                review_timeout_seconds: 3600,
+            },
         });
 
         let mut active = serde_json::json!({ "id": 7, "status": "In Review" });
@@ -1470,6 +1477,14 @@ mod active_review_progress_tests {
         assert_eq!(
             active["active_harness_usage"]["provider_calls_attempted"],
             2
+        );
+        assert_eq!(
+            active["active_harness_usage"]["limits"]["provider_calls"],
+            30
+        );
+        assert_eq!(
+            active["active_harness_usage"]["limits"]["review_timeout_seconds"],
+            3600
         );
         assert!(active["active_harness_usage"]["reported_usage"].is_null());
 

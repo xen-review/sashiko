@@ -305,6 +305,13 @@ mod review_progress_tests {
             tool_calls_attempted: 0,
             provider_in_flight: true,
             reported_usage: None,
+            limits: crate::agent_harness::session::HarnessProgressLimits {
+                provider_calls: 30,
+                source_tool_calls: 400,
+                input_tokens: 400_000,
+                output_tokens: 20_000,
+                review_timeout_seconds: 3600,
+            },
         };
         registry.record_harness_usage(1, first.run_id, usage.clone());
         assert_eq!(
@@ -4412,6 +4419,8 @@ mod tests {
             assert_eq!(progress.provider_calls_attempted, 1);
             assert_eq!(progress.provider_calls_with_usage, 0);
             assert!(progress.reported_usage.is_none());
+            assert_eq!(progress.limits.provider_calls, 2);
+            assert_eq!(progress.limits.source_tool_calls, 5);
             let input: Value =
                 serde_json::from_str(request.messages[0].content.as_deref().unwrap())?;
             assert_eq!(input["patches"].as_array().unwrap().len(), 2);
@@ -4464,6 +4473,8 @@ mod tests {
             assert_eq!(progress.provider_calls_attempted, call + 1);
             assert_eq!(progress.provider_calls_with_usage, call);
             assert_eq!(progress.tool_calls_attempted, call.div_ceil(2));
+            assert_eq!(progress.limits.provider_calls, 4);
+            assert_eq!(progress.limits.source_tool_calls, 5);
             if call == 0 {
                 assert!(progress.reported_usage.is_none());
             } else {
