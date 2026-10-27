@@ -5,6 +5,32 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Codex Terra Targeted Replay
+
+On 2026-10-27 after the reported reset, the operator requested Codex and a
+targeted AI test. At the idle boundary the private configuration retained
+agent_harness / sequential_patches and changed only the model and effort to
+gpt-6.1-terra / HIGH. The saved settings retain the four-file instruction
+manifest, 30 provider calls, 400 source-tool calls, 400,000 input tokens,
+20,000 output tokens and a 3,600-second review deadline. No matching timeout
+profile changes the default 600-second per-call deadline. Harness response
+caching remains disabled; delivery and access settings are unchanged.
+
+Authenticated metadata at 19:33 CET reported 98% five-hour and 36% weekly
+remaining, subscription authentication and no paid credits. One bounded replay
+of an existing Xen review-stage input then used one completion-only provider
+call, no native tools and no retries. The actual backend metadata confirmed
+gpt-6.1-terra / HIGH; the call completed in 6.761 seconds with 10,639 input
+tokens, no cached input and 322 output tokens. It returned valid stage JSON.
+This is not a sequential daemon review or evidence of comparative review quality.
+
+The daemon and mirror timer remain paused. Although the quota metadata reader
+and pure policy exist, neither is connected to per-call admission; starting
+automatic Terra reviews would bypass the required fresh quota check. The saved
+model setting is therefore not loaded by a running daemon. Preserve existing
+review artifacts and the private pre-change settings backup. Self-review remains
+deferred, and no public posting or automatic queue refill was authorized.
+
 ### Sequential Harness Activated by Request
 
 On 2026-10-27 the operator requested agent_harness / sequential_patches for the

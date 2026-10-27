@@ -154,10 +154,10 @@ Do not claim a deferred, timed-out, or interrupted self-review passed.
   Never change an in-flight request's effort. Disable response caching if its
   identity cannot distinguish the actual model and effort. Never run Sashiko
   self-review through paid Copilot CLI or exceed the agreed operating window.
-- This coding chat currently uses Copilot Business, a separate plan from the
-  Codex CLI subscription account used by the daemon. Never infer Codex quota
-  or billing from the coding assistant's plan, provider, or model. The host
-  Codex CLI reports its own authenticated account's usage and reset times.
+- The coding chat may use a different plan or account from the Codex CLI
+  subscription used by the daemon. Never infer Codex quota or billing from the
+  coding assistant's plan, provider, or model. The host Codex CLI reports its
+  own authenticated account's usage and reset times.
 - Read shared five-hour and weekly usage and reset times using the authenticated
   Codex app-server account/rateLimits/read endpoint when available. Querying
   quota must not start a model turn. Do not access or print raw auth tokens.
