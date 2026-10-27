@@ -17,6 +17,14 @@ tests. This corrects the earlier claim that no opaque account ID was exposed.
 It does not yet prove the later model call uses that workspace or enable per-call
 admission, so the daemon remains paused pending those runtime safeguards.
 
+Two further metadata-only thread/start probes used Terra / HIGH with native tools
+disabled and no turn/start. The ephemeral thread had no account ID in its reply;
+the persistent thread reported a path but had no session file or creator ID
+before its first turn. Both reported zero turns and no turn events. The existing
+saved Terra replay's creator ID matched the observed workspace, but that evidence
+was recorded after a model turn. Codex's documented forced-workspace mismatch
+behavior logs out the shared user, so it was not tested against that account.
+
 ### Codex Terra Targeted Replay
 
 On 2026-10-27 after the reported reset, the operator requested Codex and a

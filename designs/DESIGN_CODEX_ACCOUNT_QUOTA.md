@@ -127,6 +127,15 @@ also says a mismatch logs the user out and exits. That makes a negative test or
 blind production use against shared credentials unsafe. The session ID comparison
 occurs after session creation and cannot alone prevent a wrong-account call.
 
+At 20:28-20:29 CET on 2026-10-27, metadata-only app-server probes started one
+ephemeral and one persistent thread with native tools disabled. Both selected
+gpt-6.1-terra / HIGH, reported zero turns and emitted no turn events; neither
+received a turn/start request. The ephemeral response exposed no account ID.
+The persistent response named a session path, but no session file or creator ID
+existed before the first turn. The tested pre-turn responses therefore do not
+provide a model-execution account binding. The persistent artifact is retained
+if Codex later materializes it; no forced-workspace mismatch was attempted.
+
 ## Evidence and Ownership
 
 The authenticated Codex app-server metadata reader already reports the shared
