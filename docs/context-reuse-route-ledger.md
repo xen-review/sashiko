@@ -60,6 +60,18 @@ login/plan but no opaque workspace ID. A derived hash is not a substitute for
 that missing binding. No account controller, paid self-review, benchmark, public
 post, backfill, or watcher is enabled. Deployment remains 47cdd5c1/schema 17.
 
+Decoder source is committed as f6411372 and all source commits are signed and
+pushed to origin/add-xen-support. Final read-only checkpoint at 02:20:38 CET:
+30% five-hour and 52% weekly remaining, reset 05:03:09 CET; service active,
+PID 1145716, 103 Reviewed series, no Pending or In Review. The positive human
+filter and staging snapshot store remain empty, without a historical backfill
+or forced fetch. There is no open matching PR in xen-review/sashiko or parent
+sashiko-dev/sashiko, so no Stage 2 bot findings are pending on this branch.
+Stage 1 self-review remains prohibited/deferred, not passed. The metadata-only
+decoder and policy do not install a watcher or authorize runtime admission;
+stable account/workspace binding is a concrete integration gate. Preserve the
+healthy daemon while those external/protocol and remaining budget gates hold.
+
 ### Earlier Exact-Ancestry Checkpoint
 
 Latest source/runtime at 00:38 CET: exact-ancestry increment 113b83a5 is signed,

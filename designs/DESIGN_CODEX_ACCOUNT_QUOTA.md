@@ -39,6 +39,12 @@ no model call. Its fake-response checks and full make check-pr gate pass:
 Process/RPC bounds, verified runtime binding, weekly reserve and durable state
 remain unimplemented integration gates.
 
+The decoder is committed as f6411372, following policy 88243c76. Final fresh
+metadata at 02:20 CET reports 30% five-hour and 52% weekly remaining, with the
+05:03 CET reset unchanged. Neither foundation is wired into production admission.
+Current endpoint identity limitations must be resolved without reading raw auth
+tokens or assuming a login/plan hash uniquely identifies an allowance workspace.
+
 ## Evidence and Ownership
 
 The authenticated Codex app-server metadata reader already reports the shared
