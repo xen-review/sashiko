@@ -598,6 +598,18 @@ enable durable cross-process admission. Stable binding and authentication-change
 handling remain gates alongside bounded RPC, weekly reserves and persistence.
 The deployed daemon remains unchanged; no controller or model call was started.
 
+The bounded metadata-only RPC increment now passes four fake-process tests.
+It reads account identity before and after the quota windows, uses an isolated
+working directory and a fixed 20-second deadline, and bounds stdout bytes,
+line size and notification count. Only metadata methods are emitted. Unexpected
+requests/IDs, malformed responses, RPC errors, changed accounts, timeout and
+early exit fail closed without exposing payloads. Child reaping and cancellation
+cleanup are tested. It remains unwired from admission; opaque workspace binding,
+weekly reserves, persistence, wakeup scheduling and paused-state UI are not
+claimed complete. The full gate passes 1,157 library tests (two ignored), 49 main,
+seven CLI and 28 integration tests, formatting and all Clippy profiles. No live
+model call was needed and the reader is not deployed or wired into scheduling.
+
 Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
 plan review allocations over the remaining window, retaining a debugging reserve.
 Start with Codex subscription-backed accounts only, not generic assumptions

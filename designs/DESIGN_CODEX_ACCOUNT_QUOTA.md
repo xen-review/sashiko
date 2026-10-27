@@ -2,8 +2,9 @@
 
 Status: selected for incremental implementation under the operator's 2026-10-27
 no-ask directive. The first increment is a disabled, pure five-hour admission
-policy with deterministic tests. It is not an enabled controller, account reader,
-scheduler, model-call authorization, or overnight watcher.
+policy with deterministic tests, followed by a bounded metadata-only reader.
+Neither is wired into a controller or scheduler, model-call authorization, or
+overnight watcher.
 
 ## First Implementation Checkpoint
 
@@ -44,6 +45,37 @@ metadata at 02:20 CET reports 30% five-hour and 52% weekly remaining, with the
 05:03 CET reset unchanged. Neither foundation is wired into production admission.
 Current endpoint identity limitations must be resolved without reading raw auth
 tokens or assuming a login/plan hash uniquely identifies an allowance workspace.
+
+## Bounded RPC Reader Checkpoint
+
+The next increment adds read_codex_subscription_quota with a required expected
+local account key and a fixed 20-second deadline. It launches app-server --stdio
+in a temporary isolated directory, sends only initialize/initialized,
+account/read, account/rateLimits/read, then account/read again. The before/after
+login and plan must remain bound to the expected key; a login/plan match still
+does not establish opaque workspace identity. No model-turn method is available
+through this reader and no runtime admission caller is added.
+
+The subprocess has a 1 MiB cumulative stdout limit, 64 messages and 64 KiB per
+JSON line. It rejects unexpected IDs, missing results, unsolicited server
+requests, RPC errors, malformed output and account switches with payload-free
+errors. Stderr is discarded, so credentials or server diagnostic payloads do
+not enter logs. Timeout/error/success paths kill and reap the child; cancellation
+uses kill-on-drop, verified with a Linux process fixture. Four fake-executable
+tests pass for the exact method allowlist, isolated directory, measured windows,
+notification flooding, oversized/malformed output, RPC errors, early exit,
+timeouts, identity changes, payload privacy and cancellation cleanup. No live
+model call or scheduler activation is needed. The full make check-pr gate passes
+1,157 library tests (two ignored), 49 main, seven CLI and 28 integration tests,
+formatting and all Clippy profiles. Disk pressure required package-scoped
+debug-artifact cleanup; dependencies, release artifacts, operational backups and
+review data were preserved. No production deployment is needed for this unwired
+observation API and the installed maintenance repair stays unchanged.
+
+Stable workspace binding, weekly reserve policy, validated runtime settings,
+persisted state, wakeup scheduling and paused-state API/UI remain later gates.
+This reader neither redeems credits nor enables metered billing or automatic
+effort adaptation. The installed daemon continues its existing admission policy.
 
 ## Evidence and Ownership
 

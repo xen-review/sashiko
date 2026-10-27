@@ -21,7 +21,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -209,6 +209,163 @@ pub struct CodexSubscriptionQuotaSnapshot {
     pub five_hour: super::quota::FiveHourQuotaSample,
     pub weekly_remaining: super::quota::RemainingQuotaPercent,
     pub weekly_resets_at: i64,
+}
+
+const QUOTA_METADATA_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum QuotaMetadataMethod {
+    Initialize,
+    Account,
+    RateLimits,
+}
+
+impl QuotaMetadataMethod {
+    fn request(self, id: u64) -> Value {
+        let (method, params) = match self {
+            Self::Initialize => (
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": {"name": "sashiko-quota-observer", "version": "1"},
+                    "capabilities": {"experimentalApi": true}
+                }),
+            ),
+            Self::Account => ("account/read", serde_json::json!({"refreshToken": false})),
+            Self::RateLimits => ("account/rateLimits/read", serde_json::json!({})),
+        };
+        serde_json::json!({"id": id, "method": method, "params": params})
+    }
+}
+
+struct QuotaMetadataRpc {
+    stdout: BufReader<tokio::io::Take<tokio::process::ChildStdout>>,
+    stdin: tokio::process::ChildStdin,
+    bytes_read: u64,
+    messages_read: usize,
+}
+
+impl QuotaMetadataRpc {
+    async fn request(&mut self, id: u64, method: QuotaMetadataMethod) -> Result<Value> {
+        let mut request = serde_json::to_vec(&method.request(id))?;
+        request.push(b'\n');
+        self.stdin.write_all(&request).await?;
+        self.stdin.flush().await?;
+        loop {
+            let mut line = Vec::new();
+            let size = self.stdout.read_until(b'\n', &mut line).await?;
+            ensure!(
+                size > 0,
+                "Codex quota metadata stream ended before its response"
+            );
+            self.bytes_read += u64::try_from(size)?;
+            self.messages_read += 1;
+            ensure!(
+                self.bytes_read <= QUOTA_METADATA_BYTES
+                    && self.messages_read <= 64
+                    && line.len() <= 65536,
+                "Codex quota metadata output limit exceeded"
+            );
+            let message: Value = serde_json::from_slice(&line)
+                .map_err(|_| anyhow::anyhow!("Codex quota metadata response is not valid JSON"))?;
+            if message.get("method").is_some() && message.get("id").is_none() {
+                continue;
+            }
+            ensure!(
+                message.get("method").is_none() && message["id"].as_u64() == Some(id),
+                "Unexpected Codex quota metadata response or server request"
+            );
+            ensure!(
+                message.get("error").is_none(),
+                "Codex quota metadata RPC failed"
+            );
+            return message
+                .get("result")
+                .cloned()
+                .context("Codex quota metadata result unavailable");
+        }
+    }
+}
+
+pub async fn read_codex_subscription_quota(
+    expected_account_key: &str,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    read_codex_subscription_quota_with_binary(
+        std::ffi::OsStr::new("codex"),
+        expected_account_key,
+        Duration::from_secs(20),
+    )
+    .await
+}
+
+async fn read_codex_subscription_quota_with_binary(
+    binary: &std::ffi::OsStr,
+    expected_account_key: &str,
+    deadline: Duration,
+) -> Result<CodexSubscriptionQuotaSnapshot> {
+    ensure!(
+        expected_account_key.len() == 64
+            && expected_account_key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "Invalid expected Codex quota account key"
+    );
+    ensure!(
+        !deadline.is_zero() && deadline <= Duration::from_secs(20),
+        "Invalid Codex metadata deadline"
+    );
+    let working_directory = tempfile::tempdir()?;
+    let mut child = Command::new(binary)
+        .args(["app-server", "--stdio"])
+        .current_dir(working_directory.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to start Codex quota metadata process")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Codex metadata stdout unavailable")?;
+    let stdin = child
+        .stdin
+        .take()
+        .context("Codex metadata stdin unavailable")?;
+    let mut rpc = QuotaMetadataRpc {
+        stdout: BufReader::new(stdout.take(QUOTA_METADATA_BYTES + 1)),
+        stdin,
+        bytes_read: 0,
+        messages_read: 0,
+    };
+    let result = timeout(deadline, async {
+        rpc.request(1, QuotaMetadataMethod::Initialize).await?;
+        rpc.stdin
+            .write_all(b"{\"method\":\"initialized\",\"params\":{}}\n")
+            .await?;
+        let before = rpc.request(2, QuotaMetadataMethod::Account).await?;
+        ensure!(
+            codex_quota_account_key(&before)? == expected_account_key,
+            "Codex quota account binding changed before observation"
+        );
+        let observed_at = chrono::Utc::now().timestamp();
+        let limits = rpc.request(3, QuotaMetadataMethod::RateLimits).await?;
+        let after = rpc.request(4, QuotaMetadataMethod::Account).await?;
+        ensure!(
+            codex_quota_account_key(&after)? == expected_account_key
+                && before["account"]["email"] == after["account"]["email"],
+            "Codex quota account binding changed during observation"
+        );
+        decode_codex_subscription_quota(&after, &limits, expected_account_key, observed_at)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Codex quota metadata deadline exceeded"));
+    drop(rpc);
+    let _ = child.kill().await;
+    child
+        .wait()
+        .await
+        .context("Failed to reap Codex quota metadata process")?;
+    result?
 }
 
 pub fn codex_quota_account_key(account_result: &Value) -> Result<String> {
@@ -429,6 +586,218 @@ fn is_effort_substitution(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quota_reader_only_uses_bounded_metadata_methods() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let executable = fixture.path().join("codex");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+fixture_dir=${0%/*}
+printf '%s\n' "$PWD" "$@" > "$fixture_dir/metadata-args"
+while IFS= read -r request; do
+    printf '%s\n' "$request" >> "$fixture_dir/metadata-requests"
+    case "$request" in
+        *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}}}' ;;
+        *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,"credits":{"hasCredits":false,"unlimited":false},"primary":{"usedPercent":65,"windowDurationMins":300,"resetsAt":4102444800},"secondary":{"usedPercent":47,"windowDurationMins":10080,"resetsAt":4103049600}}}}' ;;
+        *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}}}' ;;
+    esac
+done
+"#,
+        );
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let key = codex_quota_account_key(&account)?;
+        let result = read_codex_subscription_quota_with_binary(
+            executable.as_os_str(),
+            &key,
+            Duration::from_secs(2),
+        )
+        .await?;
+        assert_eq!(
+            result.five_hour.remaining,
+            super::super::quota::RemainingQuotaPercent::new(35.0)?
+        );
+        assert_eq!(
+            result.weekly_remaining,
+            super::super::quota::RemainingQuotaPercent::new(53.0)?
+        );
+        let arguments = std::fs::read_to_string(fixture.path().join("metadata-args"))?;
+        let mut arguments = arguments.lines();
+        let directory = std::path::PathBuf::from(
+            arguments
+                .next()
+                .context("Metadata working directory missing")?,
+        );
+        assert_ne!(directory, std::env::current_dir()?);
+        assert!(!directory.exists());
+        assert_eq!(arguments.collect::<Vec<_>>(), ["app-server", "--stdio"]);
+        let requests = std::fs::read_to_string(fixture.path().join("metadata-requests"))?;
+        let requests: Vec<Value> = requests
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            [
+                "initialize",
+                "initialized",
+                "account/read",
+                "account/rateLimits/read",
+                "account/read"
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quota_reader_fails_closed_on_untrusted_or_unbounded_output() -> Result<()> {
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let key = codex_quota_account_key(&account)?;
+        let responses = [
+            "not JSON".to_string(),
+            r#"{"id":3,"error":{"message":"fixture-sensitive-payload"}}"#.to_string(),
+            r#"{"id":3}"#.to_string(),
+            r#"{"id":4,"result":{}}"#.to_string(),
+            r#"{"id":99,"method":"tool/call","params":{"private":"fixture-sensitive-payload"}}"#
+                .to_string(),
+            "x".repeat(65537),
+            "x".repeat(usize::try_from(QUOTA_METADATA_BYTES)? + 1),
+            "{\"method\":\"progress\"}\n".repeat(65),
+        ];
+        for response in responses {
+            let fixture = tempfile::tempdir()?;
+            let executable = fixture.path().join("codex");
+            let script = r#"#!/bin/sh
+fixture_dir=${0%/*}
+printf '%s\n' "$$" > "$fixture_dir/pid"
+while IFS= read -r request; do
+    case "$request" in
+        *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}}}' ;;
+        *'"id":3,'*) printf '%s\n' 'QUOTA_RESPONSE' ;;
+    esac
+done
+"#.replace("QUOTA_RESPONSE", &response);
+            crate::test_support::write_executable_script(&executable, &script);
+            let error = read_codex_subscription_quota_with_binary(
+                executable.as_os_str(),
+                &key,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect_err("invalid metadata must not yield quota");
+            assert!(!error.to_string().contains("fixture-sensitive-payload"));
+            #[cfg(target_os = "linux")]
+            {
+                let pid = std::fs::read_to_string(fixture.path().join("pid"))?;
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists(),
+                    "metadata child was not reaped"
+                );
+            }
+        }
+        for script in [
+            "#!/bin/sh\nexit 0\n",
+            "#!/bin/sh\nwhile IFS= read -r request; do :; done\n",
+        ] {
+            let fixture = tempfile::tempdir()?;
+            let executable = fixture.path().join("codex");
+            crate::test_support::write_executable_script(&executable, script);
+            assert!(
+                read_codex_subscription_quota_with_binary(
+                    executable.as_os_str(),
+                    &key,
+                    Duration::from_millis(250)
+                )
+                .await
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quota_reader_rejects_account_switch_between_metadata_calls() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let executable = fixture.path().join("codex");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+while IFS= read -r request; do
+    case "$request" in
+        *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}}}' ;;
+        *'"id":3,'*) printf '%s\n' '{"id":3,"result":{}}' ;;
+        *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt","email":"other@example.invalid","planType":"pro"}}}' ;;
+    esac
+done
+"#,
+        );
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let key = codex_quota_account_key(&account)?;
+        let error = read_codex_subscription_quota_with_binary(
+            executable.as_os_str(),
+            &key,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("changed account must not yield quota");
+        assert!(error.to_string().contains("changed during observation"));
+        assert!(!error.to_string().contains("other@example.invalid"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn quota_reader_cancellation_terminates_its_metadata_child() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let executable = fixture.path().join("codex");
+        let pid_file = fixture.path().join("pid");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+fixture_dir=${0%/*}
+printf '%s\n' "$$" > "$fixture_dir/pid"
+while IFS= read -r request; do :; done
+"#,
+        );
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
+        let key = codex_quota_account_key(&account)?;
+        let task = tokio::spawn(async move {
+            read_codex_subscription_quota_with_binary(
+                executable.as_os_str(),
+                &key,
+                Duration::from_secs(20),
+            )
+            .await
+        });
+        timeout(Duration::from_secs(2), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let pid = std::fs::read_to_string(pid_file)?;
+        let process = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+        assert!(process.exists());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        timeout(Duration::from_secs(2), async {
+            while process.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     #[test]
     fn subscription_quota_decoder_binds_known_windows_without_authorizing_spend() -> Result<()> {
         let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
