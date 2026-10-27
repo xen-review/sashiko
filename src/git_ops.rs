@@ -742,18 +742,20 @@ pub fn schedule_commit_graph_rebuild(repo_path: &Path) {
     });
 }
 
-/// Rolls the pack directory up into a geometric progression and
-/// writes a multi-pack index over the result.
+/// Rolls full repositories into a geometric progression and writes
+/// a multi-pack index. Partial clones use incremental packing because
+/// Git's geometric pack-input mode conflicts with promisor exclusion.
 ///
 /// Loose objects join the rollup.  A fetch carrying fewer objects
 /// than transfer.unpackLimit writes them loose rather than as a pack,
 /// so they are most of what accumulates here.
 ///
-/// The pass takes no reachability walk, so it removes no object.  A
+/// Geometric packing takes no reachability walk and removes no object. A
 /// commit-graph entry, a worktree, or a scratch clone borrowing from
 /// this store still finds what it named.  Disk goes unreclaimed for
 /// the same reason: an object no ref can reach is rolled up with the
-/// rest.
+/// rest. Partial-clone packing walks reachable non-promisor objects;
+/// unreferenced objects remain stored, possibly loose, without pruning.
 pub async fn repack_repository(repo_path: &Path) -> Result<()> {
     let lock = get_object_store_lock();
     let _guard = lock.lock().await;
@@ -761,8 +763,30 @@ pub async fn repack_repository(repo_path: &Path) -> Result<()> {
     info!("Repacking {:?}", repo_path);
     let started = std::time::Instant::now();
 
-    let output = crate::git_cmd::in_dir_async(repo_path)
-        .args(["repack", "--geometric=2", "-d", "--write-midx"])
+    let config = crate::git_cmd::in_dir_async(repo_path)
+        .args([
+            "config",
+            "--name-only",
+            "--get-regexp",
+            "^(extensions\\.partialclone|remote\\..*\\.(promisor|partialclonefilter))$",
+        ])
+        .output()
+        .await?;
+    if !config.status.success() && config.status.code() != Some(1) {
+        return Err(anyhow!(
+            "Failed to read promisor configuration for repacking"
+        ));
+    }
+    let mut command = crate::git_cmd::in_dir_async(repo_path);
+    command.arg("repack");
+    if config.status.code() == Some(1) {
+        command.arg("--geometric=2");
+    } else {
+        info!("Using incremental repack to preserve partial-clone promisor handling");
+    }
+    let output = command
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["-d", "--write-midx"])
         .output()
         .await?;
 
@@ -1641,6 +1665,140 @@ mod tests {
         run_test_git(repo.path(), &["add", "value.txt"]).await?;
         run_test_git(repo.path(), &["commit", "-q", "-s", "-m", "base"]).await?;
         Ok(repo)
+    }
+
+    #[tokio::test]
+    async fn repack_preserves_loose_and_promisor_objects() -> Result<()> {
+        for partial_clone in [false, true] {
+            let repo = commit_resolution_repo().await?;
+            let head = run_test_git(repo.path(), &["rev-parse", "HEAD"]).await?;
+            run_test_git(repo.path(), &["repack", "-ad"]).await?;
+            let pack = std::fs::read_dir(repo.path().join(".git/objects/pack"))?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "pack")
+                })
+                .ok_or_else(|| anyhow!("Fixture pack missing"))?;
+            let marker = pack.with_extension("promisor");
+            if partial_clone {
+                std::fs::write(&marker, "")?;
+                run_test_git(repo.path(), &["config", "remote.origin.promisor", "true"]).await?;
+                run_test_git(
+                    repo.path(),
+                    &["config", "remote.origin.partialclonefilter", "blob:none"],
+                )
+                .await?;
+            }
+            let loose = repo.path().join("unreferenced.txt");
+            std::fs::write(&loose, "retain this unreferenced object\n")?;
+            let object =
+                run_test_git(repo.path(), &["hash-object", "-w", "unreferenced.txt"]).await?;
+            std::fs::write(repo.path().join("value.txt"), "new reachable content\n")?;
+            run_test_git(repo.path(), &["add", "value.txt"]).await?;
+            run_test_git(
+                repo.path(),
+                &["commit", "-q", "-s", "-m", "reachable loose objects"],
+            )
+            .await?;
+            let reachable = run_test_git(repo.path(), &["rev-parse", "HEAD"]).await?;
+
+            repack_repository(repo.path()).await?;
+
+            run_test_git(repo.path(), &["cat-file", "-e", &head]).await?;
+            run_test_git(repo.path(), &["cat-file", "-e", &object]).await?;
+            run_test_git(repo.path(), &["cat-file", "-e", &reachable]).await?;
+            assert!(
+                !repo
+                    .path()
+                    .join(".git/objects")
+                    .join(&reachable[..2])
+                    .join(&reachable[2..])
+                    .exists()
+            );
+            if partial_clone {
+                assert!(pack.exists());
+                assert!(marker.exists());
+                assert_eq!(
+                    run_test_git(repo.path(), &["config", "--bool", "remote.origin.promisor"])
+                        .await?,
+                    "true"
+                );
+                assert_eq!(
+                    run_test_git(repo.path(), &["config", "remote.origin.partialclonefilter"])
+                        .await?,
+                    "blob:none"
+                );
+            }
+            assert!(
+                repo.path()
+                    .join(".git/objects/pack/multi-pack-index")
+                    .exists()
+            );
+            let loose_object = repo
+                .path()
+                .join(".git/objects")
+                .join(&object[..2])
+                .join(&object[2..]);
+            if !partial_clone {
+                assert!(
+                    !loose_object.exists(),
+                    "unreferenced object was not rolled into a pack"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repack_partial_clone_does_not_fetch_missing_blobs() -> Result<()> {
+        let source = commit_resolution_repo().await?;
+        run_test_git(source.path(), &["config", "uploadpack.allowFilter", "true"]).await?;
+        let blob = run_test_git(source.path(), &["rev-parse", "HEAD:value.txt"]).await?;
+        let destination = tempfile::tempdir()?;
+        let remote = format!("file://{}", source.path().display());
+        run_test_git(
+            destination.path(),
+            &["clone", "--bare", "--filter=blob:none", &remote, "."],
+        )
+        .await?;
+        run_test_git(
+            destination.path(),
+            &[
+                "config",
+                "remote.origin.url",
+                "file:///sashiko-missing-fixture-remote",
+            ],
+        )
+        .await?;
+        let before = run_test_git(
+            destination.path(),
+            &["rev-list", "--objects", "--all", "--missing=print"],
+        )
+        .await?;
+        assert!(before.lines().any(|line| line == format!("?{blob}")));
+
+        repack_repository(destination.path()).await?;
+
+        let after = run_test_git(
+            destination.path(),
+            &["rev-list", "--objects", "--all", "--missing=print"],
+        )
+        .await?;
+        assert_eq!(before, after);
+        assert_eq!(
+            run_test_git(destination.path(), &["config", "remote.origin.url"]).await?,
+            "file:///sashiko-missing-fixture-remote"
+        );
+        assert_eq!(
+            run_test_git(
+                destination.path(),
+                &["config", "--bool", "remote.origin.promisor"]
+            )
+            .await?,
+            "true"
+        );
+        Ok(())
     }
 
     #[tokio::test]

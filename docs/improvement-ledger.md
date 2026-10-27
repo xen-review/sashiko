@@ -685,6 +685,24 @@ progress, and limits. Fresh budget/window authorization is still required.
 
 ### P3: Keep Remaining Operational Problems Evidence-Based
 
+The 2026-10-27 daytime check found a concrete repeating maintenance failure:
+geometric repack combines --stdin-packs with --exclude-promisor-objects in Xen's
+blob:none clone. A temporary promisor fixture reproduces the exact failure on
+Git 2.39.5. Use supported incremental repacking when partial-clone configuration
+is present; full repositories retain geometric packing. No persistent remote
+configuration is changed, no object is pruned, and lazy fetching is disabled.
+Partial clones pack reachable loose objects but may leave unreachable objects
+loose rather than rolling every object up. Both focused regressions pass on
+Git 2.39.5 and 2.56.0: reachable loose packing, retained unreferenced/promisor
+objects and markers, unchanged remote configuration, and a real blob-filtered
+clone whose missing blob remains unfetched with an unavailable remote. The full
+make check-pr gate passes 1,153 library tests (two ignored), 49 main, seven CLI,
+28 integration, formatting and all Clippy profiles. An initial disk-full link
+was repaired by removing only regenerable incremental build cache, preserving
+review artifacts and operational backups. Backed-up deployment is next.
+This maintenance repair does not change
+review scheduling or erase previous failures.
+
 Status: intermittent NNTP TLS/read timeouts continue while queued reviews make
 progress. Historical patches also have ordinary baseline/applicability failures.
 
