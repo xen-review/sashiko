@@ -1403,6 +1403,17 @@ fn attach_active_review_progress(
     if details.get("status").and_then(serde_json::Value::as_str) != Some("In Review") {
         return;
     }
+    if details
+        .get("embargo_until")
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|until| until > chrono::Utc::now().timestamp())
+        && details
+            .get("can_view_embargoed")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return;
+    }
     let Some(patchset_id) = details.get("id").and_then(serde_json::Value::as_i64) else {
         return;
     };
@@ -1510,6 +1521,79 @@ mod active_review_progress_tests {
         assert!(embargoed.get("active_review_progress").is_none());
         assert!(embargoed.get("active_stage_usage").is_none());
         assert!(embargoed.get("active_harness_usage").is_none());
+    }
+
+    #[test]
+    fn hides_in_review_embargo_progress_without_access() {
+        let registry = ReviewProgressRegistry::default();
+        let progress = registry.begin(7);
+        progress.report("active review");
+        progress.report_usage(crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "planning".to_string(),
+            outcome: crate::workflow::events::StageUsageOutcome::Unknown,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cached: 0,
+            usage_coverage: None,
+        });
+        progress.report_harness_usage(crate::agent_harness::session::HarnessProgress {
+            provider_calls_attempted: 1,
+            provider_calls_with_usage: 0,
+            tool_calls_attempted: 0,
+            provider_in_flight: true,
+            reported_usage: None,
+            elapsed_seconds: 0,
+            limits: crate::agent_harness::session::HarnessProgressLimits {
+                provider_calls: 30,
+                source_tool_calls: 400,
+                input_tokens: 400_000,
+                output_tokens: 20_000,
+                review_timeout_seconds: 3600,
+                provider_call_timeout_seconds: Some(600),
+            },
+        });
+        let embargo_until = chrono::Utc::now().timestamp() + 3600;
+        let mut anonymous = serde_json::json!({
+            "id": 7, "status": "In Review", "embargo_until": embargo_until,
+            "can_view_embargoed": false,
+        });
+        attach_active_review_progress(&mut anonymous, &registry);
+        assert!(anonymous.get("active_review_progress").is_none());
+        assert!(anonymous.get("active_stage_usage").is_none());
+        assert!(anonymous.get("active_harness_usage").is_none());
+
+        let mut missing_access = serde_json::json!({
+            "id": 7, "status": "In Review", "embargo_until": embargo_until,
+        });
+        attach_active_review_progress(&mut missing_access, &registry);
+        assert!(missing_access.get("active_review_progress").is_none());
+        assert!(missing_access.get("active_stage_usage").is_none());
+        assert!(missing_access.get("active_harness_usage").is_none());
+
+        let mut authorized = serde_json::json!({
+            "id": 7, "status": "In Review", "embargo_until": embargo_until,
+            "can_view_embargoed": true,
+        });
+        attach_active_review_progress(&mut authorized, &registry);
+        assert_eq!(authorized["active_review_progress"], "active review");
+        assert_eq!(
+            authorized["active_stage_usage"]["completed_stages"][0]["stage"],
+            "planning"
+        );
+        assert_eq!(
+            authorized["active_harness_usage"]["provider_calls_attempted"],
+            1
+        );
+
+        let mut expired = serde_json::json!({
+            "id": 7, "status": "In Review", "embargo_until": embargo_until - 7200,
+            "can_view_embargoed": false,
+        });
+        attach_active_review_progress(&mut expired, &registry);
+        assert_eq!(expired["active_review_progress"], "active review");
+        assert!(expired.get("active_stage_usage").is_some());
+        assert!(expired.get("active_harness_usage").is_some());
     }
 }
 
@@ -6288,6 +6372,88 @@ F:	*
         .await
         .unwrap();
         assert_eq!(anon_list_after.items[0].findings_high, Some(0));
+
+        db.update_patchset_status(ps_id, "In Review").await.unwrap();
+        let progress = state.review_progress.begin(ps_id);
+        progress.report("active review");
+        progress.report_usage(crate::local_review::CompletedStageUsage {
+            patch_index: 1,
+            stage: "planning".to_string(),
+            outcome: crate::workflow::events::StageUsageOutcome::Unknown,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cached: 0,
+            usage_coverage: None,
+        });
+        progress.report_harness_usage(crate::agent_harness::session::HarnessProgress {
+            provider_calls_attempted: 1,
+            provider_calls_with_usage: 0,
+            tool_calls_attempted: 0,
+            provider_in_flight: true,
+            reported_usage: None,
+            elapsed_seconds: 0,
+            limits: crate::agent_harness::session::HarnessProgressLimits {
+                provider_calls: 30,
+                source_tool_calls: 400,
+                input_tokens: 400_000,
+                output_tokens: 20_000,
+                review_timeout_seconds: 3600,
+                provider_call_timeout_seconds: Some(600),
+            },
+        });
+        let Json(anon_active_details) = get_patchset(
+            crate::auth::OptionalAuthUser(None),
+            OptionalPrincipal(Principal::anonymous()),
+            headers.clone(),
+            State(state.clone()),
+            Query(query()),
+        )
+        .await
+        .unwrap();
+        let Json(anon_active_summary) = get_patchset_summary(
+            crate::auth::OptionalAuthUser(None),
+            OptionalPrincipal(Principal::anonymous()),
+            headers.clone(),
+            State(state.clone()),
+            Query(query()),
+        )
+        .await
+        .unwrap();
+        let clm = Principal::resolve("clm@fb.com", acl, Some(&index));
+        let Json(clm_active_details) = get_patchset(
+            auth_for("clm@fb.com"),
+            OptionalPrincipal(clm.clone()),
+            headers.clone(),
+            State(state.clone()),
+            Query(query()),
+        )
+        .await
+        .unwrap();
+        let Json(clm_active_summary) = get_patchset_summary(
+            auth_for("clm@fb.com"),
+            OptionalPrincipal(clm),
+            headers.clone(),
+            State(state.clone()),
+            Query(query()),
+        )
+        .await
+        .unwrap();
+        for details in [anon_active_details, anon_active_summary] {
+            assert_eq!(details["status"], "In Review");
+            assert_eq!(details["can_view_embargoed"], false);
+            assert!(details.get("active_review_progress").is_none());
+            assert!(details.get("active_stage_usage").is_none());
+            assert!(details.get("active_harness_usage").is_none());
+        }
+        for details in [clm_active_details, clm_active_summary] {
+            assert_eq!(details["status"], "In Review");
+            assert_eq!(details["can_view_embargoed"], true);
+            assert_eq!(details["active_review_progress"], "active review");
+            assert!(details.get("active_stage_usage").is_some());
+            assert!(details.get("active_harness_usage").is_some());
+        }
+        drop(progress);
+        db.update_patchset_status(ps_id, "Reviewed").await.unwrap();
 
         // 5. Corresponding maintainer releases the embargo; patchset immediately becomes Reviewed.
         let clm = Principal::resolve("clm@fb.com", acl, Some(&index));
