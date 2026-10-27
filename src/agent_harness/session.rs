@@ -49,6 +49,8 @@ pub struct HarnessProgress {
     pub reported_usage: Option<AiUsage>,
 }
 
+pub(crate) type HarnessProgressCallback = Box<dyn Fn(HarnessProgress) + Send + Sync>;
+
 impl HarnessTrace {
     fn progress(&self, provider_in_flight: bool) -> HarnessProgress {
         HarnessProgress {
@@ -81,7 +83,7 @@ pub struct HarnessSession {
     limits: AgentHarnessSettings,
     deadline: tokio::time::Instant,
     stopped: bool,
-    progress: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
+    progress: Option<HarnessProgressCallback>,
     pub trace: HarnessTrace,
 }
 
@@ -206,6 +208,27 @@ pub async fn run_with_cancellation(
     limits: &AgentHarnessSettings,
     cancellation: impl std::future::Future<Output = ()>,
 ) -> HarnessOutcome {
+    run_with_cancellation_and_progress(
+        provider,
+        tools,
+        instructions,
+        series_prompt,
+        limits,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_with_cancellation_and_progress(
+    provider: &dyn AiProvider,
+    tools: &ToolBox,
+    instructions: &InstructionSnapshot,
+    series_prompt: &str,
+    limits: &AgentHarnessSettings,
+    cancellation: impl std::future::Future<Output = ()>,
+    progress: Option<HarnessProgressCallback>,
+) -> HarnessOutcome {
     let mut session = match HarnessSession::new(tools, instructions, limits) {
         Ok(session) => session,
         Err(error) => {
@@ -218,6 +241,9 @@ pub async fn run_with_cancellation(
             };
         }
     };
+    if let Some(progress) = progress {
+        session.set_progress_callback(progress);
+    }
     let status = session
         .checkpoint(provider, tools, series_prompt, cancellation)
         .await;

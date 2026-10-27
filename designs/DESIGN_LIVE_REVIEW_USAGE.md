@@ -193,12 +193,16 @@ counts, in-flight state, tool attempts and cancellation without a real call.
 The session callback and bounded snapshot are now implemented. Fake-provider
 tests cover provider start and completion, cumulative reported usage, source
 tool attempts, missing usage, missing versus explicit-zero cache counts, and
-cancellation. The callback has no daemon registry, API or UI caller yet.
+cancellation. Whole-series and sequential daemon paths now publish one latest
+snapshot per series run to the existing progress registry. Replaced or finished
+runs cannot overwrite or retain another run's snapshot. Both existing detail
+routes attach it only after their normal permission and embargo checks, and
+only for an active matching patchset. Fake-daemon tests cover both strategies,
+multiple calls and tool attempts, failure and cancellation cleanup; focused
+projection tests cover other patchsets, terminal state and embargo redaction.
 
-As a later increment, expose only the latest snapshot through the existing
-run-scoped progress registry and permission-checked detail APIs, with a single
-series attribution for both whole-series and sequential strategies. The UI
-must distinguish reported calls from attempted and in-flight calls and must
-not sum the same series snapshot across patch cards. Retained terminal records,
-backend-native generations, elapsed limits and account admission remain separate
-work; no model or daemon configuration is changed by adding the callback.
+As a later increment, the UI must distinguish reported calls from attempted and
+in-flight calls and must not sum the same series snapshot across patch cards.
+Retained terminal records, backend-native generations, elapsed limits and
+account admission remain separate work; no model or daemon configuration is
+changed by adding the callback and registry projection.

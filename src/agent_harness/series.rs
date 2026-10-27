@@ -116,6 +116,11 @@ impl<'a> SequentialReviewSession<'a> {
         &self.session.trace
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn set_progress_callback(&mut self, callback: session::HarnessProgressCallback) {
+        self.session.set_progress_callback(callback);
+    }
+
     pub fn status(&self) -> Option<&session::HarnessStatus> {
         self.status.as_ref()
     }
@@ -174,6 +179,27 @@ pub async fn review_with_cancellation(
     limits: &AgentHarnessSettings,
     cancellation: impl std::future::Future<Output = ()>,
 ) -> Result<SeriesOutcome> {
+    review_with_cancellation_and_progress(
+        provider,
+        tools,
+        instructions,
+        request,
+        limits,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn review_with_cancellation_and_progress(
+    provider: &dyn AiProvider,
+    tools: &ToolBox,
+    instructions: &InstructionSnapshot,
+    request: &SeriesRequest<'_>,
+    limits: &AgentHarnessSettings,
+    cancellation: impl std::future::Future<Output = ()>,
+    progress: Option<session::HarnessProgressCallback>,
+) -> Result<SeriesOutcome> {
     limits.validate().map_err(anyhow::Error::msg)?;
     let prompt = build_prompt(
         request.input,
@@ -182,13 +208,14 @@ pub async fn review_with_cancellation(
         request.cover_letter,
         request.max_bytes,
     )?;
-    let mut execution = session::run_with_cancellation(
+    let mut execution = session::run_with_cancellation_and_progress(
         provider,
         tools,
         instructions,
         &prompt,
         limits,
         cancellation,
+        progress,
     )
     .await;
     let artifacts = match &execution.status {

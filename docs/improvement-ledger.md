@@ -782,9 +782,13 @@ for unreported in-flight calls remain separate open work.
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing
-versus zero cache counts, tool attempts and cancellation. The callback is not
-yet wired to the daemon registry, API or UI, and does not expose backend-native
-generations or account for unreported in-flight tokens.
+versus zero cache counts, tool attempts and cancellation. Whole-series and
+sequential daemon paths now publish the latest snapshot into the existing
+run-scoped registry; both protected detail APIs attach it only for an active
+matching patchset. Fake-daemon and projection checks cover call progression,
+stale-run rejection, cleanup, terminal states and embargo. The UI is not yet
+wired, and the snapshot does not expose backend-native generations or account
+for unreported in-flight tokens.
 
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 

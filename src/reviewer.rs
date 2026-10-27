@@ -60,6 +60,7 @@ struct ActiveReviewProgress {
     update_id: u64,
     message: String,
     stage_usage: ActiveStageUsageSnapshot,
+    harness_usage: Option<crate::agent_harness::session::HarnessProgress>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -154,6 +155,7 @@ impl ReviewProgressRegistry {
                 update_id: 0,
                 message: String::new(),
                 stage_usage: ActiveStageUsageSnapshot::default(),
+                harness_usage: None,
             },
         );
         ReviewProgressCleanup {
@@ -195,6 +197,29 @@ impl ReviewProgressRegistry {
             return None;
         }
         Some(snapshot)
+    }
+
+    pub fn harness_usage(
+        &self,
+        patchset_id: i64,
+    ) -> Option<crate::agent_harness::session::HarnessProgress> {
+        self.lock_entries()
+            .get(&(patchset_id, None))
+            .and_then(|entry| entry.harness_usage.clone())
+    }
+
+    fn record_harness_usage(
+        &self,
+        patchset_id: i64,
+        run_id: u64,
+        usage: crate::agent_harness::session::HarnessProgress,
+    ) {
+        let mut entries = self.lock_entries();
+        if let Some(entry) = entries.get_mut(&(patchset_id, None))
+            && entry.run_id == run_id
+        {
+            entry.harness_usage = Some(usage);
+        }
     }
 
     fn record_stage_usage(
@@ -249,6 +274,15 @@ impl ReviewProgressCleanup {
         self.registry
             .record_stage_usage(self.patchset_id, self.run_id, usage);
     }
+
+    #[cfg(test)]
+    pub(crate) fn report_harness_usage(
+        &self,
+        usage: crate::agent_harness::session::HarnessProgress,
+    ) {
+        self.registry
+            .record_harness_usage(self.patchset_id, self.run_id, usage);
+    }
 }
 
 impl Drop for ReviewProgressCleanup {
@@ -260,6 +294,38 @@ impl Drop for ReviewProgressCleanup {
 #[cfg(test)]
 mod review_progress_tests {
     use super::ReviewProgressRegistry;
+
+    #[test]
+    fn harness_progress_is_series_scoped_and_rejects_stale_runs() {
+        let registry = ReviewProgressRegistry::default();
+        let first = registry.begin(1);
+        let mut usage = crate::agent_harness::session::HarnessProgress {
+            provider_calls_attempted: 1,
+            provider_calls_with_usage: 0,
+            tool_calls_attempted: 0,
+            provider_in_flight: true,
+            reported_usage: None,
+        };
+        registry.record_harness_usage(1, first.run_id, usage.clone());
+        assert_eq!(
+            registry.harness_usage(1).unwrap().provider_calls_attempted,
+            1
+        );
+        assert!(registry.harness_usage(2).is_none());
+
+        usage.provider_calls_attempted = 2;
+        let replacement = registry.begin(1);
+        registry.record_harness_usage(1, first.run_id, usage.clone());
+        assert!(registry.harness_usage(1).is_none());
+        registry.record_harness_usage(1, replacement.run_id, usage);
+        drop(first);
+        assert_eq!(
+            registry.harness_usage(1).unwrap().provider_calls_attempted,
+            2
+        );
+        drop(replacement);
+        assert!(registry.harness_usage(1).is_none());
+    }
 
     #[test]
     fn sibling_progress_survives_updates_cleanup_and_replacement() {
@@ -1774,6 +1840,12 @@ impl Reviewer {
             ctx.llm_semaphore.clone(),
         );
         let progress = ctx.progress_registry.begin(patchset_id);
+        let progress_registry = ctx.progress_registry.clone();
+        let progress_run_id = progress.run_id;
+        let report_progress: crate::agent_harness::session::HarnessProgressCallback =
+            Box::new(move |usage| {
+                progress_registry.record_harness_usage(patchset_id, progress_run_id, usage);
+            });
         ctx.progress_registry.update(
             patchset_id,
             progress.run_id,
@@ -1801,6 +1873,7 @@ impl Reviewer {
             }
         };
         let status = if let Some(mut runner) = runner {
+            runner.set_progress_callback(report_progress);
             let fingerprint = match ctx
                 .db
                 .initialize_checkpoint_session(review_id, &input)
@@ -1892,13 +1965,14 @@ impl Reviewer {
                 })
                 .await?
         } else {
-            let outcome = crate::agent_harness::series::review_with_cancellation(
+            let outcome = crate::agent_harness::series::review_with_cancellation_and_progress(
                 &provider,
                 &tools,
                 instructions,
                 request,
                 &limits,
                 cancellation,
+                Some(report_progress),
             )
             .await?;
             ctx.db
@@ -4322,12 +4396,22 @@ mod tests {
         calls: AtomicUsize,
         report: String,
         cancel: Option<(Arc<Database>, i64)>,
+        progress_registry: ReviewProgressRegistry,
+        patchset_id: i64,
     }
 
     #[async_trait]
     impl AiProvider for HarnessProvider {
         async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let progress = self
+                .progress_registry
+                .harness_usage(self.patchset_id)
+                .unwrap();
+            assert!(progress.provider_in_flight);
+            assert_eq!(progress.provider_calls_attempted, 1);
+            assert_eq!(progress.provider_calls_with_usage, 0);
+            assert!(progress.reported_usage.is_none());
             let input: Value =
                 serde_json::from_str(request.messages[0].content.as_deref().unwrap())?;
             assert_eq!(input["patches"].as_array().unwrap().len(), 2);
@@ -4365,12 +4449,26 @@ mod tests {
         db: Arc<Database>,
         patchset_id: i64,
         terminal_status: ReviewStatus,
+        progress_registry: ReviewProgressRegistry,
     }
 
     #[async_trait]
     impl AiProvider for SequentialHarnessProvider {
         async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let progress = self
+                .progress_registry
+                .harness_usage(self.patchset_id)
+                .unwrap();
+            assert!(progress.provider_in_flight);
+            assert_eq!(progress.provider_calls_attempted, call + 1);
+            assert_eq!(progress.provider_calls_with_usage, call);
+            assert_eq!(progress.tool_calls_attempted, call.div_ceil(2));
+            if call == 0 {
+                assert!(progress.reported_usage.is_none());
+            } else {
+                assert_eq!(progress.reported_usage.unwrap().prompt_tokens, call * 40);
+            }
             let patch_index = call / 2 + 1;
             let mut rows = self.db.conn.query(
                 "SELECT s.checkpoint_count FROM harness_checkpoint_sessions s JOIN reviews r ON r.id = s.review_id WHERE r.patchset_id = ? AND s.state = 'active'",
@@ -4560,6 +4658,7 @@ mod tests {
             settings.review.agent_harness.as_mut().unwrap().strategy = strategy;
             db.rerun_patchset(patchset_id).await?;
             assert!(db.claim_patchset_for_review(patchset_id).await?);
+            let progress_registry = ReviewProgressRegistry::default();
             let provider = Arc::new(HarnessProvider {
                 calls: AtomicUsize::new(0),
                 report: if expected == ReviewStatus::Failed {
@@ -4568,6 +4667,8 @@ mod tests {
                     json!({"reviewer_notes":"Notes", "reply_drafts":[{"patch_index":2,"message_id":"harness-2","body":"Complete reply"}]}).to_string()
                 },
                 cancel: (expected == ReviewStatus::Cancelled).then(|| (db.clone(), patchset_id)),
+                progress_registry: progress_registry.clone(),
+                patchset_id,
             });
             let ctx = ReviewContext {
                 semaphore: Arc::new(Semaphore::new(1)),
@@ -4579,13 +4680,14 @@ mod tests {
                 target_review_count: index + 1,
                 provider: provider.clone(),
                 worker_overrides: WorkerSubprocessOverrides::default(),
-                progress_registry: ReviewProgressRegistry::default(),
+                progress_registry,
             };
             Reviewer::process_harness_series(&ctx, &request, &coverage, &worktree, baseline_id)
                 .await?;
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
             assert_eq!(ctx.llm_semaphore.available_permits(), 1);
             assert!(ctx.progress_registry.current(patchset_id).is_none());
+            assert!(ctx.progress_registry.harness_usage(patchset_id).is_none());
             assert_eq!(
                 db.get_patchset_status(patchset_id).await?.as_deref(),
                 Some(expected.as_str())
@@ -4675,11 +4777,13 @@ mod tests {
         ] {
             db.rerun_patchset(patchset_id).await?;
             assert!(db.claim_patchset_for_review(patchset_id).await?);
+            let progress_registry = ReviewProgressRegistry::default();
             let provider = Arc::new(SequentialHarnessProvider {
                 calls: AtomicUsize::new(0),
                 db: db.clone(),
                 patchset_id,
                 terminal_status: expected,
+                progress_registry: progress_registry.clone(),
             });
             let ctx = ReviewContext {
                 semaphore: Arc::new(Semaphore::new(1)),
@@ -4691,11 +4795,12 @@ mod tests {
                 target_review_count: 1,
                 provider: provider.clone(),
                 worker_overrides: WorkerSubprocessOverrides::default(),
-                progress_registry: ReviewProgressRegistry::default(),
+                progress_registry,
             };
             Reviewer::process_harness_series(&ctx, &request, &coverage, &worktree, baseline_id)
                 .await?;
             assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+            assert!(ctx.progress_registry.harness_usage(patchset_id).is_none());
             assert_eq!(
                 db.get_patchset_status(patchset_id).await?.as_deref(),
                 Some(expected.as_str())

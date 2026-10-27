@@ -1420,6 +1420,12 @@ fn attach_active_review_progress(
     {
         object.insert("active_stage_usage".to_string(), value);
     }
+    if let Some(usage) = registry.harness_usage(patchset_id)
+        && let Ok(value) = serde_json::to_value(usage)
+        && let Some(object) = details.as_object_mut()
+    {
+        object.insert("active_harness_usage".to_string(), value);
+    }
 }
 
 #[cfg(test)]
@@ -1441,6 +1447,13 @@ mod active_review_progress_tests {
             tokens_cached: 0,
             usage_coverage: None,
         });
+        progress.report_harness_usage(crate::agent_harness::session::HarnessProgress {
+            provider_calls_attempted: 2,
+            provider_calls_with_usage: 1,
+            tool_calls_attempted: 3,
+            provider_in_flight: true,
+            reported_usage: None,
+        });
 
         let mut active = serde_json::json!({ "id": 7, "status": "In Review" });
         attach_active_review_progress(&mut active, &registry);
@@ -1454,20 +1467,28 @@ mod active_review_progress_tests {
         );
         assert!(active["active_stage_usage"]["completed_stages"][0]["usage_coverage"].is_null());
         assert_eq!(active["active_stage_usage"]["truncated"], false);
+        assert_eq!(
+            active["active_harness_usage"]["provider_calls_attempted"],
+            2
+        );
+        assert!(active["active_harness_usage"]["reported_usage"].is_null());
 
         let mut other_patchset = serde_json::json!({ "id": 8, "status": "In Review" });
         attach_active_review_progress(&mut other_patchset, &registry);
         assert!(other_patchset.get("active_review_progress").is_none());
         assert!(other_patchset.get("active_stage_usage").is_none());
+        assert!(other_patchset.get("active_harness_usage").is_none());
 
         let mut completed = serde_json::json!({ "id": 7, "status": "Reviewed" });
         attach_active_review_progress(&mut completed, &registry);
         assert!(completed.get("active_review_progress").is_none());
         assert!(completed.get("active_stage_usage").is_none());
+        assert!(completed.get("active_harness_usage").is_none());
         let mut embargoed = serde_json::json!({ "id": 7, "status": "Embargoed" });
         attach_active_review_progress(&mut embargoed, &registry);
         assert!(embargoed.get("active_review_progress").is_none());
         assert!(embargoed.get("active_stage_usage").is_none());
+        assert!(embargoed.get("active_harness_usage").is_none());
     }
 }
 
