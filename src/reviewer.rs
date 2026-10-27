@@ -211,10 +211,29 @@ impl ReviewProgressRegistry {
         patchset_id: i64,
         now: Instant,
     ) -> Option<crate::agent_harness::session::HarnessProgress> {
+        self.harness_usage_for_run_at(patchset_id, None, now)
+    }
+
+    fn harness_usage_for_run(
+        &self,
+        patchset_id: i64,
+        run_id: u64,
+    ) -> Option<crate::agent_harness::session::HarnessProgress> {
+        self.harness_usage_for_run_at(patchset_id, Some(run_id), Instant::now())
+    }
+
+    fn harness_usage_for_run_at(
+        &self,
+        patchset_id: i64,
+        run_id: Option<u64>,
+        now: Instant,
+    ) -> Option<crate::agent_harness::session::HarnessProgress> {
         let entries = self.lock_entries();
-        let (usage, observed_at) = entries
-            .get(&(patchset_id, None))
-            .and_then(|entry| entry.harness_usage.as_ref())?;
+        let entry = entries.get(&(patchset_id, None))?;
+        if run_id.is_some_and(|run_id| run_id != entry.run_id) {
+            return None;
+        }
+        let (usage, observed_at) = entry.harness_usage.as_ref()?;
         let mut usage = usage.clone();
         usage.elapsed_seconds = usage.elapsed_seconds.saturating_add(
             now.checked_duration_since(*observed_at)
@@ -380,12 +399,22 @@ mod review_progress_tests {
             22
         );
         assert!(registry.harness_usage(2).is_none());
+        assert!(registry.harness_usage_for_run(1, first.run_id).is_some());
+        assert!(registry.harness_usage_for_run(2, first.run_id).is_none());
 
         usage.provider_calls_attempted = 2;
         let replacement = registry.begin(1);
         registry.record_harness_usage(1, first.run_id, usage.clone());
         assert!(registry.harness_usage(1).is_none());
         registry.record_harness_usage(1, replacement.run_id, usage);
+        assert!(registry.harness_usage_for_run(1, first.run_id).is_none());
+        assert_eq!(
+            registry
+                .harness_usage_for_run(1, replacement.run_id)
+                .unwrap()
+                .provider_calls_attempted,
+            2
+        );
         drop(first);
         assert_eq!(
             registry.harness_usage(1).unwrap().provider_calls_attempted,
@@ -2026,13 +2055,20 @@ impl Reviewer {
                     }
                 }
             }
+            let outcome = runner.into_outcome();
+            let terminal_progress = ctx
+                .progress_registry
+                .harness_usage_for_run(patchset_id, progress.run_id);
             ctx.db
-                .finish_checkpoint_session(crate::db::HarnessCheckpointFinish {
-                    review_id,
-                    series_fingerprint: &fingerprint,
-                    previous: cursor,
-                    outcome: &runner.into_outcome(),
-                })
+                .finish_checkpoint_session_with_progress(
+                    crate::db::HarnessCheckpointFinish {
+                        review_id,
+                        series_fingerprint: &fingerprint,
+                        previous: cursor,
+                        outcome: &outcome,
+                    },
+                    terminal_progress.as_ref(),
+                )
                 .await?
         } else {
             let outcome = crate::agent_harness::series::review_with_cancellation_and_progress(
@@ -2045,8 +2081,16 @@ impl Reviewer {
                 Some(report_progress),
             )
             .await?;
+            let terminal_progress = ctx
+                .progress_registry
+                .harness_usage_for_run(patchset_id, progress.run_id);
             ctx.db
-                .complete_harness_review(review_id, &input, &outcome)
+                .complete_harness_review_with_progress(
+                    review_id,
+                    &input,
+                    &outcome,
+                    terminal_progress.as_ref(),
+                )
                 .await?
         };
         info!(
@@ -4777,6 +4821,26 @@ mod tests {
                 .await?;
             let review_id: i64 = rows.next().await?.unwrap().get(0)?;
             drop(rows);
+            let mut rows = db
+                .conn
+                .query(
+                    "SELECT harness_progress_snapshot FROM reviews WHERE id = ?",
+                    libsql::params![review_id],
+                )
+                .await?;
+            let payload: String = rows.next().await?.unwrap().get(0)?;
+            let terminal: Value = serde_json::from_str(&payload)?;
+            assert_eq!(terminal["provider_calls_attempted"], 1);
+            assert_eq!(terminal["provider_in_flight"], false);
+            assert_eq!(terminal["limits"]["provider_call_timeout_seconds"], 600);
+            if expected == ReviewStatus::Cancelled {
+                assert_eq!(terminal["provider_calls_with_usage"], 0);
+                assert!(terminal["reported_usage"].is_null());
+            } else {
+                assert_eq!(terminal["provider_calls_with_usage"], 1);
+                assert_eq!(terminal["reported_usage"]["prompt_tokens"], 40);
+            }
+            drop(rows);
             let details = db.get_review_details(review_id).await?.unwrap();
             let listing = db
                 .get_patchset_details(patchset_id, None, None)
@@ -4886,6 +4950,35 @@ mod tests {
                 .await?
                 .unwrap();
             let latest = listing["reviews"].as_array().unwrap().last().unwrap();
+            let mut rows = db
+                .conn
+                .query(
+                    "SELECT harness_progress_snapshot FROM reviews WHERE id = ?",
+                    libsql::params![latest["id"].as_i64().unwrap()],
+                )
+                .await?;
+            let payload: String = rows.next().await?.unwrap().get(0)?;
+            let terminal: Value = serde_json::from_str(&payload)?;
+            assert_eq!(terminal["provider_calls_attempted"], 4);
+            assert_eq!(terminal["tool_calls_attempted"], 2);
+            assert_eq!(terminal["provider_in_flight"], false);
+            assert_eq!(
+                terminal["provider_calls_with_usage"],
+                if expected == ReviewStatus::Cancelled {
+                    3
+                } else {
+                    4
+                }
+            );
+            assert_eq!(
+                terminal["reported_usage"]["prompt_tokens"],
+                if expected == ReviewStatus::Cancelled {
+                    120
+                } else {
+                    160
+                }
+            );
+            drop(rows);
             assert_eq!(
                 latest["checkpoint_session"]["completed_count"],
                 if expected == ReviewStatus::Reviewed {

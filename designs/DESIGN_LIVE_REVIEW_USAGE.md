@@ -230,3 +230,43 @@ removes the active summary. Synthetic desktop and mobile checks cover layout,
 updates and terminal cleanup; no live review was queued. Retained terminal
 records, backend-native generations and account admission remain separate work;
 no model or daemon configuration is changed by adding this display.
+
+## Native Harness Terminal Snapshot
+
+The live series-scoped snapshot already contains the bounded counters and limits
+needed after a harness run finishes. Reading the full serialized trace from
+review logs would expose unrelated source material and repeatedly decompress an
+unbounded payload. Instead, add a nullable review-owned snapshot column and
+write the final run's snapshot atomically with the whole-series or sequential
+terminal transaction. A run-ID check must prevent a replaced run from storing
+another run's values. Store no snapshot when no matching event was observed;
+legacy, interrupted and pre-initialization records remain unknown.
+
+Only accept a terminal snapshot whose attempted provider calls, reported-call
+count, source-tool attempts and aggregate reported usage match the associated
+terminal trace, and which no longer claims a provider call is in flight. A
+missing cached-token value remains unknown. A failed or cancelled call without
+usage remains visible as an attempted call, not a measured zero or a complete
+bill. The elapsed time is approximate and the call timeout is configured, not
+observed. The snapshot contains no prompts, replies, source, errors or account
+identifiers, and describes Sashiko operations rather than backend generations.
+
+Return the bounded snapshot with its series review through the existing
+paginated detail projections, after the same embargo checks as the review.
+Render it once on the series review, including failed and cancelled outcomes;
+do not copy it onto individual patch rows or infer historical values. Keep
+partial checkpoint artifacts and recorded interactions unchanged. Add focused
+tests for both completion transactions, rollback, stale run IDs, missing and
+explicit-zero cache counts, cancellation, legacy nulls, and embargo exclusion;
+then verify the renderer on desktop and mobile without a real model call.
+
+Implemented with nullable schema 19 storage and a 4 KiB SQL projection bound.
+Whole-series and sequential completion retain matching run-owned snapshots in
+their existing transactions; invalid diagnostics are omitted without changing
+the review result. Focused tests cover completed, failed, timed-out and
+cancelled outcomes, rollback, legacy migration, stale runs and embargo access.
+The renderer displays the snapshot once per series and labels incomplete usage.
+Synthetic 1280- and 390-pixel browser checks passed without overflow or injected
+markup. No live review, model call, deployment or historical backfill was made.
+Process interruptions before terminal persistence and backend-native generation
+or unreported token usage remain unknown.

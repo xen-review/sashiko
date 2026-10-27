@@ -799,6 +799,19 @@ the same helper as the provider and shown separately from the series deadline;
 it is not a measurement of a completed call. The snapshot does not expose
 backend-native generations or unreported in-flight tokens.
 
+Active progress now respects the embargo timestamp and resolved access even
+while the patchset status is In Review. For terminal harness reviews, schema 19
+adds a nullable, bounded series snapshot written atomically with the existing
+whole-series or sequential completion transaction. It retains only matching
+run-owned counters, reported usage and configured limits; invalid or absent
+diagnostics remain unknown and do not block completion. Legacy and interrupted
+records are not reconstructed. Both protected review projections expose the
+snapshot without loading the sequential trace, and the series card labels
+unreported calls as incomplete. Fake-daemon, migration, rollback, timeout,
+cancellation, cache-availability and embargo checks pass, as do synthetic
+desktop/mobile renderer checks. This work has not been deployed or tested with
+a live model; backend-native generations and unreported usage remain unknown.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

@@ -6373,6 +6373,37 @@ F:	*
         .unwrap();
         assert_eq!(anon_list_after.items[0].findings_high, Some(0));
 
+        let terminal_review_id = db
+            .create_review(ps_id, None, "codex-cli", "model", None, None)
+            .await
+            .unwrap();
+        let terminal_progress = crate::agent_harness::session::HarnessProgress {
+            provider_calls_attempted: 2,
+            provider_calls_with_usage: 1,
+            tool_calls_attempted: 3,
+            provider_in_flight: false,
+            reported_usage: Some(crate::ai::AiUsage {
+                prompt_tokens: 40,
+                completion_tokens: 10,
+                total_tokens: 50,
+                cached_tokens: None,
+            }),
+            elapsed_seconds: 42,
+            limits: crate::agent_harness::session::HarnessProgressLimits {
+                provider_calls: 30,
+                source_tool_calls: 400,
+                input_tokens: 400_000,
+                output_tokens: 20_000,
+                review_timeout_seconds: 3600,
+                provider_call_timeout_seconds: Some(600),
+            },
+        };
+        db.execute(
+            "UPDATE reviews SET review_mode = 'agent_harness', status = 'Failed', harness_progress_snapshot = ? WHERE id = ?",
+            libsql::params![serde_json::to_string(&terminal_progress).unwrap(), terminal_review_id],
+        )
+        .await
+        .unwrap();
         db.update_patchset_status(ps_id, "In Review").await.unwrap();
         let progress = state.review_progress.begin(ps_id);
         progress.report("active review");
@@ -6441,6 +6472,7 @@ F:	*
         for details in [anon_active_details, anon_active_summary] {
             assert_eq!(details["status"], "In Review");
             assert_eq!(details["can_view_embargoed"], false);
+            assert!(details["reviews"].as_array().unwrap().is_empty());
             assert!(details.get("active_review_progress").is_none());
             assert!(details.get("active_stage_usage").is_none());
             assert!(details.get("active_harness_usage").is_none());
@@ -6451,7 +6483,56 @@ F:	*
             assert_eq!(details["active_review_progress"], "active review");
             assert!(details.get("active_stage_usage").is_some());
             assert!(details.get("active_harness_usage").is_some());
+            let terminal = details["reviews"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|review| review["id"] == terminal_review_id)
+                .unwrap();
+            assert_eq!(
+                terminal["harness_progress_snapshot"]["provider_calls_attempted"],
+                2
+            );
+            assert_eq!(
+                terminal["harness_progress_snapshot"]["provider_calls_with_usage"],
+                1
+            );
         }
+        let error = get_review(
+            crate::auth::OptionalAuthUser(None),
+            OptionalPrincipal(Principal::anonymous()),
+            headers.clone(),
+            State(state.clone()),
+            Query(ReviewQuery {
+                id: Some(terminal_review_id),
+                patchset_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, StatusCode::NOT_FOUND);
+        let Json(authorized_terminal) = get_review(
+            auth_for("clm@fb.com"),
+            OptionalPrincipal(Principal::resolve("clm@fb.com", acl, Some(&index))),
+            headers.clone(),
+            State(state.clone()),
+            Query(ReviewQuery {
+                id: Some(terminal_review_id),
+                patchset_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            authorized_terminal["harness_progress_snapshot"]["provider_calls_attempted"],
+            2
+        );
+        db.execute(
+            "DELETE FROM reviews WHERE id = ?",
+            libsql::params![terminal_review_id],
+        )
+        .await
+        .unwrap();
         drop(progress);
         db.update_patchset_status(ps_id, "Reviewed").await.unwrap();
 

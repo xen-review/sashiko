@@ -1,0 +1,1 @@
+ALTER TABLE reviews ADD COLUMN harness_progress_snapshot TEXT;
