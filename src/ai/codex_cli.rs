@@ -211,13 +211,20 @@ pub struct CodexSubscriptionQuotaSnapshot {
     pub weekly_resets_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct CodexWorkspaceQuotaSnapshot(CodexSubscriptionQuotaSnapshot);
+
 const PREMIUM_QUOTA_MAX_AGE_SECONDS: i64 = 20;
 
 fn valid_quota_account_key(key: &str) -> bool {
     key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-impl CodexSubscriptionQuotaSnapshot {
+impl CodexWorkspaceQuotaSnapshot {
+    pub fn quota(&self) -> &CodexSubscriptionQuotaSnapshot {
+        &self.0
+    }
+
     pub fn has_fresh_premium_quota(
         &self,
         expected_account_key: &str,
@@ -225,15 +232,15 @@ impl CodexSubscriptionQuotaSnapshot {
         now: i64,
     ) -> bool {
         valid_quota_account_key(expected_account_key)
-            && self.five_hour.account_key == expected_account_key
+            && self.0.five_hour.account_key == expected_account_key
             && observation_started_at >= 0
-            && self.five_hour.observed_at >= observation_started_at
-            && self.five_hour.observed_at <= now
-            && now - self.five_hour.observed_at <= PREMIUM_QUOTA_MAX_AGE_SECONDS
-            && self.five_hour.resets_at > now
-            && self.weekly_resets_at > now
-            && self.five_hour.remaining.exceeds(50.0)
-            && self.weekly_remaining.exceeds(0.0)
+            && self.0.five_hour.observed_at >= observation_started_at
+            && self.0.five_hour.observed_at <= now
+            && now - self.0.five_hour.observed_at <= PREMIUM_QUOTA_MAX_AGE_SECONDS
+            && self.0.five_hour.resets_at > now
+            && self.0.weekly_resets_at > now
+            && self.0.five_hour.remaining.exceeds(50.0)
+            && self.0.weekly_remaining.exceeds(0.0)
     }
 }
 
@@ -325,46 +332,28 @@ pub async fn read_codex_subscription_quota(
 
 pub async fn read_codex_workspace_quota(
     expected_workspace_key: &str,
-) -> Result<CodexSubscriptionQuotaSnapshot> {
-    read_codex_quota_with_binary(
+) -> Result<CodexWorkspaceQuotaSnapshot> {
+    read_codex_workspace_quota_with_binary(
         std::ffi::OsStr::new("codex"),
         expected_workspace_key,
         Duration::from_secs(20),
-        CodexQuotaBinding::Workspace,
     )
     .await
 }
 
-#[derive(Clone, Copy)]
-enum CodexQuotaBinding {
-    Login,
-    Workspace,
-}
-
-impl CodexQuotaBinding {
-    fn account_key(self, account: &Value) -> Result<String> {
-        match self {
-            Self::Login => codex_quota_account_key(account),
-            Self::Workspace => codex_workspace_quota_key(account),
-        }
-    }
-
-    fn decode(
-        self,
-        account: &Value,
-        limits: &Value,
-        expected_key: &str,
-        observed_at: i64,
-    ) -> Result<CodexSubscriptionQuotaSnapshot> {
-        match self {
-            Self::Login => {
-                decode_codex_subscription_quota(account, limits, expected_key, observed_at)
-            }
-            Self::Workspace => {
-                decode_codex_workspace_quota(account, limits, expected_key, observed_at)
-            }
-        }
-    }
+async fn read_codex_workspace_quota_with_binary(
+    binary: &std::ffi::OsStr,
+    expected_workspace_key: &str,
+    deadline: Duration,
+) -> Result<CodexWorkspaceQuotaSnapshot> {
+    read_codex_quota_with_binary(
+        binary,
+        expected_workspace_key,
+        deadline,
+        codex_workspace_quota_key,
+        decode_codex_workspace_quota,
+    )
+    .await
 }
 
 async fn read_codex_subscription_quota_with_binary(
@@ -376,17 +365,19 @@ async fn read_codex_subscription_quota_with_binary(
         binary,
         expected_account_key,
         deadline,
-        CodexQuotaBinding::Login,
+        codex_quota_account_key,
+        decode_codex_subscription_quota,
     )
     .await
 }
 
-async fn read_codex_quota_with_binary(
+async fn read_codex_quota_with_binary<T>(
     binary: &std::ffi::OsStr,
     expected_account_key: &str,
     deadline: Duration,
-    binding: CodexQuotaBinding,
-) -> Result<CodexSubscriptionQuotaSnapshot> {
+    account_key: fn(&Value) -> Result<String>,
+    decode: fn(&Value, &Value, &str, i64) -> Result<T>,
+) -> Result<T> {
     ensure!(
         valid_quota_account_key(expected_account_key),
         "Invalid expected Codex quota account key"
@@ -426,18 +417,18 @@ async fn read_codex_quota_with_binary(
             .await?;
         let before = rpc.request(2, QuotaMetadataMethod::Account).await?;
         ensure!(
-            binding.account_key(&before)? == expected_account_key,
+            account_key(&before)? == expected_account_key,
             "Codex quota account binding changed before observation"
         );
         let observed_at = chrono::Utc::now().timestamp();
         let limits = rpc.request(3, QuotaMetadataMethod::RateLimits).await?;
         let after = rpc.request(4, QuotaMetadataMethod::Account).await?;
         ensure!(
-            binding.account_key(&after)? == expected_account_key
+            account_key(&after)? == expected_account_key
                 && before["account"]["email"] == after["account"]["email"],
             "Codex quota account binding changed during observation"
         );
-        binding.decode(&after, &limits, expected_account_key, observed_at)
+        decode(&after, &limits, expected_account_key, observed_at)
     })
     .await
     .map_err(|_| anyhow::anyhow!("Codex quota metadata deadline exceeded"));
@@ -575,7 +566,7 @@ pub fn decode_codex_workspace_quota(
     limits_result: &Value,
     expected_workspace_key: &str,
     observed_at: i64,
-) -> Result<CodexSubscriptionQuotaSnapshot> {
+) -> Result<CodexWorkspaceQuotaSnapshot> {
     let workspace_key = codex_workspace_quota_key(account_result)?;
     ensure!(
         workspace_key == expected_workspace_key,
@@ -594,7 +585,7 @@ pub fn decode_codex_workspace_quota(
     let mut snapshot =
         decode_codex_subscription_quota(account_result, limits_result, &login_key, observed_at)?;
     snapshot.five_hour.account_key = workspace_key;
-    Ok(snapshot)
+    Ok(CodexWorkspaceQuotaSnapshot(snapshot))
 }
 
 fn parse_usage(value: &Value) -> Option<AiUsage> {
@@ -912,16 +903,15 @@ done
             .replace("AFTER_ID", after_id)
             .replace("ALLOWED", allowed);
             crate::test_support::write_executable_script(&executable, &script);
-            let result = read_codex_quota_with_binary(
+            let result = read_codex_workspace_quota_with_binary(
                 executable.as_os_str(),
                 &key,
                 Duration::from_secs(2),
-                CodexQuotaBinding::Workspace,
             )
             .await;
             assert_eq!(result.is_ok(), expected);
             if let Ok(snapshot) = result {
-                assert_eq!(snapshot.five_hour.account_key, key);
+                assert_eq!(snapshot.quota().five_hour.account_key, key);
             }
         }
         Ok(())
@@ -1074,13 +1064,15 @@ while IFS= read -r request; do :; done
     fn premium_call_quota_requires_fresh_matching_positive_allowances() -> Result<()> {
         use super::super::quota::RemainingQuotaPercent;
 
-        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"}});
-        let limits = serde_json::json!({"rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,
+        let account = serde_json::json!({"account":{"type":"chatgpt","email":"reviewer@example.invalid","planType":"pro"},
+            "workspaceRouting":{"chatgptAccountId":"workspace-a"}});
+        let limits = serde_json::json!({"accountId":"workspace-a","ordinaryUsageAllowed":true,
+            "rateLimits":{"limitId":"codex","planType":"pro","spendControlReached":false,
             "credits":{"hasCredits":false,"unlimited":false},
             "primary":{"usedPercent":49.9,"windowDurationMins":300,"resetsAt":200},
             "secondary":{"usedPercent":99.9,"windowDurationMins":10080,"resetsAt":1000}}});
-        let key = codex_quota_account_key(&account)?;
-        let snapshot = decode_codex_subscription_quota(&account, &limits, &key, 100)?;
+        let key = codex_workspace_quota_key(&account)?;
+        let snapshot = decode_codex_workspace_quota(&account, &limits, &key, 100)?;
         assert!(snapshot.has_fresh_premium_quota(&key, 100, 100));
         assert!(snapshot.has_fresh_premium_quota(&key, 99, 120));
         assert!(!snapshot.has_fresh_premium_quota(&key, 101, 101));
@@ -1090,22 +1082,22 @@ while IFS= read -r request; do :; done
         assert!(!snapshot.has_fresh_premium_quota("", 100, 100));
         assert!(!snapshot.has_fresh_premium_quota("other-account", 100, 100));
         let mut malformed_key = snapshot.clone();
-        malformed_key.five_hour.account_key = "not-a-valid-key".into();
+        malformed_key.0.five_hour.account_key = "not-a-valid-key".into();
         assert!(!malformed_key.has_fresh_premium_quota("not-a-valid-key", 100, 100));
 
         for remaining in [0.0, 49.9, 50.0] {
             let mut blocked = snapshot.clone();
-            blocked.five_hour.remaining = RemainingQuotaPercent::new(remaining)?;
+            blocked.0.five_hour.remaining = RemainingQuotaPercent::new(remaining)?;
             assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
         }
         let mut blocked = snapshot.clone();
-        blocked.weekly_remaining = RemainingQuotaPercent::new(0.0)?;
+        blocked.0.weekly_remaining = RemainingQuotaPercent::new(0.0)?;
         assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
         blocked = snapshot.clone();
-        blocked.five_hour.resets_at = 100;
+        blocked.0.five_hour.resets_at = 100;
         assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
         blocked = snapshot.clone();
-        blocked.weekly_resets_at = 100;
+        blocked.0.weekly_resets_at = 100;
         assert!(!blocked.has_fresh_premium_quota(&key, 100, 100));
         Ok(())
     }
@@ -1127,7 +1119,7 @@ while IFS= read -r request; do :; done
         assert_eq!(key.len(), 64);
         assert!(!key.contains("workspace-a"));
         let snapshot = decode_codex_workspace_quota(&account, &limits, &key, 100)?;
-        assert_eq!(snapshot.five_hour.account_key, key);
+        assert_eq!(snapshot.quota().five_hour.account_key, key);
         assert!(snapshot.has_fresh_premium_quota(&key, 100, 100));
 
         let mut changed_workspace = account.clone();

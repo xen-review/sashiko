@@ -79,13 +79,15 @@ effort adaptation. The installed daemon continues its existing admission policy.
 
 ## Premium Quota Predicate
 
-The separate has_fresh_premium_quota predicate evaluates an already decoded
-snapshot against a caller-supplied account key, observation start and current
-time. It requires an observation from that query no more than 20 seconds old,
-unexpired five-hour and weekly windows, strictly more than 50% five-hour
-remaining and positive weekly remaining. Invalid times, mismatched identities,
-expired windows and exhausted allowances return false. This is separate from the
-lower-threshold scheduler policy and does not change its decisions.
+The separate has_fresh_premium_quota predicate accepts only the private-field
+workspace snapshot produced by the workspace decoder or reader, not the older
+login-only snapshot. It compares a caller-supplied account key, observation start
+and current time. It requires an observation from that query no more than 20
+seconds old, unexpired five-hour and weekly windows, strictly more than 50%
+five-hour remaining and positive weekly remaining. Invalid times, mismatched
+identities, expired windows and exhausted allowances return false. This is
+separate from the lower-threshold scheduler policy and does not change its
+decisions.
 
 This predicate is unwired and does not authorize a model call. A caller must
 actually initiate a fresh metadata read for each call, verify subscription
@@ -117,6 +119,13 @@ or wire the reader into scheduler or provider admission. Account changes after
 the metadata read, weekly and time reserves, retries, runtime configuration,
 and durable pause behavior remain separate gates. No raw IDs are persisted or
 logged by this reader and no automatic review is enabled by this checkpoint.
+
+The saved targeted Terra replay's session creator_account_id matched the current
+workspace and quota IDs in a metadata-only comparison. Codex documents
+forced_chatgpt_workspace_id and forced_login_method as login restrictions, but
+also says a mismatch logs the user out and exits. That makes a negative test or
+blind production use against shared credentials unsafe. The session ID comparison
+occurs after session creation and cannot alone prevent a wrong-account call.
 
 ## Evidence and Ownership
 
