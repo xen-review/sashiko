@@ -1,8 +1,9 @@
 # Attributable Human-Review Evidence
 
-Status: proposed incremental, view-only architecture for the outstanding human
-review filter. Approval is required for the evidence store and positive-match
-policy before implementation. Existing Sashiko and staging states are unchanged.
+Status: integrated opt-in store and direct-reviewer-reply positive-match policy
+approved by the operator on 2026-10-27. Implement incrementally with deterministic
+tests. Historical backfill bounds still need separate approval before a live
+backfill. Existing Sashiko and staging states are unchanged.
 
 ## Existing Inputs
 

@@ -333,8 +333,14 @@ grounds an opt-in, separately versioned provenance store in existing parsed mail
 and exact reply links. Recommended first positive filter: direct replies with
 unquoted Reviewed-by matching the parsed From mailbox, not quoted or author-carried
 claims. It distinguishes recorded attribution from authenticated identity and
-keeps partial/unknown/withdrawal limitations explicit. Store/policy approval and
-bounded historical-backfill approval are pending; no human classifier is enabled.
+keeps partial/unknown/withdrawal limitations explicit. The operator approved the
+integrated opt-in store and direct-reply policy on 2026-10-27. The first parser
+increment passes fake-mail checks for exact single reply targets, single matching
+mailboxes, MIME decoding, spoofed display names, duplicate headers, and excluded
+quoted, forwarded, fenced, signature, and patch-submission content. Input and
+decoded body sizes are bounded. No store, live classifier, or automatic backfill
+is enabled by this parser-only increment. Historical backfill remains separately
+bounded and is not run automatically.
 
 Done when: deterministic fixtures cover exact/upstream-rewritten patch identities,
 partial series, stale/missing refs, staging versus master, and human-review evidence;

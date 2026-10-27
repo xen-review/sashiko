@@ -45,6 +45,170 @@ pub struct Patch {
     pub part_index: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectReviewClaim {
+    pub source_message_id: String,
+    pub target_message_id: String,
+    pub reviewer_mailbox: String,
+    pub trailer: String,
+    pub body_line: usize,
+    pub source_hash: String,
+}
+
+fn review_mailbox(address: &str) -> Option<String> {
+    if address
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    let (local, domain) = address.rsplit_once('@')?;
+    if local.is_empty() || domain.is_empty() || local.contains('@') {
+        return None;
+    }
+    Some(format!("{local}@{}", domain.to_ascii_lowercase()))
+}
+
+fn review_trailer_mailbox(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let raw = format!("From: {value}\r\n\r\n");
+    let message = MessageParser::default()
+        .with_address_headers()
+        .parse(raw.as_bytes())?;
+    let mut addresses = message.from()?.iter();
+    let mailbox = review_mailbox(addresses.next()?.address()?)?;
+    if addresses.next().is_some() {
+        return None;
+    }
+    Some(mailbox)
+}
+
+fn unquoted_review_trailer(body: &str, reviewer: &str) -> Option<(usize, String)> {
+    let mut fence = None;
+    for (index, line) in body.lines().enumerate() {
+        if line == "-- "
+            || line == "---"
+            || line.starts_with("From:")
+            || line.contains("Original Message")
+            || line.contains("Forwarded message")
+        {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let marker = &trimmed[..3];
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+            continue;
+        }
+        if fence.is_some() || line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(value) = line.strip_prefix("Reviewed-by:") else {
+            continue;
+        };
+        if review_trailer_mailbox(value.trim()).as_deref() == Some(reviewer) {
+            return Some((index + 1, line.to_string()));
+        }
+    }
+    None
+}
+
+pub fn extract_direct_review_claims(raw_email: &[u8]) -> Result<Vec<DirectReviewClaim>> {
+    use sha2::{Digest, Sha256};
+    if raw_email.len() > 1024 * 1024 {
+        return Err(anyhow!("Human-review source exceeds the 1 MiB byte limit"));
+    }
+    let message = MessageParser::default()
+        .with_mime_headers()
+        .with_address_headers()
+        .with_message_ids()
+        .header_text(mail_parser::HeaderName::Subject)
+        .parse(raw_email)
+        .ok_or_else(|| anyhow!("Failed to parse human-review source"))?;
+    for name in [
+        mail_parser::HeaderName::From,
+        mail_parser::HeaderName::MessageId,
+        mail_parser::HeaderName::InReplyTo,
+        mail_parser::HeaderName::Subject,
+    ] {
+        if message
+            .headers()
+            .iter()
+            .filter(|header| header.name == name)
+            .count()
+            != 1
+        {
+            return Ok(Vec::new());
+        }
+    }
+    let Some(source) = message.message_id().filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let target = match message.in_reply_to() {
+        HeaderValue::Text(value) => value.as_ref(),
+        HeaderValue::TextList(values) if values.len() == 1 => values[0].as_ref(),
+        _ => return Ok(Vec::new()),
+    };
+    let Some(from) = message.from() else {
+        return Ok(Vec::new());
+    };
+    let mut addresses = from.iter();
+    let Some(reviewer) = addresses
+        .next()
+        .and_then(|address| address.address())
+        .and_then(review_mailbox)
+    else {
+        return Ok(Vec::new());
+    };
+    if addresses.next().is_some()
+        || target.is_empty()
+        || target == source
+        || !message
+            .subject()
+            .unwrap_or("")
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("re:")
+        || message.text_body_count() != 1
+    {
+        return Ok(Vec::new());
+    }
+    let Some(body) = message.body_text(0) else {
+        return Ok(Vec::new());
+    };
+    if body.len() > 1024 * 1024 {
+        return Err(anyhow!(
+            "Decoded human-review body exceeds the 1 MiB byte limit"
+        ));
+    }
+    if body
+        .lines()
+        .any(|line| line.starts_with("diff --git ") || line.starts_with("+++ "))
+    {
+        return Ok(Vec::new());
+    }
+    let Some((body_line, trailer)) = unquoted_review_trailer(&body, &reviewer) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![DirectReviewClaim {
+        source_message_id: source.to_string(),
+        target_message_id: target.to_string(),
+        reviewer_mailbox: reviewer,
+        trailer,
+        body_line,
+        source_hash: Sha256::digest(raw_email)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    }])
+}
+
 pub fn extract_received_date(raw_email: &[u8]) -> Option<i64> {
     let header_end = raw_email
         .windows(4)
@@ -598,6 +762,148 @@ pub fn inject_changelog_into_git_show(git_show: &str, changelog: &str) -> String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_review_claims_decode_mime_without_trusting_alias_headers() -> Result<()> {
+        let raw = concat!(
+            "From: =?utf-8?q?Reviewer?= <reviewer@EXAMPLE.invalid>\r\n",
+            "X-Original-From: Other <other@example.invalid>\r\n",
+            "Message-ID: <mime-review@example.invalid>\r\n",
+            "In-Reply-To: <patch@example.invalid>\r\n",
+            "Subject: Re: [PATCH] change\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=review-part\r\n\r\n",
+            "--review-part\r\nContent-Type: text/plain; charset=utf-8\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n\r\n",
+            "Reviewed-by: Reviewer <reviewer@example=2Einvalid>\r\n",
+            "> diff --git a/file b/file\r\n",
+            "--review-part\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<p>Reviewed-by: Other &lt;other@example.invalid&gt;</p>\r\n",
+            "--review-part--\r\n",
+        );
+        let claims = extract_direct_review_claims(raw.as_bytes())?;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].reviewer_mailbox, "reviewer@example.invalid");
+        assert_eq!(
+            claims[0].trailer,
+            "Reviewed-by: Reviewer <reviewer@example.invalid>"
+        );
+        assert_eq!(claims[0].body_line, 1);
+        assert!(
+            extract_direct_review_claims(
+                raw.replace("reviewer@example=2Einvalid", "other@example.invalid")
+                    .as_bytes()
+            )?
+            .is_empty()
+        );
+        assert!(
+            extract_direct_review_claims(
+                raw.replace("Subject: Re:", "Subject: [PATCH] original\r\nSubject: Re:")
+                    .as_bytes()
+            )?
+            .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn direct_review_claims_require_matching_unquoted_reply_attribution() -> Result<()> {
+        let raw = |from: &str, parent: &str, body: &str| {
+            format!(
+                "From: {from}\r\nMessage-ID: <review@example.invalid>\r\nIn-Reply-To: {parent}\r\nSubject: Re: [PATCH v2] change\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+            )
+        };
+        let valid = raw(
+            "Reviewer <reviewer@example.invalid>",
+            "<patch-v2@example.invalid>",
+            "Checked the change.\n\nReviewed-by: Reviewer <reviewer@example.invalid>\n",
+        );
+        let claims = extract_direct_review_claims(valid.as_bytes())?;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].source_message_id, "review@example.invalid");
+        assert_eq!(claims[0].target_message_id, "patch-v2@example.invalid");
+        assert_eq!(claims[0].reviewer_mailbox, "reviewer@example.invalid");
+        assert_eq!(claims[0].body_line, 3);
+        assert_eq!(claims[0].source_hash.len(), 64);
+        for body in [
+            "> Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "    Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "```\nReviewed-by: Reviewer <reviewer@example.invalid>\n```",
+            "~~~\nReviewed-by: Reviewer <reviewer@example.invalid>\n~~~",
+            "-- \nReviewed-by: Reviewer <reviewer@example.invalid>",
+            "-----Original Message-----\nReviewed-by: Reviewer <reviewer@example.invalid>",
+            "Reviewed-by: Other <other@example.invalid>",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>, Other <other@example.invalid>",
+            "Reviewed-by: reviewer@example.invalid <spoof@example.invalid>",
+            "Tested-by: Reviewer <reviewer@example.invalid>",
+            "Acked-by: Reviewer <reviewer@example.invalid>",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>\ndiff --git a/file b/file",
+        ] {
+            assert!(
+                extract_direct_review_claims(
+                    raw(
+                        "Reviewer <reviewer@example.invalid>",
+                        "<patch-v2@example.invalid>",
+                        body
+                    )
+                    .as_bytes()
+                )?
+                .is_empty(),
+                "{body}"
+            );
+        }
+        for from in [
+            "Reviewer <reviewer@example.invalid>, Other <other@example.invalid>",
+            "reviewer@example.invalid <spoof@example.invalid>",
+            "invalid",
+        ] {
+            assert!(
+                extract_direct_review_claims(
+                    raw(
+                        from,
+                        "<patch-v2@example.invalid>",
+                        "Reviewed-by: Reviewer <reviewer@example.invalid>"
+                    )
+                    .as_bytes()
+                )?
+                .is_empty()
+            );
+        }
+        for parent in [
+            "",
+            "<patch-v1@example.invalid> <patch-v2@example.invalid>",
+            "<review@example.invalid>",
+        ] {
+            assert!(
+                extract_direct_review_claims(
+                    raw(
+                        "Reviewer <reviewer@example.invalid>",
+                        parent,
+                        "Reviewed-by: Reviewer <reviewer@example.invalid>"
+                    )
+                    .as_bytes()
+                )?
+                .is_empty()
+            );
+        }
+        assert!(
+            extract_direct_review_claims(valid.replace("Subject: Re:", "Subject:").as_bytes())?
+                .is_empty()
+        );
+        assert!(
+            extract_direct_review_claims(
+                valid
+                    .replace(
+                        "From: Reviewer",
+                        "From: Other <other@example.invalid>\r\nFrom: Reviewer"
+                    )
+                    .as_bytes()
+            )?
+            .is_empty()
+        );
+        assert!(extract_direct_review_claims(&vec![b'x'; 1024 * 1024 + 1]).is_err());
+        Ok(())
+    }
+
     use super::*;
 
     #[test]
