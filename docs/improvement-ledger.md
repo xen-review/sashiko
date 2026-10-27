@@ -667,6 +667,14 @@ reviews; active/completed turn and tool counters; elapsed/budget data; actual
 backend effort and generation visibility; and native harness/whole-series
 attribution. No model call or automatic quota controller was started.
 
+Signed commit a535d045 is pushed and deployed at a verified idle boundary.
+Private database/binary/config backups are retained; quick_check passes,
+schema 17 and all review-state counts are unchanged. Both live detail routes
+preserve human provenance and omit active snapshots on terminal records. The
+synthetic fixture is stopped. Existing authentication, muted delivery and
+codex-cli / gpt-6-luna / configured medium settings are unchanged; effective
+backend effort remains Unknown. No telemetry-specific live review was queued.
+
 Show model/provider/actual effort, completed and active turns, tool calls,
 input/output/cached tokens, elapsed time, and budget consumption in the web UI's
 status/progress surface. Preserve final totals on completed, failed, timed-out,

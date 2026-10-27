@@ -5,6 +5,56 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Daytime Active-Usage Checkpoint
+
+At 16:07 CET on 2026-10-27, source/runtime a535d045 is signed, pushed to
+origin/add-xen-support and deployed. It follows the bounded metadata-only
+Codex reader 6d5cf3fd, which remains unwired: no admission controller or watcher
+is enabled. Login/plan comparison is not opaque account/workspace binding;
+weekly reserve, durable state, cancellation and wakeup integration remain gates.
+
+The active-usage increment preserves measured stage coverage through a separate
+workflow/worker/local accounting event and typed subprocess record. The daemon
+retains latest patch/stage reports per worker run, replaces duplicates, rejects
+stale output and caps reports at 256 with explicit truncation. Both detail
+routes attach snapshots only after existing permission/redaction checks.
+Pre-screen/planning accounting cannot advance counted-stage progress. The UI
+keeps unknown usage distinct from measured zero and labels latest reports, not
+workflow totals or in-flight counters. Native harness attribution and terminal
+retention across failures, timeouts and cancellation are still incomplete.
+
+Focused fake-provider, JSON protocol, bounded-registry and API tests pass.
+Synthetic browser checks cover missing/zero, escaped hostile names, polling,
+reload/reconnect, truncation, terminal removal and 390/1440-pixel containment.
+One positive update arrived after its 10-second wait timed out; matching fresh
+API/rendered counters were then verified, not a latency guarantee. The full
+gate passes 1,160 library tests (two ignored), 49 main, seven CLI, 28 integration,
+formatting and all Clippy profiles. A disk-full all-feature link was repaired
+with package-scoped debug cleanup and CARGO_INCREMENTAL=0. The user mirror
+timer was paused only during test/deploy isolation and restored unchanged.
+Review data, private backups, artifacts and user-owned files were preserved.
+
+Private before-live-stage-usage-20261027-150754.db passed quick_check; matching
+rollback binary and Settings snapshot remain outside Git. Installed/release
+SHA-256: 838c44c4a290f26d82ec5a0b247f39094c583a6b62fd8ed0625bd2a701bd1cc3.
+Service active PID 1188587, schema 17 and API health verified; raw message count
+was 4,284 at deployment. Review counts remained 110 Reviewed, 90 Cancelled,
+27 Failed, 195 Failed To Apply and 46 Incomplete; none Pending or In Review.
+No live review was started solely to test telemetry. Normal new-mail ingestion
+now yields seven positive human-evidence series, including 468; both detail
+routes retain provenance and omit active snapshots for terminal reviews.
+
+Configuration bytes are unchanged. Runtime remains codex-cli / gpt-6-luna /
+configured medium, 1,800-second review timeout, effective effort Unknown, muted
+delivery and existing web-admin authentication. At 16:09:38 CET authenticated
+metadata reports 63% five-hour and 46% weekly remaining; five-hour reset
+19:27:29 CET. Earlier samples were 78%/48% at 15:35 and 69%/47% at 15:49;
+these shared-account percentages are not exact tokens or isolated daemon burn.
+No open matching PR exists in the fork or parent; no Stage 2 findings are pending
+on this branch. No self-review, premium trial, benchmark, public post, paid
+overage, historical backfill, queue refill or watcher was started. First live
+staging publication remains unresolved; do not manufacture fetch evidence.
+
 ### Daytime Maintenance Checkpoint
 
 At 15:15 CET on 2026-10-27, source/runtime 2fbfa794 is signed, pushed and
