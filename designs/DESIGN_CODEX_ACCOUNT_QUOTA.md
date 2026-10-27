@@ -5,6 +5,18 @@ no-ask directive. The first increment is a disabled, pure five-hour admission
 policy with deterministic tests. It is not an enabled controller, account reader,
 scheduler, model-call authorization, or overnight watcher.
 
+## First Implementation Checkpoint
+
+The pure policy lives beside the unchanged QuotaManager in src/ai/quota.rs.
+It exposes account-scoped typed admission state and a separate FiveHourReady
+decision, not general spending authorization. Time and samples are supplied
+explicitly; it creates no task, network request, sleep or process. Disabled
+evaluation bypasses the gate while preserving the caller's retained pause.
+All five fake-clock tests and make check-pr pass, including 1,150 library tests
+(two ignored), 49 main, seven CLI and 28 integration tests. This is caller-carried
+state testing, not proof of database restart recovery. No runtime caller or
+settings toggle is installed, and the deployed daemon remains unchanged.
+
 ## Evidence and Ownership
 
 The authenticated Codex app-server metadata reader already reports the shared

@@ -578,9 +578,14 @@ Design decisions and implementation gates:
 
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
-a disabled pure five-hour admission policy as the first increment. The existing
-transient QuotaManager remains separate. No account adapter, persisted controller,
-automatic pause/resume or watcher is implemented or enabled by the design.
+a disabled pure five-hour admission policy as the first increment. Its five
+fake-clock tests now pass: strict threshold edges, reset barriers, freshness,
+wrong accounts, shifted/late resets, unknown telemetry, disabled state retention,
+invalid inputs and timestamp overflow. The full make check-pr gate passes 1,150
+library tests (two ignored), 49 main, seven CLI and 28 integration tests, plus
+formatting and all Clippy profiles. The existing transient QuotaManager remains
+unchanged. No account adapter, persisted controller, automatic pause/resume or
+watcher is implemented or enabled; the pure policy has no runtime caller.
 
 Goal: use fresh authenticated Codex five-hour remaining quota and reset time to
 plan review allocations over the remaining window, retaining a debugging reserve.

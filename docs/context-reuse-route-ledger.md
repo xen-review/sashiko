@@ -7,7 +7,7 @@ the general improvement ledger retains other independent tasks.
 
 ### Deployed Human-Evidence Checkpoint
 
-Latest source/runtime at 01:53 CET on 2026-10-27: 47cdd5c1 is signed, pushed to
+Latest deployed source/runtime at 01:53 CET on 2026-10-27: 47cdd5c1 is signed, pushed to
 origin/add-xen-support, and deployed. Parser foundation d1e13b6e and opt-in
 storage d4549623 precede the API/UI increment. Installed/release SHA-256:
 bfa5ef8d2baad4dca76b58d466ae761eabaa45bf20984385bdb2ebb7c4fc0f08.
@@ -43,9 +43,13 @@ benchmark, PR, public post, paid overage, or watcher was started.
 
 The first staging snapshot remains unobserved. Do not force a fetch, mutate its
 timestamps, weaken covering-fetch checks, or restart merely for reassurance.
-Quota planning/deferral and complete native/live usage remain open. Next useful
-work is the disabled quota-policy design and deterministic fake-clock tests,
-without enabling automatic pause/resume or making model calls.
+Quota planning/deferral and complete native/live usage remain open. The quota
+design is committed as ed14a3cf and the first disabled pure policy now passes
+five fake-clock tests and the full gate (1,150 library, two ignored; 49 main,
+seven CLI, 28 integration). Source carries this unwired foundation; the deployed
+human-evidence release stays unchanged. Authenticated metadata adapter, weekly
+reserve checks, settings, persisted state, cancellation, wakeup scheduling and
+paused-state UI remain future gates. No automatic controller is enabled.
 
 ### Earlier Exact-Ancestry Checkpoint
 
