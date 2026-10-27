@@ -398,13 +398,25 @@ mode = "agent_harness"
 
 [review.agent_harness]
 strategy = "whole_series"
-instruction_files = ["agents/reviewer.md", "skills/review/SKILL.md"]
+instruction_files = [
+  "agents/friendly-series-review-with-suggestions.agent.md",
+  "skills/friendly-series-review-with-suggestions/SKILL.md",
+  "skills/xen-coding-style/SKILL.md",
+  "../xen/CODING_STYLE",
+]
 max_generations = 12
 max_tool_calls = 30
 max_input_tokens = 400000
 max_output_tokens = 20000
 timeout_seconds = 600
 ```
+
+These sample paths assume the settings file is in the Sashiko checkout and a
+sibling Xen checkout supplies CODING_STYLE. Adjust paths for your installation;
+the daemon's private settings file normally needs absolute in-tree paths. The
+friendly-series-review-with-suggestions skill governs code checking and reply
+content. Its agent selects that procedure, while the style reference governs
+Xen formatting and Sashiko's artifact contract governs transport/storage.
 
 All limits must be positive. The strategy defaults to `whole_series` when
 omitted. Set `strategy = "sequential_patches"` to review selected patches in
@@ -438,6 +450,17 @@ are available through review details. The UI separates reviewer notes and reply
 drafts and explicitly labels them not independently verified. No email, forge
 comment, or deferred embargo notification is generated from harness output.
 Existing delivery policy remains in force for other workflow results.
+
+The model returns JSON artifacts, not a chat-only report: reviewer_notes plus
+reply_drafts carrying each exact patch index, message ID and plain-text body.
+Whole-series returns all selected replies together. Sequential mode returns
+one patch's notes and reply per checkpoint. Neither strategy writes .review;
+the daemon owns database persistence and UI presentation, while local CLI
+output is returned to its caller. The samples retain .review file conventions
+only for direct agents authorized to write review artifacts. Sashiko currently
+has no automatic .review import/export or previous-database-review input. Prior
+checkpoints in the same conversation are available; unrelated external reviews
+must be supplied explicitly and are not assumed to have been consulted.
 
 Sequential daemon invocations atomically store each checkpoint before the next
 patch starts. Earlier completed patches and replies remain available if a later
