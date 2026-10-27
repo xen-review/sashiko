@@ -792,8 +792,10 @@ synthetic desktop/mobile checks cover missing versus zero cache values, polling,
 terminal cleanup and layout. Resolved call/tool limits, input/output thresholds
 and the review timeout are also displayed exactly. Token thresholds are checked
 between calls and can be overshot by one response, not hard generation caps.
-The snapshot does not expose elapsed time, the per-call timeout, backend-native
-generations or unreported in-flight tokens.
+Approximate elapsed time advances from the harness's monotonic deadline clock
+even while a provider call is pending; fake-clock and responsive fixture checks
+cover updates and layout. The snapshot does not expose the per-call timeout,
+backend-native generations or unreported in-flight tokens.
 
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 

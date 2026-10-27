@@ -60,7 +60,7 @@ struct ActiveReviewProgress {
     update_id: u64,
     message: String,
     stage_usage: ActiveStageUsageSnapshot,
-    harness_usage: Option<crate::agent_harness::session::HarnessProgress>,
+    harness_usage: Option<(crate::agent_harness::session::HarnessProgress, Instant)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -203,9 +203,25 @@ impl ReviewProgressRegistry {
         &self,
         patchset_id: i64,
     ) -> Option<crate::agent_harness::session::HarnessProgress> {
-        self.lock_entries()
+        self.harness_usage_at(patchset_id, Instant::now())
+    }
+
+    fn harness_usage_at(
+        &self,
+        patchset_id: i64,
+        now: Instant,
+    ) -> Option<crate::agent_harness::session::HarnessProgress> {
+        let entries = self.lock_entries();
+        let (usage, observed_at) = entries
             .get(&(patchset_id, None))
-            .and_then(|entry| entry.harness_usage.clone())
+            .and_then(|entry| entry.harness_usage.as_ref())?;
+        let mut usage = usage.clone();
+        usage.elapsed_seconds = usage.elapsed_seconds.saturating_add(
+            now.checked_duration_since(*observed_at)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        Some(usage)
     }
 
     fn record_harness_usage(
@@ -214,11 +230,21 @@ impl ReviewProgressRegistry {
         run_id: u64,
         usage: crate::agent_harness::session::HarnessProgress,
     ) {
+        self.record_harness_usage_at(patchset_id, run_id, usage, Instant::now());
+    }
+
+    fn record_harness_usage_at(
+        &self,
+        patchset_id: i64,
+        run_id: u64,
+        usage: crate::agent_harness::session::HarnessProgress,
+        observed_at: Instant,
+    ) {
         let mut entries = self.lock_entries();
         if let Some(entry) = entries.get_mut(&(patchset_id, None))
             && entry.run_id == run_id
         {
-            entry.harness_usage = Some(usage);
+            entry.harness_usage = Some((usage, observed_at));
         }
     }
 
@@ -294,6 +320,7 @@ impl Drop for ReviewProgressCleanup {
 #[cfg(test)]
 mod review_progress_tests {
     use super::ReviewProgressRegistry;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn harness_progress_is_series_scoped_and_rejects_stale_runs() {
@@ -305,6 +332,7 @@ mod review_progress_tests {
             tool_calls_attempted: 0,
             provider_in_flight: true,
             reported_usage: None,
+            elapsed_seconds: 7,
             limits: crate::agent_harness::session::HarnessProgressLimits {
                 provider_calls: 30,
                 source_tool_calls: 400,
@@ -313,10 +341,42 @@ mod review_progress_tests {
                 review_timeout_seconds: 3600,
             },
         };
-        registry.record_harness_usage(1, first.run_id, usage.clone());
+        let observed_at = Instant::now();
+        registry.record_harness_usage_at(1, first.run_id, usage.clone(), observed_at);
         assert_eq!(
-            registry.harness_usage(1).unwrap().provider_calls_attempted,
+            registry
+                .harness_usage_at(1, observed_at + Duration::from_secs(15))
+                .unwrap()
+                .elapsed_seconds,
+            22
+        );
+        assert_eq!(
+            registry
+                .harness_usage_at(1, observed_at - Duration::from_secs(1))
+                .unwrap()
+                .elapsed_seconds,
+            7
+        );
+        assert_eq!(
+            registry
+                .harness_usage_at(1, observed_at)
+                .unwrap()
+                .provider_calls_attempted,
             1
+        );
+        usage.elapsed_seconds = 17;
+        registry.record_harness_usage_at(
+            1,
+            first.run_id,
+            usage.clone(),
+            observed_at + Duration::from_secs(10),
+        );
+        assert_eq!(
+            registry
+                .harness_usage_at(1, observed_at + Duration::from_secs(15))
+                .unwrap()
+                .elapsed_seconds,
+            22
         );
         assert!(registry.harness_usage(2).is_none());
 

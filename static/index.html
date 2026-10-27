@@ -4582,13 +4582,15 @@
             const providerLimit = valid(limits?.provider_calls) && limits.provider_calls > 0 ? ` / ${format(limits.provider_calls)}` : '';
             const toolLimit = valid(limits?.source_tool_calls) && limits.source_tool_calls > 0 ? ` / ${format(limits.source_tool_calls)}` : '';
             const tokenLimits = valid(limits?.input_tokens) && limits.input_tokens > 0 && valid(limits?.output_tokens) && limits.output_tokens > 0 ? `<div class="text-muted-sm">Between-call token thresholds: input ${format(limits.input_tokens)} &middot; output ${format(limits.output_tokens)}</div>` : '';
-            const timeLimit = valid(limits?.review_timeout_seconds) && limits.review_timeout_seconds > 0 ? `<div class="text-muted-sm">Review time limit: ${format(limits.review_timeout_seconds)} s</div>` : '';
+            const elapsed = valid(snapshot.elapsed_seconds) ? `Elapsed: ${format(snapshot.elapsed_seconds)} s (approx.)` : '';
+            const timeLimit = valid(limits?.review_timeout_seconds) && limits.review_timeout_seconds > 0 ? `Review time limit: ${format(limits.review_timeout_seconds)} s` : '';
+            const timing = elapsed || timeLimit ? `<div class="text-muted-sm">${[elapsed, timeLimit].filter(Boolean).join(' &middot; ')}</div>` : '';
             return `<div style="margin:16px 0;min-width:0;overflow-wrap:anywhere;">
                 <h3 style="font-size:1rem;">Harness Progress</h3>
                 <div class="text-muted-sm">Provider calls: ${format(snapshot.provider_calls_attempted)}${providerLimit} attempted &middot; ${format(snapshot.provider_calls_with_usage)} reported &middot; Source tools: ${format(snapshot.tool_calls_attempted)}${toolLimit}${snapshot.provider_in_flight ? ' &middot; In flight' : ''}</div>
                 <div class="text-muted-sm">Reported tokens: ${tokens}</div>
                 ${tokenLimits}
-                ${timeLimit}
+                ${timing}
             </div>`;
         }
 

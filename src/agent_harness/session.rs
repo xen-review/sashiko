@@ -47,6 +47,7 @@ pub struct HarnessProgress {
     pub tool_calls_attempted: usize,
     pub provider_in_flight: bool,
     pub reported_usage: Option<AiUsage>,
+    pub elapsed_seconds: u64,
     pub limits: HarnessProgressLimits,
 }
 
@@ -62,13 +63,19 @@ pub struct HarnessProgressLimits {
 pub(crate) type HarnessProgressCallback = Box<dyn Fn(HarnessProgress) + Send + Sync>;
 
 impl HarnessTrace {
-    fn progress(&self, provider_in_flight: bool, limits: &AgentHarnessSettings) -> HarnessProgress {
+    fn progress(
+        &self,
+        provider_in_flight: bool,
+        limits: &AgentHarnessSettings,
+        elapsed_seconds: u64,
+    ) -> HarnessProgress {
         HarnessProgress {
             provider_calls_attempted: self.provider_calls,
             provider_calls_with_usage: self.call_usage.len(),
             tool_calls_attempted: self.tool_calls,
             provider_in_flight,
             reported_usage: (!self.call_usage.is_empty()).then(|| self.usage.clone()),
+            elapsed_seconds,
             limits: HarnessProgressLimits {
                 provider_calls: limits.max_generations,
                 source_tool_calls: limits.max_tool_calls,
@@ -98,6 +105,7 @@ pub struct HarnessSession {
     system: String,
     declarations: Vec<AiTool>,
     limits: AgentHarnessSettings,
+    started_at: tokio::time::Instant,
     deadline: tokio::time::Instant,
     stopped: bool,
     progress: Option<HarnessProgressCallback>,
@@ -129,11 +137,13 @@ impl HarnessSession {
             serde_json::to_string(&bodies)?,
             crate::ai::claude_cli::tool_catalog(&declarations),
         );
+        let started_at = tokio::time::Instant::now();
         Ok(Self {
             system,
             declarations,
             limits: limits.clone(),
-            deadline: tokio::time::Instant::now() + Duration::from_secs(limits.timeout_seconds),
+            started_at,
+            deadline: started_at + Duration::from_secs(limits.timeout_seconds),
             stopped: false,
             progress: None,
             trace: HarnessTrace::default(),
@@ -175,7 +185,11 @@ impl HarnessSession {
         if tokio::time::Instant::now() >= self.deadline {
             self.stopped = true;
             if let Some(callback) = &self.progress {
-                callback(self.trace.progress(false, &self.limits));
+                callback(self.trace.progress(
+                    false,
+                    &self.limits,
+                    self.started_at.elapsed().as_secs(),
+                ));
             }
             return HarnessStatus::TimedOut;
         }
@@ -193,7 +207,10 @@ impl HarnessSession {
         };
         self.stopped = !matches!(&status, HarnessStatus::Completed { .. });
         if let Some(callback) = &self.progress {
-            callback(self.trace.progress(false, &self.limits));
+            callback(
+                self.trace
+                    .progress(false, &self.limits, self.started_at.elapsed().as_secs()),
+            );
         }
         status
     }
@@ -285,7 +302,11 @@ async fn run_session(
     let declarations = &session.declarations;
     let report_progress = |trace: &HarnessTrace, provider_in_flight| {
         if let Some(callback) = &session.progress {
-            callback(trace.progress(provider_in_flight, limits));
+            callback(trace.progress(
+                provider_in_flight,
+                limits,
+                session.started_at.elapsed().as_secs(),
+            ));
         }
     };
     trace
@@ -823,11 +844,12 @@ mod tests {
             provider_calls: 1,
             ..Default::default()
         };
-        let in_flight = trace.progress(true, &limits);
+        let in_flight = trace.progress(true, &limits, 7);
         assert_eq!(in_flight.provider_calls_attempted, 1);
         assert_eq!(in_flight.provider_calls_with_usage, 0);
         assert!(in_flight.provider_in_flight);
         assert!(in_flight.reported_usage.is_none());
+        assert_eq!(in_flight.elapsed_seconds, 7);
         assert_eq!(in_flight.limits.provider_calls, 30);
         assert_eq!(in_flight.limits.source_tool_calls, 400);
         assert_eq!(in_flight.limits.input_tokens, 400_000);
@@ -847,9 +869,10 @@ mod tests {
             usage,
         });
         trace.tool_calls = 2;
-        let reported = trace.progress(false, &limits);
+        let reported = trace.progress(false, &limits, 13);
         assert_eq!(reported.provider_calls_with_usage, 1);
         assert_eq!(reported.tool_calls_attempted, 2);
+        assert_eq!(reported.elapsed_seconds, 13);
         assert!(!reported.provider_in_flight);
         let reported_usage = reported.reported_usage.unwrap();
         assert_eq!(reported_usage.prompt_tokens, 10);
@@ -866,7 +889,7 @@ mod tests {
             response_history_end: 1,
             usage: zero,
         });
-        let serialized = serde_json::to_value(zero_trace.progress(false, &limits)).unwrap();
+        let serialized = serde_json::to_value(zero_trace.progress(false, &limits, 0)).unwrap();
         assert_eq!(serialized["reported_usage"]["cached_tokens"], 0);
     }
 

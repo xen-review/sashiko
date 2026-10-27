@@ -1453,6 +1453,7 @@ mod active_review_progress_tests {
             tool_calls_attempted: 3,
             provider_in_flight: true,
             reported_usage: None,
+            elapsed_seconds: 0,
             limits: crate::agent_harness::session::HarnessProgressLimits {
                 provider_calls: 30,
                 source_tool_calls: 400,

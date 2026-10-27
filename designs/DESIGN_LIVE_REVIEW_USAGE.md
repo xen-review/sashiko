@@ -210,9 +210,20 @@ review timeout. Counts and limits are displayed exactly. Token limits are
 between-call thresholds, not hard per-response caps: one response can overshoot.
 The review timeout is distinct from the provider's per-call timeout.
 
+For live elapsed time, sample the same monotonic session clock used to set the
+harness deadline. The run-scoped registry advances that elapsed value from the
+last sample using its own monotonic observation time, so a long in-flight call
+does not freeze the display or require a provider poll. Stale-run replacement
+and cleanup still apply. The displayed whole seconds are approximate; they do
+not change or extend the deadline. Fake-clock registry tests must cover long
+in-flight intervals, backwards test times, replacement and cleanup.
+The session clock, registry advancement and approximate elapsed display are
+implemented. Fake-clock tests cover those boundaries and synthetic desktop and
+mobile checks verify the elapsed and timeout values fit without overlap.
+
 Initial rendering and polling use the same renderer, and a terminal refresh
 removes the active summary. Synthetic desktop and mobile checks cover layout,
 updates and terminal cleanup; no live review was queued. Retained terminal
-records, backend-native generations, elapsed time, per-call timeout display and
+records, backend-native generations, per-call timeout display and
 account admission remain separate work; no model or daemon configuration is
 changed by adding this display.
