@@ -1435,6 +1435,7 @@ mod active_review_progress_tests {
         progress.report_usage(crate::local_review::CompletedStageUsage {
             patch_index: 1,
             stage: "planning".to_string(),
+            outcome: crate::workflow::events::StageUsageOutcome::Unknown,
             tokens_in: 0,
             tokens_out: 0,
             tokens_cached: 0,

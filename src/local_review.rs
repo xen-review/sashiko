@@ -646,6 +646,7 @@ async fn review_single_patch(
                 }
                 crate::worker::WorkerProgressEvent::StageUsage {
                     stage,
+                    outcome,
                     tokens_in,
                     tokens_out,
                     tokens_cached,
@@ -655,6 +656,7 @@ async fn review_single_patch(
                         usage: CompletedStageUsage {
                             patch_index: p_index,
                             stage,
+                            outcome,
                             tokens_in,
                             tokens_out,
                             tokens_cached,
@@ -1422,6 +1424,8 @@ pub const STAGE_USAGE_LINE_PREFIX: &str = "stage-usage: ";
 pub struct CompletedStageUsage {
     pub patch_index: i64,
     pub stage: String,
+    #[serde(default)]
+    pub outcome: crate::workflow::events::StageUsageOutcome,
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cached: u32,
@@ -2549,6 +2553,33 @@ mod tests {
     }
 
     #[test]
+    fn stage_usage_outcomes_are_explicit_and_legacy_unknown() {
+        use crate::workflow::events::StageUsageOutcome;
+        let mut value = json!({
+            "patch_index": 1, "stage": "verification", "tokens_in": 7,
+            "tokens_out": 2, "tokens_cached": 0, "usage_coverage": null,
+        });
+        let legacy: CompletedStageUsage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.outcome, StageUsageOutcome::Unknown);
+        for (name, expected) in [
+            ("completed", StageUsageOutcome::Completed),
+            ("failed", StageUsageOutcome::Failed),
+            ("future", StageUsageOutcome::Unknown),
+        ] {
+            value["outcome"] = json!(name);
+            let report: CompletedStageUsage = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(report.outcome, expected);
+            assert_eq!(
+                serde_json::from_str::<CompletedStageUsage>(
+                    &serde_json::to_string(&report).unwrap()
+                )
+                .unwrap(),
+                report
+            );
+        }
+    }
+
+    #[test]
     fn stage_usage_protocol_keeps_accounting_out_of_display_lines() {
         for usage_coverage in [
             None,
@@ -2562,6 +2593,7 @@ mod tests {
             let usage = CompletedStageUsage {
                 patch_index: 2,
                 stage: "planning".into(),
+                outcome: crate::workflow::events::StageUsageOutcome::Failed,
                 tokens_in: 0,
                 tokens_out: 0,
                 tokens_cached: 0,

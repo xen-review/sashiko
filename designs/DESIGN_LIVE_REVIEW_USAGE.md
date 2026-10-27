@@ -44,6 +44,35 @@ No UI or completed-result schema change is needed for this first event increment
 
 ## Remaining Gates
 
+### Failed-Stage Reporting Increment
+
+SessionFailure already retains provider-reported usage and coverage, but the
+stage's early error return emits no accounting event. Emit StageFailed with
+those measured counters before returning the original error. Unknown errors
+must carry unknown coverage rather than a claimed zero. StageFinished stays a
+success-only lifecycle event, so failed-stage accounting cannot advance the
+completed-stage progress bar or mutate workflow success/failure behavior.
+
+Propagate a typed completed/failed/unknown outcome through the existing bounded
+stage record. Older stored records without this additive field decode as
+Unknown, not as successful or failed. Keep the existing completed_stages wire
+field for compatibility, but label the UI as stage reports and show each
+outcome. No failed-stage output, reasoning text or provider error payload is
+added to the telemetry. The exact review-ID persistence and embargo boundary
+remain unchanged. This still cannot measure an interrupted backend generation.
+
+The fake truncated-provider regression proves StageFailed retains measured
+counters/coverage, no StageFinished occurs and the original error remains an
+error. The existing worker failure test proves typed propagation and incomplete
+coverage when a provider errors without usage. Protocol/storage tests preserve
+failed outcomes and legacy/future Unknown defaults. UI checks cover explicit
+completed/failed/unknown labels, missing versus zero and escaped hostile names;
+synthetic browser checks show no overflow at 390/1440 pixels. Full make check-pr
+passes 1,163 library tests (two ignored), 49 main, seven CLI and 28 integration,
+formatting and all Clippy profiles. No live review, model turn, benchmark,
+automatic replay or cancellation was started. In-flight/native and unreported
+failed-call usage remain unknown rather than being inferred from this change.
+
 ### Terminal-Retention Increment
 
 The worker timeout/cancellation boundary drops the progress guard, and

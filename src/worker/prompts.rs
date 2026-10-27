@@ -118,6 +118,7 @@ pub enum WorkerProgressEvent {
     },
     StageUsage {
         stage: String,
+        outcome: crate::workflow::events::StageUsageOutcome,
         tokens_in: u32,
         tokens_out: u32,
         tokens_cached: u32,
@@ -440,6 +441,7 @@ impl Worker {
         let current_planned = std::sync::Mutex::new(Vec::<String>::new());
         let event_cb = move |event: WorkflowEvent| {
             if let Some(progress_cb) = progress {
+                let failed = matches!(&event, WorkflowEvent::StageFailed { .. });
                 match event {
                     WorkflowEvent::StageStarted { stage_name } => {
                         if stage_name == "pre-screen" {
@@ -493,15 +495,27 @@ impl Worker {
                         tokens_out,
                         tokens_cached,
                         usage_coverage,
+                    }
+                    | WorkflowEvent::StageFailed {
+                        stage_name,
+                        tokens_in,
+                        tokens_out,
+                        tokens_cached,
+                        usage_coverage,
                     } => {
                         progress_cb(WorkerProgressEvent::StageUsage {
                             stage: stage_name.to_string(),
+                            outcome: if failed {
+                                crate::workflow::events::StageUsageOutcome::Failed
+                            } else {
+                                crate::workflow::events::StageUsageOutcome::Completed
+                            },
                             tokens_in,
                             tokens_out,
                             tokens_cached,
                             usage_coverage,
                         });
-                        if crate::workflows::is_counted_stage(project, stage_name) {
+                        if !failed && crate::workflows::is_counted_stage(project, stage_name) {
                             progress_cb(WorkerProgressEvent::StageFinished {
                                 stage: stage_name.to_string(),
                             });
@@ -1105,12 +1119,45 @@ mod tests {
             "patches": [{"diff": "diff --git a/foo.c b/foo.c\n+int x;"}]
         });
 
-        match worker.run(patchset, None).await {
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = |event| events.lock().unwrap().push(event);
+        match worker.run(patchset, Some(&progress)).await {
             Ok(_) => panic!("Expected stage failure error, got Ok"),
             Err(e) => assert!(
                 e.to_string().contains("simulated AI failure"),
                 "unexpected error: {e}"
             ),
+        }
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WorkerProgressEvent::StageFinished { .. }))
+        );
+        let failures = events
+            .iter()
+            .filter_map(|event| match event {
+                WorkerProgressEvent::StageUsage {
+                    outcome,
+                    tokens_in,
+                    tokens_out,
+                    usage_coverage,
+                    ..
+                } if *outcome == crate::workflow::events::StageUsageOutcome::Failed => {
+                    assert_eq!((*tokens_in, *tokens_out), (0, 0));
+                    *usage_coverage
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !failures.is_empty(),
+            "Failed stages must emit accounting even without reported counters"
+        );
+        for coverage in failures {
+            assert!(coverage.requests > 0);
+            assert_eq!(coverage.responses_with_usage, 0);
+            assert!(!coverage.is_complete());
         }
     }
 

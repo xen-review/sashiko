@@ -256,6 +256,7 @@ mod review_progress_tests {
         let usage = crate::local_review::CompletedStageUsage {
             patch_index: 1,
             stage: "planning".into(),
+            outcome: crate::workflow::events::StageUsageOutcome::Failed,
             tokens_in: 7,
             tokens_out: 0,
             tokens_cached: 0,
@@ -327,6 +328,7 @@ mod review_progress_tests {
         let usage = crate::local_review::CompletedStageUsage {
             patch_index: 1,
             stage: "planning".into(),
+            outcome: crate::workflow::events::StageUsageOutcome::Unknown,
             tokens_in: 0,
             tokens_out: 0,
             tokens_cached: 0,

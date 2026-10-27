@@ -570,7 +570,36 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
                     }
                 });
 
-            runner.run(&mut session).await?
+            runner.run(&mut session).await
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(cb) = event_cb {
+                    let failure = error.downcast_ref::<crate::ai::SessionFailure>();
+                    cb(WorkflowEvent::StageFailed {
+                        stage_name: self.name,
+                        tokens_in: failure
+                            .map(|failure| {
+                                u32::try_from(failure.usage.prompt_tokens).unwrap_or(u32::MAX)
+                            })
+                            .unwrap_or(0),
+                        tokens_out: failure
+                            .map(|failure| {
+                                u32::try_from(failure.usage.completion_tokens).unwrap_or(u32::MAX)
+                            })
+                            .unwrap_or(0),
+                        tokens_cached: failure
+                            .map(|failure| {
+                                u32::try_from(failure.usage.cached_tokens.unwrap_or(0))
+                                    .unwrap_or(u32::MAX)
+                            })
+                            .unwrap_or(0),
+                        usage_coverage: failure.map(|failure| failure.usage_coverage),
+                    });
+                }
+                return Err(error);
+            }
         };
 
         let tokens_in = u32::try_from(result.usage.prompt_tokens).unwrap_or(u32::MAX);
@@ -624,6 +653,92 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct EmptyState;
+
+    #[tokio::test]
+    async fn stage_failure_reports_measured_usage_without_success() -> Result<()> {
+        struct TruncatedProvider;
+        #[async_trait]
+        impl AiProvider for TruncatedProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                Ok(AiResponse {
+                    content: Some("{}".into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 21,
+                        completion_tokens: 3,
+                        total_tokens: 24,
+                        cached_tokens: Some(10),
+                    }),
+                    truncated: true,
+                })
+            }
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake-truncated".into(),
+                    context_window_size: 100_000,
+                }
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let env = crate::workflow::WorkflowEnv {
+            provider: Arc::new(TruncatedProvider),
+            tools: Arc::new(crate::toolbox::ToolBox::new(
+                temp.path().to_path_buf(),
+                None,
+            )),
+            base_dir: temp.path(),
+            context_tag: None,
+        };
+        let workflow = crate::workflow::Workflow::builder("failed-usage-events")
+            .stage(
+                Stage::builder("failed-stage")
+                    .user_prompt(PromptTemplate::new("Return JSON"))
+                    .output_format(OutputFormat::json())
+                    .reduce(|_: &mut EmptyState, _: Value| {})
+                    .build(),
+            )
+            .build();
+        let events = Mutex::new(Vec::new());
+        let callback = |event| events.lock().unwrap().push(event);
+        let error = crate::workflow::WorkflowEngine::execute(
+            &workflow,
+            &env,
+            &mut EmptyState,
+            Some(&callback),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().to_lowercase().contains("truncat"));
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WorkflowEvent::StageFinished { .. }))
+        );
+        let usage = events
+            .iter()
+            .filter_map(|event| match event {
+                WorkflowEvent::StageFailed {
+                    stage_name,
+                    tokens_in,
+                    tokens_out,
+                    tokens_cached,
+                    usage_coverage,
+                } => {
+                    assert_eq!(*stage_name, "failed-stage");
+                    assert_eq!((*tokens_in, *tokens_out, *tokens_cached), (21, 3, 10));
+                    *usage_coverage
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].requests, 1);
+        assert!(usage[0].is_complete());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stage_finished_coverage_distinguishes_missing_and_measured_zero() -> Result<()> {

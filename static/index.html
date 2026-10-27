@@ -4571,11 +4571,12 @@
             if (!Array.isArray(snapshot?.completed_stages) || !snapshot.completed_stages.length) return '';
             const rows = snapshot.completed_stages.slice(0, 256).map(record => {
                 const patch = Number.isSafeInteger(record.patch_index) && record.patch_index >= 0 ? record.patch_index === 0 ? 'Series' : `Patch ${record.patch_index}` : 'Scope unknown';
-                return `<tr><td style="width:35%;overflow-wrap:anywhere;">${escapeHtml(patch)}<br>${escapeHtml(String(record.stage || 'Unknown'))}</td><td style="overflow-wrap:anywhere;">${renderReviewTokens(record)}</td></tr>`;
+                const outcome = record.outcome === 'completed' ? 'Completed' : record.outcome === 'failed' ? 'Failed' : 'Unknown';
+                return `<tr><td style="width:35%;overflow-wrap:anywhere;">${escapeHtml(patch)}<br>${escapeHtml(String(record.stage || 'Unknown'))}<br><span class="text-muted-sm">Outcome: ${outcome}</span></td><td style="overflow-wrap:anywhere;">${renderReviewTokens(record)}</td></tr>`;
             }).join('');
             return `<div style="margin:16px 0;min-width:0;">
                 <h3 style="font-size:1rem;">${retained ? 'Retained Stage Reports' : 'Reported Stage Usage'}</h3>
-                <div class="text-muted-sm" style="overflow-wrap:anywhere;">${retained ? 'Retained completed-stage diagnostics' : 'Latest completed-stage reports'}, not a workflow total. In-flight and unretained retry usage unavailable.</div>
+                <div class="text-muted-sm" style="overflow-wrap:anywhere;">${retained ? 'Retained stage diagnostics' : 'Latest stage reports'}, not a workflow total. In-flight and unretained retry usage unavailable.</div>
                 <div style="max-height:320px;overflow:auto;margin-top:8px;"><table style="width:100%;min-width:0;table-layout:fixed;"><thead><tr><th>Stage</th><th>Reported Tokens</th></tr></thead><tbody>${rows}</tbody></table></div>
                 ${snapshot.truncated || snapshot.completed_stages.length > 256 ? '<div class="text-muted-sm">Stage reports truncated at 256 entries.</div>' : ''}
             </div>`;

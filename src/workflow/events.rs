@@ -14,6 +14,16 @@
 
 //! Structured lifecycle telemetry events emitted during workflow execution.
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageUsageOutcome {
+    Completed,
+    Failed,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 /// Lifecycle events emitted by the workflow engine.
 #[derive(Debug, Clone)]
 pub enum WorkflowEvent {
@@ -29,6 +39,13 @@ pub enum WorkflowEvent {
     },
     /// A stage has finished executing.
     StageFinished {
+        stage_name: &'static str,
+        tokens_in: u32,
+        tokens_out: u32,
+        tokens_cached: u32,
+        usage_coverage: Option<crate::ai::SessionUsageCoverage>,
+    },
+    StageFailed {
         stage_name: &'static str,
         tokens_in: u32,
         tokens_out: u32,

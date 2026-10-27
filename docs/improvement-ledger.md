@@ -718,6 +718,24 @@ usage across per-patch rows. Keep daemon progress independent of UI polling.
 Done when: API and UI tests cover live updates, terminal persistence, absent
 telemetry, reconnects, cancelled reviews, and whole-series attribution.
 
+The next increment closes one measured failure-path gap: SessionFailure already
+contains usage, but previously returned before emitting an accounting event.
+StageFailed now forwards those reported counters/coverage and returns the
+original error; failed stages never emit successful counted-stage completion.
+The existing record adds a typed completed/failed/unknown outcome with a safe
+Unknown default for historical or future values. Both live/retained tables show
+the outcome without describing failed reports as completed-stage work. No schema
+change or inferred usage is needed.
+
+A fake truncated response retains measured tokens while still failing; a
+provider error without counters stays incomplete, not a measured zero. Worker,
+protocol/storage and renderer checks pass. Full make check-pr passes 1,163
+library tests (two ignored), 49 main, seven CLI, 28 integration, formatting and
+all Clippy profiles. Synthetic browser checks cover all three outcome labels,
+hostile names and 390/1440-pixel containment. No live failure, model turn,
+replay or cancellation was induced. Complete unreported/in-flight/native and
+harness accounting remain open.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

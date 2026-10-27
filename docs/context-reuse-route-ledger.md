@@ -5,6 +5,39 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
+### Completion-Only Profile Correction
+
+At 17:32 CET on 2026-10-27, signed/pushed 379e0805 is deployed with schema 18.
+Repeated normal-review Codex warnings led to a metadata-only check of CLI
+0.164.0: tools.view_image=false leaves the view_image feature true, while
+--disable view_image makes it false. The provider now uses that supported
+feature switch and completion_profile restricted-v2, excluding cached responses
+from the older native-tool profile. Shell, Code Mode host, native MCP/tool and
+ambient-instruction restrictions remain; model and configured effort did not
+change. The Code Mode warning itself is not claimed fixed or a reason to enable
+native execution. No model turn was started for this correction.
+
+The fake-process argument test and cache-profile test pass. Full make check-pr
+passes 1,161 library tests (two ignored), 49 main, seven CLI, 28 integration,
+formatting and all Clippy profiles. Private backup
+before-codex-image-feature-20261027-163214.db passed quick_check, with matching
+rollback binary and Settings snapshot retained. Running/release SHA-256:
+b38c41ac7cf7d301fc8cf5ac9ff18a96681202492fbbc5255fc435594deddd4e.
+Service active PID 1202594 and both detail APIs healthy; configuration bytes
+are unchanged, including gpt-6-luna/medium, 1,800-second review timeout, existing
+authentication and muted delivery. No active review was interrupted.
+
+Normal ingestion completed series 469, bringing Reviewed to 111. Review 312
+has four real retained stage reports (implementation, security, concurrency,
+verification), each with measured coverage; both detail routes agree. This is
+normal live retention evidence, not a feature-specific replay or a proof of
+complete interrupted usage. Other status counts remain unchanged; the queue
+is empty. Latest quota at 17:19:47 CET was 42% five-hour/43% weekly, resetting
+19:27:29 CET. Premium calls are ineligible. Self-review remains prohibited and
+deferred. Failed-session stage usage is the next locally testable increment;
+native/harness counters, effective effort, opaque quota-account binding and
+first staging publication remain independent unfinished gates.
+
 ### Retained-Diagnostics Rollout Checkpoint
 
 At 16:50 CET on 2026-10-27, signed/pushed source 9f419024 is deployed with schema
