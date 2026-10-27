@@ -1,6 +1,6 @@
 # Sashiko Improvement Ledger
 
-Updated: 2026-10-26. Work in priority order, updating evidence and status as
+Updated: 2026-10-27. Work in priority order, updating evidence and status as
 changes are validated. Do not create work merely to keep the daemon busy.
 
 ## Operating Constraints
@@ -287,8 +287,9 @@ tests (two ignored), 49 main, seven CLI, 27 integration, formatting, and all
 Clippy profiles. The 8097 fixture is stopped. Ancestry source 113b83a5 is deployed
 at 00:38 CET on 2026-10-27 with a checked idle database backup, matching hashes,
 healthy API, unchanged schema 16, and all 99 successful series preserved. No
-positive live ancestry is claimed before the first snapshot. Attributable
-human-review evidence remains pending. No live staging
+positive live ancestry is claimed before the first snapshot. At that checkpoint,
+attributable human-review evidence was still pending; the rollout below supersedes
+that status. No live staging
 history scan or feature-specific model call has run. Ordinary
 scheduling and muted delivery are unchanged; the normal bzimage review completed
 without new issues or email, bringing Reviewed series to 99.
@@ -352,7 +353,15 @@ stale exclusion. Synthetic desktop/mobile disclosures escape hostile strings,
 fit 1280/390 pixels, restore/Clear URLs, and isolate Messages requests. The full
 API/UI make check-pr gate passes: 1,145 library tests (two ignored), 49 main,
 seven CLI, and 28 integration tests, plus formatting and all Clippy profiles.
-Backed-up live deployment is next.
+API/UI source 47cdd5c1 is deployed at 01:52 CET on 2026-10-27 with a checked
+idle database backup and matching binary hashes. Schema 17 and both detail
+routes are verified. The opt-in is enabled for normal new-mail ingestion; no
+historical backfill was run. The live positive filter correctly returns zero
+recorded evidence. All 103 Reviewed series remain preserved, with no Pending or
+In Review. Provider/model/configured medium effort, timeout, muted delivery,
+SMTP-off, and web-admin authentication remain unchanged. Current quota at
+01:53 CET is 43% five-hour and 54% weekly remaining, reset 05:03 CET; no premium
+call, self-review, or feature-specific model call was started.
 No live classifier or automatic historical backfill is enabled. Historical
 backfill remains bounded and is not run automatically.
 

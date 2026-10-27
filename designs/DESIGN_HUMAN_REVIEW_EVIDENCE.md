@@ -28,6 +28,13 @@ desktop/mobile checks at 1280/390 pixels pass with hostile strings escaped,
 working URL restoration/Clear, no Messages filter leakage, and no page overflow.
 The private fixture is stopped. No live backfill or model call was needed.
 
+Deployed as 47cdd5c1 at 01:52 CET on 2026-10-27 after a checked idle database
+backup and matching release/installed hashes. Schema 17, the enabled live filter,
+both detail routes, and preservation of 103 Reviewed series are verified. The
+live store is initially empty: normal new-mail recording is enabled, but no
+historical backfill was performed. Existing provider/effort, authentication,
+muted delivery, and no-SMTP configuration remain unchanged.
+
 ## Existing Inputs
 
 Messages retain Message-ID, author, direct In-Reply-To, body or archive-blob

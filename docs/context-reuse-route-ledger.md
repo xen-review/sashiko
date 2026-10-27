@@ -5,7 +5,49 @@ the general improvement ledger retains other independent tasks.
 
 ## Current Continuation
 
-### Deployed Staging Checkpoint
+### Deployed Human-Evidence Checkpoint
+
+Latest source/runtime at 01:53 CET on 2026-10-27: 47cdd5c1 is signed, pushed to
+origin/add-xen-support, and deployed. Parser foundation d1e13b6e and opt-in
+storage d4549623 precede the API/UI increment. Installed/release SHA-256:
+bfa5ef8d2baad4dca76b58d466ae761eabaa45bf20984385bdb2ebb7c4fc0f08.
+Private before-human-review-20261027-015113.db passed quick_check; matching
+rollback binary and Settings snapshot remain outside Git. Schema 17, active
+service PID 1132519, and API health are verified. There are 4,076 messages,
+456 series, 103 Reviewed, and no Pending or In Review. The four additional
+completed reviews were normal daemon work, not feature-specific model tests.
+
+The approved direct-reply store and positive-only filter are enabled for normal
+new-mail ingestion through server.human_review_evidence. Raw-only ambiguity and
+source/target changes invalidate current evidence without deleting provenance;
+old replies cannot be rebound to changed targets. The exact reply target and
+matching actual From/Reviewed-by mailbox are required. Both detail routes return
+bounded provenance. Row/count filtering, independent review/staging parameters,
+cache isolation, partial series, idempotency, opt-out, and the 200-record cap
+pass deterministic checks. The full gate passes 1,145 library tests (two
+ignored), 49 main, seven CLI, 28 integration, formatting, and all Clippy profiles.
+Native disclosure/escaping, Clear/URL restoration, Messages isolation, and
+1280/390-pixel containment pass. The private fixture is stopped. The live
+browser is reloaded on the enabled positive filter and correctly shows zero
+records; no historical backfill or synthetic mail was inserted into live data.
+
+Structured config comparison verifies that only the opt-in changed. Runtime
+remains codex-cli / gpt-6-luna / configured medium, 1,800-second review timeout.
+Unconfirmed backend-effective effort stays Unknown. SMTP, testing bypass, and
+sign-in-link logging remain off; web-admin authentication and muted delivery
+are preserved. No active review was interrupted. Fresh authenticated quota at
+01:53:32 CET: 43% five-hour, 54% weekly remaining; reset 05:03:09 CET. Shared
+allowance declined from 67% at 00:57 and 51% at 01:38; this is not an exact
+token count or isolated Sashiko burn. Premium calls are ineligible. No self-review,
+benchmark, PR, public post, paid overage, or watcher was started.
+
+The first staging snapshot remains unobserved. Do not force a fetch, mutate its
+timestamps, weaken covering-fetch checks, or restart merely for reassurance.
+Quota planning/deferral and complete native/live usage remain open. Next useful
+work is the disabled quota-policy design and deterministic fake-clock tests,
+without enabling automatic pause/resume or making model calls.
+
+### Earlier Exact-Ancestry Checkpoint
 
 Latest source/runtime at 00:38 CET: exact-ancestry increment 113b83a5 is signed,
 pushed, and deployed. Installed/release SHA-256:
