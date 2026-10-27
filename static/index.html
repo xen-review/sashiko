@@ -2477,6 +2477,8 @@
                     }
                     const usage = document.getElementById('active-stage-usage');
                     if (usage) usage.innerHTML = renderActiveStageUsage(data.active_stage_usage);
+                    const harnessUsage = document.getElementById('active-harness-usage');
+                    if (harnessUsage) harnessUsage.innerHTML = renderActiveHarnessUsage(data.active_harness_usage);
                 } catch (error) {
                     console.error('Failed to refresh patchset progress', error);
                 } finally {
@@ -4340,6 +4342,7 @@
                 ${failureHtml}
 
                 ${currentStatus === 'In Review' ? `<div id="active-stage-usage">${renderActiveStageUsage(data.active_stage_usage)}</div>` : ''}
+                ${currentStatus === 'In Review' ? `<div id="active-harness-usage">${renderActiveHarnessUsage(data.active_harness_usage)}</div>` : ''}
 
                 <div class="section">
                     <div class="kv"><div class="label">Author:</div><div>${(() => {
@@ -4565,6 +4568,20 @@
             const format = value => valid(value) ? formatTokenCount(value) : 'Unknown';
             const cached = cachedUnknown ? valid(record?.tokens_cached) && record.tokens_cached > 0 ? `${format(record.tokens_cached)} (partial)` : 'Unknown' : format(record?.tokens_cached);
             return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${format(record?.tokens_out)}${status}`;
+        }
+
+        function renderActiveHarnessUsage(snapshot) {
+            const valid = value => Number.isSafeInteger(value) && value >= 0;
+            if (!snapshot || !valid(snapshot.provider_calls_attempted) || !valid(snapshot.provider_calls_with_usage) || !valid(snapshot.tool_calls_attempted) || snapshot.provider_calls_with_usage > snapshot.provider_calls_attempted || typeof snapshot.provider_in_flight !== 'boolean') return '';
+            const usage = snapshot.reported_usage;
+            const hasUsage = snapshot.provider_calls_with_usage > 0 && valid(usage?.prompt_tokens) && valid(usage?.completion_tokens);
+            const cached = valid(usage?.cached_tokens) && usage.cached_tokens <= usage.prompt_tokens ? formatTokenCount(usage.cached_tokens) : 'Unknown';
+            const tokens = hasUsage ? `Input (total): ${formatTokenCount(usage.prompt_tokens)} &middot; Cached: ${cached} &middot; Output: ${formatTokenCount(usage.completion_tokens)}` : 'Unavailable';
+            return `<div style="margin:16px 0;min-width:0;overflow-wrap:anywhere;">
+                <h3 style="font-size:1rem;">Harness Progress</h3>
+                <div class="text-muted-sm">Provider calls: ${formatTokenCount(snapshot.provider_calls_with_usage)} reported / ${formatTokenCount(snapshot.provider_calls_attempted)} attempted &middot; Source tools: ${formatTokenCount(snapshot.tool_calls_attempted)}${snapshot.provider_in_flight ? ' &middot; In flight' : ''}</div>
+                <div class="text-muted-sm">Reported tokens: ${tokens}</div>
+            </div>`;
         }
 
         function renderActiveStageUsage(snapshot, retained = false) {

@@ -786,9 +786,11 @@ versus zero cache counts, tool attempts and cancellation. Whole-series and
 sequential daemon paths now publish the latest snapshot into the existing
 run-scoped registry; both protected detail APIs attach it only for an active
 matching patchset. Fake-daemon and projection checks cover call progression,
-stale-run rejection, cleanup, terminal states and embargo. The UI is not yet
-wired, and the snapshot does not expose backend-native generations or account
-for unreported in-flight tokens.
+stale-run rejection, cleanup, terminal states and embargo. The patchset header
+now shows that series snapshot once and refreshes it during active review;
+synthetic desktop/mobile checks cover missing versus zero cache values, polling,
+terminal cleanup and layout. The snapshot does not expose backend-native
+generations or account for unreported in-flight tokens.
 
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
