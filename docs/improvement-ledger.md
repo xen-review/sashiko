@@ -767,6 +767,18 @@ Five focused registry tests and full make check-pr pass: 1,165 library tests
 (two ignored), 49 main, seven CLI, 28 integration and all lint profiles. No
 live parallel series or model call was queued to test this correction.
 
+Native harness aggregation previously converted missing cached-token counters
+to measured zero, even though the Codex parser distinguishes them. The
+accumulator now retains an unknown aggregate if any recorded call omits its
+cache count, and both whole-series and checkpoint persistence use nullable
+storage. Checkpoint API totals are unknown if any recorded cache count is
+missing; explicit zero remains measured zero. Existing rows are unchanged and
+previously synthesized zeros cannot be distinguished retrospectively. Focused
+accumulator, storage and renderer checks pass, as does the full make check-pr
+gate: 1,169 library tests (two ignored), 49 main, seven CLI, 28 integration,
+formatting and all Clippy profiles. Native live progress and complete accounting
+for unreported in-flight calls remain separate open work.
+
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion
 
 Status: lower-priority follow-up requested on 2026-10-26, after the daytime

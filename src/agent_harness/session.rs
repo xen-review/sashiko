@@ -229,7 +229,7 @@ async fn run_session(
         let usage = response
             .usage
             .context("harness provider omitted token usage; refusing continuation")?;
-        accumulate_usage(&mut trace.usage, &usage)?;
+        accumulate_usage(&mut trace.usage, &usage, trace.call_usage.is_empty())?;
         trace.call_usage.push(HarnessCallUsage {
             provider_call: trace.provider_calls,
             response_history_end: trace.history.len(),
@@ -295,7 +295,11 @@ async fn run_session(
     bail!("harness provider-call limit reached without a final response")
 }
 
-pub(crate) fn accumulate_usage(total: &mut AiUsage, usage: &AiUsage) -> Result<()> {
+pub(crate) fn accumulate_usage(
+    total: &mut AiUsage,
+    usage: &AiUsage,
+    first_call: bool,
+) -> Result<()> {
     if usage
         .cached_tokens
         .is_some_and(|cached| cached > usage.prompt_tokens)
@@ -308,16 +312,20 @@ pub(crate) fn accumulate_usage(total: &mut AiUsage, usage: &AiUsage) -> Result<(
     };
     let prompt = add(total.prompt_tokens, usage.prompt_tokens)?;
     let completion = add(total.completion_tokens, usage.completion_tokens)?;
-    let cached = add(
-        total.cached_tokens.unwrap_or_default(),
-        usage.cached_tokens.unwrap_or_default(),
-    )?;
+    let cached = if first_call {
+        usage.cached_tokens
+    } else {
+        match (total.cached_tokens, usage.cached_tokens) {
+            (Some(total), Some(usage)) => Some(add(total, usage)?),
+            _ => None,
+        }
+    };
     let combined = add(prompt, completion)?;
     *total = AiUsage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: combined,
-        cached_tokens: Some(cached),
+        cached_tokens: cached,
     };
     Ok(())
 }
@@ -714,6 +722,37 @@ mod tests {
     }
 
     #[test]
+    fn usage_accounting_preserves_unknown_cached_tokens() {
+        let unknown = AiUsage {
+            prompt_tokens: 10,
+            cached_tokens: None,
+            ..Default::default()
+        };
+        let zero = AiUsage {
+            cached_tokens: Some(0),
+            ..unknown.clone()
+        };
+        let measured = AiUsage {
+            cached_tokens: Some(4),
+            ..unknown.clone()
+        };
+
+        let mut total = AiUsage::default();
+        accumulate_usage(&mut total, &unknown, true).unwrap();
+        assert_eq!(total.cached_tokens, None);
+        accumulate_usage(&mut total, &measured, false).unwrap();
+        assert_eq!(total.cached_tokens, None);
+
+        let mut total = AiUsage::default();
+        accumulate_usage(&mut total, &zero, true).unwrap();
+        assert_eq!(total.cached_tokens, Some(0));
+        accumulate_usage(&mut total, &measured, false).unwrap();
+        assert_eq!(total.cached_tokens, Some(4));
+        accumulate_usage(&mut total, &unknown, false).unwrap();
+        assert_eq!(total.cached_tokens, None);
+    }
+
+    #[test]
     fn usage_accounting_rejects_overflow_and_impossible_cache_counts() {
         let mut total = AiUsage::default();
         let impossible = AiUsage {
@@ -721,7 +760,7 @@ mod tests {
             cached_tokens: Some(2),
             ..Default::default()
         };
-        assert!(accumulate_usage(&mut total, &impossible).is_err());
+        assert!(accumulate_usage(&mut total, &impossible, true).is_err());
         total.prompt_tokens = usize::MAX;
         assert!(
             accumulate_usage(
@@ -729,7 +768,8 @@ mod tests {
                 &AiUsage {
                     prompt_tokens: 1,
                     ..Default::default()
-                }
+                },
+                true
             )
             .is_err()
         );

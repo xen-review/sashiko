@@ -160,3 +160,14 @@ events, reruns, whole-series scope, cancellation, reconnects, terminal retention
 embargo/access redaction and desktop/mobile containment. The active-stage
 snapshot is not the completed live/final usage feature. It does not authorize
 model calls, premium trials, self-review or an automatic budget controller.
+
+## Native Harness Cache Availability
+
+The harness accumulator preserves an unknown cached-token aggregate when any
+recorded provider response omits the cache count; an explicit zero remains zero.
+Whole-series and checkpoint interactions persist missing counts as SQL NULL.
+Checkpoint API totals are unknown if any recorded count is missing, and the
+existing renderer displays that distinction without inferring uncached input.
+No migration or historical rewrite is performed: older synthetic zero values
+cannot be distinguished retrospectively from measured zeros. This correction
+does not add live harness events or account for an unreported in-flight call.

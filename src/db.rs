@@ -458,7 +458,7 @@ struct PreparedHarnessCall {
     output: libsql::Value,
     tokens_in: i64,
     tokens_out: i64,
-    tokens_cached: i64,
+    tokens_cached: Option<i64>,
 }
 
 #[cfg(feature = "server")]
@@ -484,7 +484,7 @@ fn validate_checkpoint_trace(
         {
             bail!("Checkpoint call usage has inconsistent call or history boundaries");
         }
-        crate::agent_harness::session::accumulate_usage(&mut summed, &call.usage)?;
+        crate::agent_harness::session::accumulate_usage(&mut summed, &call.usage, position == 0)?;
         history_end = call.response_history_end;
     }
     if (complete
@@ -492,7 +492,7 @@ fn validate_checkpoint_trace(
         || summed.prompt_tokens != trace.usage.prompt_tokens
         || summed.completion_tokens != trace.usage.completion_tokens
         || summed.total_tokens != trace.usage.total_tokens
-        || summed.cached_tokens.unwrap_or_default() != trace.usage.cached_tokens.unwrap_or_default()
+        || summed.cached_tokens != trace.usage.cached_tokens
     {
         bail!("Checkpoint aggregate usage or terminal history does not match its calls");
     }
@@ -523,7 +523,7 @@ async fn prepare_checkpoint_calls(
             output: crate::compression::compress_string_async(&output).await,
             tokens_in: i64::try_from(call.usage.prompt_tokens)?,
             tokens_out: i64::try_from(call.usage.completion_tokens)?,
-            tokens_cached: i64::try_from(call.usage.cached_tokens.unwrap_or_default())?,
+            tokens_cached: call.usage.cached_tokens.map(i64::try_from).transpose()?,
         });
     }
     Ok(interactions)
@@ -2702,7 +2702,7 @@ impl Database {
         let usage = &outcome.execution.trace.usage;
         let tokens_in = i64::try_from(usage.prompt_tokens)?;
         let tokens_out = i64::try_from(usage.completion_tokens)?;
-        let tokens_cached = i64::try_from(usage.cached_tokens.unwrap_or_default())?;
+        let tokens_cached = usage.cached_tokens.map(i64::try_from).transpose()?;
         let output = serde_json::to_string(outcome)?;
         let compressed_input = crate::compression::compress_string_async(input).await;
         let compressed_output = crate::compression::compress_string_async(&output).await;
@@ -9267,7 +9267,9 @@ impl Database {
             "NULL"
         };
         let query = format!("SELECT s.review_id, s.state, s.checkpoint_count, s.provider_calls_end, {input_column},
-                COUNT(h.provider_call), COALESCE(SUM(ai.tokens_in), 0), COALESCE(SUM(ai.tokens_out), 0), COALESCE(SUM(ai.tokens_cached), 0)
+                COUNT(h.provider_call), COALESCE(SUM(ai.tokens_in), 0), COALESCE(SUM(ai.tokens_out), 0),
+                CASE WHEN COUNT(h.provider_call) > 0 AND COUNT(ai.tokens_cached) = COUNT(h.provider_call)
+                    THEN SUM(ai.tokens_cached) ELSE NULL END
             FROM harness_checkpoint_sessions s LEFT JOIN harness_provider_calls h ON h.review_id = s.review_id
             LEFT JOIN ai_interactions ai ON ai.id = h.interaction_id
             WHERE s.review_id IN ({placeholders}) GROUP BY s.review_id");
@@ -9283,7 +9285,7 @@ impl Database {
                 "provider_calls_attempted": if state == "active" { None } else { Some(calls) },
                 "usage_complete": state != "active" && calls == recorded,
                 "input": crate::compression::get_compressed_string_opt(&row, 4)?,
-                "tokens_in": row.get::<i64>(6)?, "tokens_out": row.get::<i64>(7)?, "tokens_cached": row.get::<i64>(8)?,
+                "tokens_in": row.get::<i64>(6)?, "tokens_out": row.get::<i64>(7)?, "tokens_cached": row.get::<Option<i64>>(8)?,
                 "checkpoints": [], "selected_patch_indexes": [], "remaining_patch_indexes": [],
             }));
         }
@@ -12618,6 +12620,8 @@ mod tests {
             let fingerprint = db
                 .initialize_checkpoint_session(review_id, r#"{"series":"exact input"}"#)
                 .await?;
+            let pending = db.get_review_details(review_id).await?.unwrap();
+            assert!(pending["tokens_cached"].is_null());
             let mut trace = HarnessTrace::default();
             let mut cursor = HarnessCheckpointCursor::default();
             for position in 0..2 {
@@ -12631,9 +12635,17 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 2,
                     total_tokens: 12,
-                    cached_tokens: Some(3),
+                    cached_tokens: match (terminal, position) {
+                        (ReviewStatus::Failed, 1) => None,
+                        (ReviewStatus::Reviewed, 1) => Some(0),
+                        _ => Some(3),
+                    },
                 };
-                crate::agent_harness::session::accumulate_usage(&mut trace.usage, &usage)?;
+                crate::agent_harness::session::accumulate_usage(
+                    &mut trace.usage,
+                    &usage,
+                    trace.call_usage.is_empty(),
+                )?;
                 trace.call_usage.push(HarnessCallUsage {
                     provider_call: trace.provider_calls,
                     response_history_end: trace.history.len(),
@@ -12681,6 +12693,12 @@ mod tests {
                     );
                 }
             }
+            if terminal == ReviewStatus::Failed {
+                let mut invalid: HarnessTrace =
+                    serde_json::from_value(serde_json::to_value(&trace)?)?;
+                invalid.usage.cached_tokens = Some(0);
+                assert!(validate_checkpoint_trace(&invalid, false).is_err());
+            }
             let outcome = HarnessOutcome {
                 status: match terminal {
                     ReviewStatus::Reviewed => HarnessStatus::Completed {
@@ -12722,7 +12740,7 @@ mod tests {
                 .await?;
             assert_eq!(db.finish_checkpoint_session(finish()).await?, terminal);
             assert!(db.finish_checkpoint_session(finish()).await.is_err());
-            let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached) FROM ai_interactions", ()).await?;
+            let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached), COUNT(tokens_cached) FROM ai_interactions", ()).await?;
             let row = rows.next().await?.unwrap();
             let known_calls = if terminal == ReviewStatus::Cancelled {
                 1
@@ -12732,7 +12750,15 @@ mod tests {
             assert_eq!(row.get::<i64>(0)?, known_calls);
             assert_eq!(row.get::<i64>(1)?, known_calls * 10);
             assert_eq!(row.get::<i64>(2)?, known_calls * 2);
-            assert_eq!(row.get::<i64>(3)?, known_calls * 3);
+            assert_eq!(row.get::<i64>(3)?, 3);
+            assert_eq!(
+                row.get::<i64>(4)?,
+                if terminal == ReviewStatus::Failed {
+                    1
+                } else {
+                    known_calls
+                }
+            );
             drop(rows);
             let mut rows = db.conn.query("SELECT r.status, r.logs, s.state, (SELECT COUNT(*) FROM patches p WHERE p.patchset_id = r.patchset_id AND p.status = 'Reviewed') FROM reviews r JOIN harness_checkpoint_sessions s ON s.review_id = r.id WHERE r.id = ?", libsql::params![review_id]).await?;
             let row = rows.next().await?.unwrap();
@@ -12765,7 +12791,14 @@ mod tests {
             assert_eq!(details["review_strategy"], "sequential_patches");
             assert_eq!(details["tokens_in"], known_calls * 10);
             assert_eq!(details["tokens_out"], known_calls * 2);
-            assert_eq!(details["tokens_cached"], known_calls * 3);
+            assert_eq!(
+                details["tokens_cached"],
+                if terminal == ReviewStatus::Failed {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(3)
+                }
+            );
             assert_eq!(details["input"], r#"{"series":"exact input"}"#);
             let checkpoints = &details["checkpoint_session"];
             assert_eq!(
@@ -12875,7 +12908,11 @@ mod tests {
                 total_tokens: 12,
                 cached_tokens: Some(3),
             };
-            crate::agent_harness::session::accumulate_usage(&mut trace.usage, &usage)?;
+            crate::agent_harness::session::accumulate_usage(
+                &mut trace.usage,
+                &usage,
+                trace.call_usage.is_empty(),
+            )?;
             trace.call_usage.push(HarnessCallUsage {
                 provider_call: trace.provider_calls,
                 response_history_end: trace.history.len(),
@@ -13378,6 +13415,7 @@ mod tests {
         assert_eq!(details["independently_verified"], false);
         assert_eq!(details["covered_patches"].as_array().unwrap().len(), 2);
         assert_eq!(details["tokens_in"], 60);
+        assert_eq!(details["tokens_cached"], 45);
         assert_eq!(details["input"], "Input and instruction snapshot");
         let persisted: serde_json::Value =
             serde_json::from_str(details["output"].as_str().unwrap())?;
@@ -13417,6 +13455,7 @@ mod tests {
         .await?;
         let failed_id = db.start_harness_review(start(&patches)).await?.unwrap();
         outcome.artifacts = None;
+        outcome.execution.trace.usage.cached_tokens = None;
         outcome.execution.status = HarnessStatus::Failed {
             reason: "Invalid final artifact".to_string(),
         };
@@ -13430,6 +13469,7 @@ mod tests {
             Some("Failed")
         );
         let failed = db.get_review_details(failed_id).await?.unwrap();
+        assert!(failed["tokens_cached"].is_null());
         let persisted: serde_json::Value =
             serde_json::from_str(failed["output"].as_str().unwrap())?;
         assert_eq!(persisted["execution"]["status"]["status"], "failed");

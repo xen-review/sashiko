@@ -436,7 +436,7 @@ pub struct AiUsage {
     /// rather than an addend: a consumer subtracts it to get uncached input.
     /// A provider whose API reports the cached prefix outside its prompt
     /// total folds it in before filling these fields.  None when the
-    /// provider reports no cache hit.
+    /// provider does not report a cache count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<usize>,
 }
