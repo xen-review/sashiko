@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Result, ensure};
+use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -155,7 +156,8 @@ pub struct QuotaAdmissionDecision {
     pub state: AccountQuotaState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct CodexAccountQuotaPolicy {
     pub enabled: bool,
     pub pause_below_percent: f64,
@@ -249,7 +251,7 @@ impl CodexAccountQuotaPolicy {
         })
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.pause_below_percent.is_finite()
                 && self.resume_above_percent.is_finite()

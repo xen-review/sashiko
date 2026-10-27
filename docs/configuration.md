@@ -195,6 +195,24 @@ effort names, and scaled-duration overflow fail. MAX profiles require at least
 3,600 seconds for both the call and minimum overall deadline. Longer timeouts do
 not extend the authorized operating window or enable higher-effort calls.
 
+#### `[ai.codex_cli.account_quota]`
+
+This optional table is reserved for a future account-quota controller. Its
+settings are validated but have no runtime effect. `enabled = true` is rejected
+until account binding, durable state, and scheduler integration are complete.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Must remain false. |
+| `pause_below_percent` | float | `20.0` | Reserved five-hour pause threshold. |
+| `resume_above_percent` | float | `30.0` | Reserved five-hour resume threshold. |
+| `max_sample_age_seconds` | integer | `300` | Reserved maximum observation age. |
+| `unavailable_retry_seconds` | integer | `60` | Reserved retry delay for unavailable observations. |
+
+Thresholds must be finite percentages in `0..=100`, with pause strictly below
+resume. Durations must be between 1 and 3,600 seconds, inclusive. These values
+do not authorize provider calls or affect existing review scheduling.
+
 #### `[ai.gemini]`
 
 Settings for the Gemini provider (`provider = "gemini"`).

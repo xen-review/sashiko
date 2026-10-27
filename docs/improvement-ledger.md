@@ -588,6 +588,13 @@ reproduced the previous early wakeup and now covers earlier and later resets,
 late evaluation and the post-reset observation; make check-pr also passes. This
 does not enable scheduling or authorize a provider call.
 
+The optional Codex account-quota settings table now parses the same disabled
+policy defaults and validates thresholds, durations, and unknown fields. The
+loader rejects enabled = true while account binding, durable state and scheduler
+integration remain unfinished. Loader tests cover omitted and custom settings,
+invalid and non-finite values, and rejected activation; make check-pr passes.
+There are no runtime behavior or provider authorization changes.
+
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
 a disabled pure five-hour admission policy as the first increment. Its five

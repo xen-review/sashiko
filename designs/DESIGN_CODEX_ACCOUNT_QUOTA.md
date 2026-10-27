@@ -175,6 +175,21 @@ storm. Keep per-review token/tool/call limits independent of account resets.
    successful or silently restart terminal harness sessions. Test durable resume
    and usage attribution before any separately authorized live exhaustion trial.
 
+## Disabled Settings Checkpoint
+
+The optional Codex account-quota table uses the existing pure policy defaults
+and validation, including strict threshold ordering and bounded durations.
+Absent configuration preserves legacy behavior. A present disabled table is
+validated but has no runtime effect. Until account binding, durable state and
+scheduler integration are implemented, loading enabled = true must fail with an
+explicit unsupported-activation error; silently accepting it would falsely
+promise quota protection. Unknown fields and invalid values are rejected.
+
+This checkpoint adds no quota read, timer, pause, provider admission or review
+retry. Settings-loader tests cover omitted and disabled tables, defaults,
+custom values, invalid thresholds and durations, unknown fields, and rejected
+activation. Activation remains a later explicitly verified integration step.
+
 ## Pure Decision Contract
 
 Account-scoped state is either Ready or Paused, with a typed reason, earliest

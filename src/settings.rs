@@ -595,6 +595,8 @@ pub struct CodexCliSettings {
     pub effort: Option<String>,
     #[serde(default)]
     pub timeout_profiles: Vec<CodexTimeoutProfile>,
+    #[serde(default)]
+    pub account_quota: Option<crate::ai::quota::CodexAccountQuotaPolicy>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -656,6 +658,20 @@ impl CodexTimeoutProfile {
 }
 
 impl CodexCliSettings {
+    pub fn validate_account_quota(&self) -> Result<(), String> {
+        if let Some(policy) = &self.account_quota {
+            policy
+                .validate()
+                .map_err(|error| format!("[ai.codex_cli.account_quota] {error}"))?;
+            if policy.enabled {
+                return Err(
+                    "[ai.codex_cli.account_quota] activation is not yet supported".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_timeout_profiles(&self) -> Result<(), String> {
         let mut keys = std::collections::BTreeSet::new();
         for profile in &self.timeout_profiles {
@@ -1755,6 +1771,9 @@ impl Settings {
             codex
                 .validate_timeout_profiles()
                 .map_err(ConfigError::Message)?;
+            codex
+                .validate_account_quota()
+                .map_err(ConfigError::Message)?;
         }
         settings
             .review
@@ -1886,6 +1905,63 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn codex_account_quota_settings_are_validated_but_cannot_be_enabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Settings.toml");
+        let base =
+            "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[review]\nconcurrency = 1\n";
+        let load = |quota: &str| {
+            std::fs::write(&path, format!("{base}{quota}")).unwrap();
+            Settings::from_file(&path)
+        };
+        assert!(load("").unwrap().ai.codex_cli.is_none());
+        let table = "[ai.codex_cli.account_quota]\n";
+        let defaults = load(&format!("{table}enabled = false\n")).unwrap();
+        let defaults = defaults
+            .ai
+            .codex_cli
+            .as_ref()
+            .unwrap()
+            .account_quota
+            .as_ref()
+            .unwrap();
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.pause_below_percent, 20.0);
+        assert_eq!(defaults.resume_above_percent, 30.0);
+        assert_eq!(defaults.max_sample_age_seconds, 300);
+        assert_eq!(defaults.unavailable_retry_seconds, 60);
+        let custom = load(&format!("{table}enabled = false\npause_below_percent = 15.0\nresume_above_percent = 35.0\nmax_sample_age_seconds = 120\nunavailable_retry_seconds = 30\n")).unwrap();
+        let custom = custom
+            .ai
+            .codex_cli
+            .as_ref()
+            .unwrap()
+            .account_quota
+            .as_ref()
+            .unwrap();
+        assert_eq!(custom.pause_below_percent, 15.0);
+        assert_eq!(custom.resume_above_percent, 35.0);
+        assert_eq!(custom.max_sample_age_seconds, 120);
+        assert_eq!(custom.unavailable_retry_seconds, 30);
+        let error = load(&format!("{table}enabled = true\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not yet supported"), "{error}");
+        for invalid in [
+            "pause_below_percent = 30.0\nresume_above_percent = 30.0\n",
+            "pause_below_percent = -1.0\n",
+            "resume_above_percent = 101.0\n",
+            "pause_below_percent = nan\n",
+            "resume_above_percent = inf\n",
+            "max_sample_age_seconds = 0\n",
+            "unavailable_retry_seconds = 3601\n",
+            "unexpected = true\n",
+        ] {
+            assert!(load(&format!("{table}{invalid}")).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn codex_timeout_profiles_match_exact_model_effort_and_scale_scope() {
