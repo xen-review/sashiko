@@ -794,7 +794,9 @@ and the review timeout are also displayed exactly. Token thresholds are checked
 between calls and can be overshot by one response, not hard generation caps.
 Approximate elapsed time advances from the harness's monotonic deadline clock
 even while a provider call is pending; fake-clock and responsive fixture checks
-cover updates and layout. The snapshot does not expose the per-call timeout,
+cover updates and layout. The configured Codex per-call timeout is resolved by
+the same helper as the provider and shown separately from the series deadline;
+it is not a measurement of a completed call. The snapshot does not expose
 backend-native generations or unreported in-flight tokens.
 
 ### P3: Durably Defer Reviews on Subscription Quota Exhaustion

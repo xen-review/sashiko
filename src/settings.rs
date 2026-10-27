@@ -825,6 +825,12 @@ impl AiSettings {
             .then(|| self.codex_cli.as_ref()?.timeout_profile(&self.model))
             .flatten()
     }
+
+    pub fn codex_call_timeout_seconds(&self) -> u64 {
+        self.codex_timeout_profile()
+            .map(|profile| profile.call_timeout_seconds)
+            .unwrap_or(600)
+    }
 }
 
 fn default_response_cache_ttl_days() -> u64 {
@@ -1893,7 +1899,9 @@ mod tests {
         assert_eq!(ai.review_timeout_seconds(8, 1800).unwrap(), 4800);
         assert_eq!(ai.harness_timeout_seconds(8, 600, 1800).unwrap(), 4800);
         assert_eq!(ai.harness_timeout_seconds(1, 10, 1800).unwrap(), 3600);
+        assert_eq!(ai.codex_call_timeout_seconds(), 3600);
         ai.provider = "copilot-cli".to_string();
+        assert_eq!(ai.codex_call_timeout_seconds(), 600);
         assert_eq!(ai.review_timeout_seconds(8, 1800).unwrap(), 1800);
         assert_eq!(ai.harness_timeout_seconds(8, 600, 1800).unwrap(), 600);
         assert_eq!(ai.harness_timeout_seconds(8, 600, 0).unwrap(), 600);

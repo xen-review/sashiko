@@ -779,10 +779,7 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
         "codex-cli" => Ok(Arc::new(codex_cli::CodexCliProvider {
             model: ai.model.clone(),
             effort: ai.codex_cli.as_ref().and_then(|c| c.effort.clone()),
-            timeout_seconds: ai
-                .codex_timeout_profile()
-                .map(|profile| profile.call_timeout_seconds)
-                .unwrap_or(600),
+            timeout_seconds: ai.codex_call_timeout_seconds(),
         })),
         "copilot-cli" => Ok(Arc::new(copilot_cli::CopilotCliProvider {
             model: ai.model.clone(),

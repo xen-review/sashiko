@@ -58,6 +58,7 @@ pub struct HarnessProgressLimits {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub review_timeout_seconds: u64,
+    pub provider_call_timeout_seconds: Option<u64>,
 }
 
 pub(crate) type HarnessProgressCallback = Box<dyn Fn(HarnessProgress) + Send + Sync>;
@@ -82,6 +83,7 @@ impl HarnessTrace {
                 input_tokens: limits.max_input_tokens,
                 output_tokens: limits.max_output_tokens,
                 review_timeout_seconds: limits.timeout_seconds,
+                provider_call_timeout_seconds: None,
             },
         }
     }
@@ -855,6 +857,7 @@ mod tests {
         assert_eq!(in_flight.limits.input_tokens, 400_000);
         assert_eq!(in_flight.limits.output_tokens, 20_000);
         assert_eq!(in_flight.limits.review_timeout_seconds, 3600);
+        assert_eq!(in_flight.limits.provider_call_timeout_seconds, None);
 
         let usage = AiUsage {
             prompt_tokens: 10,

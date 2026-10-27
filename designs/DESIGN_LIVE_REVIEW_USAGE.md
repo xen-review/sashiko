@@ -208,7 +208,11 @@ prefix; missing cache counts remain Unknown. Each snapshot carries the resolved
 series provider-call and source-tool limits, input/output token thresholds and
 review timeout. Counts and limits are displayed exactly. Token limits are
 between-call thresholds, not hard per-response caps: one response can overshoot.
-The review timeout is distinct from the provider's per-call timeout.
+The configured Codex per-call timeout is displayed separately from the review
+timeout. Both the provider and the progress metadata use the same model/effort
+profile resolution and 600-second fallback; an earlier series deadline can
+still end a call first. This is configured attribution, not a completed-call
+duration measurement.
 
 For live elapsed time, sample the same monotonic session clock used to set the
 harness deadline. The run-scoped registry advances that elapsed value from the
@@ -224,6 +228,5 @@ mobile checks verify the elapsed and timeout values fit without overlap.
 Initial rendering and polling use the same renderer, and a terminal refresh
 removes the active summary. Synthetic desktop and mobile checks cover layout,
 updates and terminal cleanup; no live review was queued. Retained terminal
-records, backend-native generations, per-call timeout display and
-account admission remain separate work; no model or daemon configuration is
-changed by adding this display.
+records, backend-native generations and account admission remain separate work;
+no model or daemon configuration is changed by adding this display.

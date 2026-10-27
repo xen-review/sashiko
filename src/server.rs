@@ -1460,6 +1460,7 @@ mod active_review_progress_tests {
                 input_tokens: 400_000,
                 output_tokens: 20_000,
                 review_timeout_seconds: 3600,
+                provider_call_timeout_seconds: Some(600),
             },
         });
 
@@ -1486,6 +1487,10 @@ mod active_review_progress_tests {
         assert_eq!(
             active["active_harness_usage"]["limits"]["review_timeout_seconds"],
             3600
+        );
+        assert_eq!(
+            active["active_harness_usage"]["limits"]["provider_call_timeout_seconds"],
+            600
         );
         assert!(active["active_harness_usage"]["reported_usage"].is_null());
 

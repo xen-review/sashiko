@@ -339,6 +339,7 @@ mod review_progress_tests {
                 input_tokens: 400_000,
                 output_tokens: 20_000,
                 review_timeout_seconds: 3600,
+                provider_call_timeout_seconds: Some(600),
             },
         };
         let observed_at = Instant::now();
@@ -1909,8 +1910,10 @@ impl Reviewer {
         let progress = ctx.progress_registry.begin(patchset_id);
         let progress_registry = ctx.progress_registry.clone();
         let progress_run_id = progress.run_id;
+        let provider_call_timeout_seconds = ctx.settings.ai.codex_call_timeout_seconds();
         let report_progress: crate::agent_harness::session::HarnessProgressCallback =
-            Box::new(move |usage| {
+            Box::new(move |mut usage| {
+                usage.limits.provider_call_timeout_seconds = Some(provider_call_timeout_seconds);
                 progress_registry.record_harness_usage(patchset_id, progress_run_id, usage);
             });
         ctx.progress_registry.update(
@@ -4481,6 +4484,7 @@ mod tests {
             assert!(progress.reported_usage.is_none());
             assert_eq!(progress.limits.provider_calls, 2);
             assert_eq!(progress.limits.source_tool_calls, 5);
+            assert_eq!(progress.limits.provider_call_timeout_seconds, Some(600));
             let input: Value =
                 serde_json::from_str(request.messages[0].content.as_deref().unwrap())?;
             assert_eq!(input["patches"].as_array().unwrap().len(), 2);
@@ -4535,6 +4539,7 @@ mod tests {
             assert_eq!(progress.tool_calls_attempted, call.div_ceil(2));
             assert_eq!(progress.limits.provider_calls, 4);
             assert_eq!(progress.limits.source_tool_calls, 5);
+            assert_eq!(progress.limits.provider_call_timeout_seconds, Some(600));
             if call == 0 {
                 assert!(progress.reported_usage.is_none());
             } else {
