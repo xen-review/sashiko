@@ -714,6 +714,7 @@ async fn review_single_patch(
                                 result.tokens_out,
                                 result.tokens_cached,
                                 result.usage_coverage,
+                                &[],
                             ) {
                                 failed_workflow_usage.push(usage);
                             }
@@ -769,6 +770,7 @@ async fn review_single_patch(
                         failure.outcome.tokens_out,
                         failure.outcome.tokens_cached,
                         failure.outcome.usage_coverage,
+                        &failure.outcome.stage_runs,
                     )
                 {
                     failed_workflow_usage.push(usage);
@@ -859,14 +861,27 @@ impl FailedWorkflowUsage {
         tokens_out: u32,
         tokens_cached: u32,
         usage_coverage: Option<crate::ai::SessionUsageCoverage>,
+        stage_runs: &[crate::workflow::StageRunRecord],
     ) -> Option<Self> {
-        let measured = usage_coverage.is_some_and(|coverage| coverage.responses_with_usage > 0);
+        let measured = usage_coverage.is_some_and(|coverage| coverage.responses_with_usage > 0)
+            || stage_runs.iter().any(|stage| {
+                !stage.skipped
+                    && stage
+                        .usage_coverage
+                        .is_some_and(|coverage| coverage.responses_with_usage > 0)
+            });
         if !measured && tokens_in == 0 && tokens_out == 0 && tokens_cached == 0 {
             return None;
         }
         let cached_measured = tokens_cached > 0
             || usage_coverage.is_some_and(|coverage| {
                 coverage.responses_with_usage > coverage.responses_without_cached_usage
+            })
+            || stage_runs.iter().any(|stage| {
+                !stage.skipped
+                    && stage.usage_coverage.is_some_and(|coverage| {
+                        coverage.responses_with_usage > coverage.responses_without_cached_usage
+                    })
             });
         Some(Self {
             patch_index,
@@ -2865,15 +2880,82 @@ mod tests {
             responses_without_cached_usage: 1,
             ..Default::default()
         };
-        let unknown = FailedWorkflowUsage::new(1, 1, 30, 10, 0, Some(coverage)).unwrap();
+        let unknown = FailedWorkflowUsage::new(1, 1, 30, 10, 0, Some(coverage), &[]).unwrap();
         assert_eq!(unknown.tokens_cached, None);
         coverage.responses_without_cached_usage = 0;
-        let zero = FailedWorkflowUsage::new(1, 1, 0, 0, 0, Some(coverage)).unwrap();
+        let zero = FailedWorkflowUsage::new(1, 1, 0, 0, 0, Some(coverage), &[]).unwrap();
         assert_eq!(zero.tokens_cached, Some(0));
-        assert!(FailedWorkflowUsage::new(1, 1, 0, 0, 0, None).is_none());
-        let partial = FailedWorkflowUsage::new(1, 1, 30, 0, 0, None).unwrap();
+        assert!(FailedWorkflowUsage::new(1, 1, 0, 0, 0, None, &[]).is_none());
+        let partial = FailedWorkflowUsage::new(1, 1, 30, 0, 0, None, &[]).unwrap();
         assert_eq!(partial.tokens_cached, None);
         assert!(partial.usage_coverage.is_none());
+    }
+
+    #[test]
+    fn failed_workflow_usage_retains_zero_from_a_recorded_sibling() {
+        let mut outcome = crate::workflow::WorkflowOutcome {
+            stage_runs: vec![crate::workflow::StageRunRecord {
+                name: "completed".into(),
+                usage_coverage: Some(crate::ai::SessionUsageCoverage {
+                    requests: 1,
+                    responses_with_usage: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let usage = FailedWorkflowUsage::new(
+            1,
+            1,
+            outcome.tokens_in,
+            outcome.tokens_out,
+            outcome.tokens_cached,
+            outcome.usage_coverage,
+            &outcome.stage_runs,
+        )
+        .expect("a recorded zero-token sibling is still an observation");
+        assert_eq!(usage.tokens_in, 0);
+        assert_eq!(usage.tokens_out, 0);
+        assert_eq!(usage.tokens_cached, Some(0));
+        assert!(usage.usage_coverage.is_none());
+        let diagnostic = reported_failure_usage_diagnostic(1, &[], &[usage]).unwrap();
+        let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            content["reported_failed_workflow_usage"][0]["tokens_cached"],
+            0
+        );
+        assert!(content["reported_failed_workflow_usage"][0]["usage_coverage"].is_null());
+
+        outcome.stage_runs[0]
+            .usage_coverage
+            .as_mut()
+            .unwrap()
+            .responses_without_cached_usage = 1;
+        let unknown_cache = FailedWorkflowUsage::new(
+            1,
+            1,
+            outcome.tokens_in,
+            outcome.tokens_out,
+            outcome.tokens_cached,
+            outcome.usage_coverage,
+            &outcome.stage_runs,
+        )
+        .unwrap();
+        assert_eq!(unknown_cache.tokens_cached, None);
+        outcome.stage_runs[0].skipped = true;
+        assert!(
+            FailedWorkflowUsage::new(
+                1,
+                1,
+                outcome.tokens_in,
+                outcome.tokens_out,
+                outcome.tokens_cached,
+                outcome.usage_coverage,
+                &outcome.stage_runs,
+            )
+            .is_none()
+        );
     }
 
     #[test]

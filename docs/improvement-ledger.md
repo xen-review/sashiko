@@ -178,6 +178,10 @@ sibling has no retained outcome, including a cancelled in-flight provider call.
 Completed and failed sibling counters and histories remain available; no usage
 or stage record is invented for the cancelled sibling. Calls hidden inside
 provider retries and other missing backend usage remain unaccounted for.
+When an earlier local workflow attempt has unknown aggregate coverage, its
+retained stage records now keep an explicitly measured zero in retry
+diagnostics. A skipped stage is not evidence of a response, and a missing cache
+counter stays unknown. This observation does not cover the cancelled sibling.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
