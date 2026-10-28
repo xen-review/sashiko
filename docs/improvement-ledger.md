@@ -172,8 +172,11 @@ indexed by session request and separate from successful totals and the terminal
 error. Fake-provider checks cover eventual success, later fatal failure and
 exhaustion. Stage runs now retain these observations on success and failure,
 and successful review maps expose them under the originating stage. Failed
-workflow records do not yet persist those observations as final diagnostics;
-retries hidden inside provider decorators and missing counters remain unknown.
+workflow-engine outcomes retain separate patch, attempt, stage-run and
+request-scoped retry diagnostics. A fake CLI covers exhausted attempts for two
+patches, and a fake worker verifies persistence in failed-review logs. Retry
+observations from post-processing failures, provider decorators, cancelled work
+and missing counters remain unknown.
 Synthetic Codex streams also show completed-turn counters can precede a failed
 turn or nonzero CLI exit. The last validated pre-failure counters are now retained
 with the error, including managed-profile rejections, without treating the call

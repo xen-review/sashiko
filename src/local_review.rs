@@ -526,6 +526,7 @@ async fn review_single_patch(
     let mut last_error = None;
     let mut reported_failed_attempts = Vec::new();
     let mut failed_workflow_usage = Vec::new();
+    let mut session_retry_usage = Vec::new();
     for attempt in 1..=max_attempts {
         emit(
             progress,
@@ -748,6 +749,7 @@ async fn review_single_patch(
                     p.index,
                     &reported_failed_attempts,
                     &failed_workflow_usage,
+                    &session_retry_usage,
                 ) && let Some(history) = output["history"].as_array_mut()
                 {
                     history.push(diagnostic);
@@ -762,8 +764,13 @@ async fn review_single_patch(
                 if let Some(reported) = e.downcast_ref::<crate::ai::ProviderFailureUsage>() {
                     reported_failed_attempts.push((attempt, reported.usage.clone()));
                 }
-                if let Some(failure) = e.downcast_ref::<crate::workflow::WorkflowFailure>()
-                    && let Some(usage) = FailedWorkflowUsage::new(
+                if let Some(failure) = e.downcast_ref::<crate::workflow::WorkflowFailure>() {
+                    session_retry_usage.extend(reported_session_retry_usage(
+                        p.index,
+                        attempt,
+                        &failure.outcome,
+                    ));
+                    if let Some(usage) = FailedWorkflowUsage::new(
                         p.index,
                         attempt,
                         failure.outcome.tokens_in,
@@ -771,9 +778,9 @@ async fn review_single_patch(
                         failure.outcome.tokens_cached,
                         failure.outcome.usage_coverage,
                         &failure.outcome.stage_runs,
-                    )
-                {
-                    failed_workflow_usage.push(usage);
+                    ) {
+                        failed_workflow_usage.push(usage);
+                    }
                 }
                 if attempt > 1
                     && let Some(failure) = e.downcast_mut::<crate::workflow::WorkflowFailure>()
@@ -799,7 +806,10 @@ async fn review_single_patch(
             &failure.outcome,
         );
     }
-    if reported_failed_attempts.is_empty() && failed_workflow_usage.is_empty() {
+    if reported_failed_attempts.is_empty()
+        && failed_workflow_usage.is_empty()
+        && session_retry_usage.is_empty()
+    {
         Err(error)
     } else {
         let message = error.to_string();
@@ -807,6 +817,7 @@ async fn review_single_patch(
             message,
             reported_usage: reported_failed_attempts,
             workflow_usage: failed_workflow_usage,
+            session_retry_usage,
         }))
     }
 }
@@ -839,6 +850,7 @@ struct FailedAttemptObservations {
     message: String,
     reported_usage: Vec<(usize, crate::ai::AiUsage)>,
     workflow_usage: Vec<FailedWorkflowUsage>,
+    session_retry_usage: Vec<ReportedSessionRetryUsage>,
 }
 
 impl std::fmt::Display for FailedAttemptObservations {
@@ -912,12 +924,49 @@ fn retain_nonduplicate_failed_workflow_usage(
     });
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ReportedSessionRetryUsage {
+    patch_index: i64,
+    attempt: usize,
+    stage: String,
+    stage_run: usize,
+    request: usize,
+    usage: crate::ai::AiUsage,
+}
+
+fn reported_session_retry_usage(
+    patch_index: i64,
+    attempt: usize,
+    outcome: &crate::workflow::WorkflowOutcome,
+) -> Vec<ReportedSessionRetryUsage> {
+    outcome
+        .stage_runs
+        .iter()
+        .enumerate()
+        .filter(|(_, stage)| !stage.skipped)
+        .flat_map(|(index, stage)| {
+            stage
+                .reported_retry_usage
+                .iter()
+                .map(move |retry| ReportedSessionRetryUsage {
+                    patch_index,
+                    attempt,
+                    stage: stage.name.clone(),
+                    stage_run: index.saturating_add(1),
+                    request: retry.request,
+                    usage: retry.usage.clone(),
+                })
+        })
+        .collect()
+}
+
 fn reported_failure_usage_diagnostic(
     patch_index: i64,
     reported_usage: &[(usize, crate::ai::AiUsage)],
     workflow_usage: &[FailedWorkflowUsage],
+    session_retry_usage: &[ReportedSessionRetryUsage],
 ) -> Option<Value> {
-    if reported_usage.is_empty() && workflow_usage.is_empty() {
+    if reported_usage.is_empty() && workflow_usage.is_empty() && session_retry_usage.is_empty() {
         return None;
     }
     let observations: Vec<_> = reported_usage
@@ -935,6 +984,7 @@ fn reported_failure_usage_diagnostic(
         "content": json!({
             "reported_failed_provider_usage": observations,
             "reported_failed_workflow_usage": workflow_usage,
+            "reported_session_retry_usage": session_retry_usage,
         }).to_string(),
     }))
 }
@@ -1398,6 +1448,7 @@ async fn run_worker_in_worktree(
                         patch_index,
                         &attempts.reported_usage,
                         &attempts.workflow_usage,
+                        &attempts.session_retry_usage,
                     )
                 {
                     failure_diagnostics.push((patch_index, diagnostic));
@@ -2852,7 +2903,7 @@ mod tests {
                 },
             ),
         ];
-        let diagnostic = reported_failure_usage_diagnostic(7, &reported_usage, &[]).unwrap();
+        let diagnostic = reported_failure_usage_diagnostic(7, &reported_usage, &[], &[]).unwrap();
         assert_eq!(diagnostic["role"], "diagnostic");
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
@@ -2874,13 +2925,14 @@ mod tests {
                 .get("cached_tokens")
                 .is_none()
         );
-        assert!(reported_failure_usage_diagnostic(7, &[], &[]).is_none());
+        assert!(reported_failure_usage_diagnostic(7, &[], &[], &[]).is_none());
         let original = crate::ai::ProviderFailureUsage::attach(anyhow!("no agent message"), usage);
         let message = original.to_string();
         let wrapped = original.context(FailedAttemptObservations {
             message: message.clone(),
             reported_usage,
             workflow_usage: Vec::new(),
+            session_retry_usage: Vec::new(),
         });
         assert_eq!(wrapped.to_string(), message);
         assert!(
@@ -2888,6 +2940,77 @@ mod tests {
                 .downcast_ref::<crate::ai::ProviderFailureUsage>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn failed_workflow_session_retries_keep_stage_and_attempt_identity() {
+        let retry = crate::ai::session::SessionRetryUsage {
+            request: 2,
+            usage: crate::ai::AiUsage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+                total_tokens: 15,
+                cached_tokens: Some(0),
+            },
+        };
+        let outcome = crate::workflow::WorkflowOutcome {
+            stage_runs: vec![
+                crate::workflow::StageRunRecord {
+                    name: "analysis".into(),
+                    reported_retry_usage: vec![retry.clone()],
+                    ..Default::default()
+                },
+                crate::workflow::StageRunRecord {
+                    name: "skipped".into(),
+                    skipped: true,
+                    reported_retry_usage: vec![retry.clone()],
+                    ..Default::default()
+                },
+                crate::workflow::StageRunRecord {
+                    name: "analysis".into(),
+                    reported_retry_usage: vec![crate::ai::session::SessionRetryUsage {
+                        usage: crate::ai::AiUsage {
+                            cached_tokens: None,
+                            ..retry.usage.clone()
+                        },
+                        ..retry.clone()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let observations = reported_session_retry_usage(7, 3, &outcome);
+        let terminal = vec![(3, retry.usage.clone())];
+        let diagnostic =
+            reported_failure_usage_diagnostic(7, &terminal, &[], &observations).unwrap();
+        let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            content["reported_session_retry_usage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            content["reported_failed_provider_usage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let observation = &content["reported_session_retry_usage"][0];
+        assert_eq!(observation["patch_index"], 7);
+        assert_eq!(observation["attempt"], 3);
+        assert_eq!(observation["stage"], "analysis");
+        assert_eq!(observation["stage_run"], 1);
+        assert_eq!(observation["request"], 2);
+        assert_eq!(observation["usage"]["prompt_tokens"], 12);
+        assert_eq!(observation["usage"]["cached_tokens"], 0);
+        let second = &content["reported_session_retry_usage"][1];
+        assert_eq!(second["stage"], "analysis");
+        assert_eq!(second["stage_run"], 3);
+        assert!(second["usage"].get("cached_tokens").is_none());
     }
 
     #[test]
@@ -2937,7 +3060,7 @@ mod tests {
         assert_eq!(usage.tokens_out, 0);
         assert_eq!(usage.tokens_cached, Some(0));
         assert!(usage.usage_coverage.is_none());
-        let diagnostic = reported_failure_usage_diagnostic(1, &[], &[usage]).unwrap();
+        let diagnostic = reported_failure_usage_diagnostic(1, &[], &[usage], &[]).unwrap();
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
             content["reported_failed_workflow_usage"][0]["tokens_cached"],

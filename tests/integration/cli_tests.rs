@@ -626,6 +626,84 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
     assert_eq!(result["tokens_in"], 60);
     assert!(result["usage_coverage"].is_null());
 
+    std::fs::write(
+        &source,
+        "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\ncase $((number % 2)) in 1) cat \"$fixture/response.blocked\" ;; *) cat \"$fixture/response.terminal\" ;; esac\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(bin.join("calls"), "").unwrap();
+    let completed_usage = serde_json::json!({"type":"turn.completed", "usage":{"input_tokens":12, "output_tokens":3, "cached_input_tokens":0}});
+    for (file, message) in [
+        ("response.blocked", "blocked by provider"),
+        ("response.terminal", "provider rejected"),
+    ] {
+        std::fs::write(
+            bin.join(file),
+            format!(
+                "{}\n{}\n",
+                completed_usage,
+                serde_json::json!({"type":"turn.failed", "error":{"message":message}})
+            ),
+        )
+        .unwrap();
+    }
+    let failed = run(&[
+        "--format",
+        "json",
+        "--prompts",
+        prompts.to_str().unwrap(),
+        "--stages",
+        "implementation",
+    ]);
+    assert_eq!(failed.status.code(), Some(3));
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    let diagnostics: Vec<_> = result["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "diagnostic")
+        .map(|entry| {
+            serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let retries = diagnostic["reported_session_retry_usage"]
+            .as_array()
+            .unwrap();
+        let terminal = diagnostic["reported_failed_provider_usage"]
+            .as_array()
+            .unwrap();
+        assert_eq!(retries.len(), 3);
+        assert_eq!(terminal.len(), 3);
+        for (attempt, retry) in retries.iter().enumerate() {
+            assert_eq!(retry["patch_index"], index + 1);
+            assert_eq!(retry["attempt"], attempt + 1);
+            assert_eq!(retry["stage"], "implementation");
+            assert_eq!(retry["request"], 1);
+            assert_eq!(retry["usage"]["prompt_tokens"], 12);
+            assert_eq!(retry["usage"]["cached_tokens"], 0);
+        }
+    }
+    assert_eq!(result["tokens_in"], 0);
+    assert!(result["usage_coverage"].is_null());
+    assert_eq!(
+        std::fs::read_to_string(bin.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        12
+    );
+
     #[cfg(feature = "cache")]
     {
         std::fs::write(&settings, "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\nresponse_cache = true\n[ai.codex_cli]\neffort = 'low'\n[review]\nconcurrency = 1\nmode = 'workflow'\n").unwrap();

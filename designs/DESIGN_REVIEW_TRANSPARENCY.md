@@ -147,11 +147,12 @@ continues to carry its existing separate observation and must not be duplicated.
 Do not change classification, retry limits, cache behavior, or budget decisions.
 The stage increment records observations on successful and failed stage runs,
 and successful review maps carry them under the originating stage. Failed
-workflow diagnostics still need workflow-attempt attribution and persistence;
-keep partial observations separate from final totals. Missing counters, cancelled
-calls, retries hidden inside provider decorators, and native model generations
-remain unknown. Fake-provider tests cover eventual success, exhaustion, fatal
-errors, missing usage and explicit cached zero before any propagation work.
+workflow-engine diagnostics retain patch, workflow attempt, stage-run and request
+identity, separate from final totals; fake CLI and worker tests cover retry
+exhaustion and failed-log persistence. Post-processing failures, missing counters,
+cancelled calls, retries hidden inside provider decorators, and native model
+generations remain unknown. Fake-provider tests cover eventual success,
+exhaustion, fatal errors, missing usage and explicit cached zero.
 
 ## Acceptance Checks
 
