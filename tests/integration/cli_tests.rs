@@ -413,18 +413,77 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         .collect();
     assert_eq!(diagnostics.len(), 2);
     for (index, diagnostic) in diagnostics.iter().enumerate() {
-        assert_eq!(
-            diagnostic["reported_failed_provider_usage"][0]["patch_index"],
-            index + 1
-        );
-        assert_eq!(
-            diagnostic["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
-            12
-        );
-        assert_eq!(
-            diagnostic["reported_failed_provider_usage"][0]["usage"]["cached_tokens"],
-            0
-        );
+        let attempts = diagnostic["reported_failed_provider_usage"]
+            .as_array()
+            .unwrap();
+        assert_eq!(attempts.len(), 3);
+        for (attempt, observation) in attempts.iter().enumerate() {
+            assert_eq!(observation["patch_index"], index + 1);
+            assert_eq!(observation["attempt"], attempt + 1);
+            assert_eq!(observation["usage"]["prompt_tokens"], 12);
+            assert_eq!(observation["usage"]["cached_tokens"], 0);
+        }
     }
     assert!(result["usage_coverage"].is_null());
+
+    std::fs::write(
+        &source,
+        "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\ncase $number in 1|3) cat \"$fixture/response.fail\" ;; *) cat \"$fixture/response.ok\" ;; esac\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(bin.join("calls"), "").unwrap();
+    std::fs::write(bin.join("response.fail"), &missing_answer).unwrap();
+    std::fs::write(
+        bin.join("response.ok"),
+        response(&serde_json::json!({"concerns":[], "dismissed_concerns":[]}).to_string()),
+    )
+    .unwrap();
+    let completed = run(&[
+        "--format",
+        "json",
+        "--prompts",
+        prompts.to_str().unwrap(),
+        "--stages",
+        "implementation",
+    ]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let diagnostics: Vec<_> = result["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "diagnostic")
+        .map(|entry| {
+            serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let attempts = diagnostic["reported_failed_provider_usage"]
+            .as_array()
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["patch_index"], index + 1);
+        assert_eq!(attempts[0]["attempt"], 1);
+        assert_eq!(attempts[0]["usage"]["prompt_tokens"], 12);
+    }
+    assert!(result["usage_coverage"].is_null());
+    assert_eq!(result["tokens_in"], 60);
+    assert_eq!(
+        std::fs::read_to_string(bin.join("calls")).unwrap(),
+        "call\ncall\ncall\ncall\n"
+    );
 }

@@ -413,10 +413,11 @@ limit still starts shared backoff for other reviews. Cancellation and the
 deadline can interrupt in-progress calls. Setting both limits to zero allows
 workflow reviews to continue without usage and retry transient and rate-limit
 errors, but disables both token budgets. A terminal workflow error carrying
-reported usage can retain those observations in diagnostic history; earlier
-retry attempts may still be missing. These budgets are checked after responses
-arrive and can be overshot by calls already in progress; they are not hard
-per-generation limits.
+reported usage can retain those observations in diagnostic history. Locally
+reported failures from each workflow attempt are kept even when a later attempt
+succeeds; internal retries and other parallel calls may still be missing. These
+budgets are checked after responses arrive and can be overshot by calls already
+in progress; they are not hard per-generation limits.
 
 #### Agent Harness
 

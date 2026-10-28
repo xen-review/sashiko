@@ -156,8 +156,10 @@ Terminal unbudgeted workflow errors now carry observed usage over the typed
 daemon/worker protocol into diagnostic history. The budgeted parent retains its
 own observation without forwarding a duplicate. Fake protocol, worker, local
 CLI and persistence checks cover missing and zero cache counts and unchanged
-retry behavior. Earlier attempts consumed by retries may still be missing; no
-live provider or deployment test has been made.
+retry behavior. Local workflow attempts now retain each terminal observed
+failure, including when a later attempt succeeds. Internal provider retries and
+other parallel calls may still be missing; no live provider or deployment test
+has been made.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

@@ -524,6 +524,7 @@ async fn review_single_patch(
         };
     let max_attempts = worker_max_attempts(ai);
     let mut last_error = None;
+    let mut reported_failed_attempts = Vec::new();
     for attempt in 1..=max_attempts {
         emit(
             progress,
@@ -712,7 +713,7 @@ async fn review_single_patch(
                     },
                 );
 
-                return Ok(json!({
+                let mut output = json!({
                     "patch_index": p.index,
                     "review": result.output,
                     "error": result.error,
@@ -723,13 +724,23 @@ async fn review_single_patch(
                     "tokens_out": result.tokens_out,
                     "tokens_cached": result.tokens_cached,
                     "usage_coverage": if attempt == 1 { result.usage_coverage } else { None },
-                }));
+                });
+                if let Some(diagnostic) =
+                    reported_failure_usage_diagnostic(p.index, &reported_failed_attempts)
+                    && let Some(history) = output["history"].as_array_mut()
+                {
+                    history.push(diagnostic);
+                }
+                return Ok(output);
             }
             Err(mut e) => {
                 error!(
                     "AI review for patch {} failed with exception: {}",
                     p.index, e
                 );
+                if let Some(reported) = e.downcast_ref::<crate::ai::ProviderFailureUsage>() {
+                    reported_failed_attempts.push((attempt, reported.usage.clone()));
+                }
                 if attempt > 1
                     && let Some(failure) = e.downcast_mut::<crate::workflow::WorkflowFailure>()
                 {
@@ -746,7 +757,16 @@ async fn review_single_patch(
             patch_index: p.index,
         },
     );
-    Err(last_error.unwrap_or_else(|| anyhow!("Patch review failed")))
+    let error = last_error.unwrap_or_else(|| anyhow!("Patch review failed"));
+    if reported_failed_attempts.is_empty() {
+        Err(error)
+    } else {
+        let message = error.to_string();
+        Err(error.context(FailedProviderAttempts {
+            message,
+            reported_usage: reported_failed_attempts,
+        }))
+    }
 }
 
 /// Lists the failed patches in series order.
@@ -772,15 +792,39 @@ fn mark_patch_review_incomplete(patches: &mut [Value], patch_index: i64, error: 
     }
 }
 
-fn reported_failure_usage_diagnostic(patch_index: i64, error: &anyhow::Error) -> Option<Value> {
-    let reported = error.downcast_ref::<crate::ai::ProviderFailureUsage>()?;
+#[derive(Debug)]
+struct FailedProviderAttempts {
+    message: String,
+    reported_usage: Vec<(usize, crate::ai::AiUsage)>,
+}
+
+impl std::fmt::Display for FailedProviderAttempts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+fn reported_failure_usage_diagnostic(
+    patch_index: i64,
+    reported_usage: &[(usize, crate::ai::AiUsage)],
+) -> Option<Value> {
+    if reported_usage.is_empty() {
+        return None;
+    }
+    let observations: Vec<_> = reported_usage
+        .iter()
+        .map(|(attempt, usage)| {
+            json!({
+                "patch_index": patch_index,
+                "attempt": attempt,
+                "usage": usage,
+            })
+        })
+        .collect();
     Some(json!({
         "role": "diagnostic",
         "content": json!({
-            "reported_failed_provider_usage": [{
-                "patch_index": patch_index,
-                "usage": &reported.usage,
-            }],
+            "reported_failed_provider_usage": observations,
         }).to_string(),
     }))
 }
@@ -1239,7 +1283,10 @@ async fn run_worker_in_worktree(
                 if let Some(wf) = err.downcast_ref::<crate::workflow::WorkflowFailure>() {
                     failed_outcomes.push((patch_index, wf.outcome.clone()));
                 }
-                if let Some(diagnostic) = reported_failure_usage_diagnostic(patch_index, &err) {
+                if let Some(attempts) = err.downcast_ref::<FailedProviderAttempts>()
+                    && let Some(diagnostic) =
+                        reported_failure_usage_diagnostic(patch_index, &attempts.reported_usage)
+                {
                     failure_diagnostics.push((patch_index, diagnostic));
                 }
                 let err = format!("{:?}", err);
@@ -2682,15 +2729,24 @@ mod tests {
             total_tokens: 15,
             cached_tokens: Some(0),
         };
-        let error = crate::ai::ProviderFailureUsage::attach(anyhow!("no agent message"), usage)
-            .context("workflow failed");
-        let diagnostic = reported_failure_usage_diagnostic(7, &error).unwrap();
+        let reported_usage = vec![
+            (1, usage.clone()),
+            (
+                3,
+                crate::ai::AiUsage {
+                    cached_tokens: None,
+                    ..usage.clone()
+                },
+            ),
+        ];
+        let diagnostic = reported_failure_usage_diagnostic(7, &reported_usage).unwrap();
         assert_eq!(diagnostic["role"], "diagnostic");
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
             content["reported_failed_provider_usage"][0]["patch_index"],
             7
         );
+        assert_eq!(content["reported_failed_provider_usage"][0]["attempt"], 1);
         assert_eq!(
             content["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
             12
@@ -2699,7 +2755,25 @@ mod tests {
             content["reported_failed_provider_usage"][0]["usage"]["cached_tokens"],
             0
         );
-        assert!(reported_failure_usage_diagnostic(7, &anyhow!("unknown")).is_none());
+        assert_eq!(content["reported_failed_provider_usage"][1]["attempt"], 3);
+        assert!(
+            content["reported_failed_provider_usage"][1]["usage"]
+                .get("cached_tokens")
+                .is_none()
+        );
+        assert!(reported_failure_usage_diagnostic(7, &[]).is_none());
+        let original = crate::ai::ProviderFailureUsage::attach(anyhow!("no agent message"), usage);
+        let message = original.to_string();
+        let wrapped = original.context(FailedProviderAttempts {
+            message: message.clone(),
+            reported_usage,
+        });
+        assert_eq!(wrapped.to_string(), message);
+        assert!(
+            wrapped
+                .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                .is_some()
+        );
     }
 
     #[test]
