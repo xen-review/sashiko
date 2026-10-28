@@ -26,7 +26,7 @@ pub enum ReviewError {
     /// A token budget was exceeded.  Retrying wastes tokens for no gain.
     #[error("Token budget exceeded: {0}")]
     BudgetExceeded(String),
-    #[error("Token usage unavailable; configured review budget cannot be enforced")]
+    #[error("Token usage unavailable or incomplete; configured review budget cannot be enforced")]
     UsageUnavailable,
     /// The AI produced output that failed format validation.  The retry
     /// should use an augmented prompt that reminds the model of the

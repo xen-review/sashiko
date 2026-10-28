@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -3410,6 +3410,71 @@ fn default_worker_command() -> Result<Command> {
 struct UsageRequiredProvider {
     inner: Arc<dyn AiProvider>,
     availability: Arc<UsageAvailability>,
+    total_tokens: AtomicUsize,
+    output_tokens: AtomicUsize,
+    token_budget: usize,
+    output_budget: usize,
+    abort_tx: tokio::sync::mpsc::Sender<anyhow::Error>,
+}
+
+impl UsageRequiredProvider {
+    fn new(
+        inner: Arc<dyn AiProvider>,
+        availability: Arc<UsageAvailability>,
+        token_budget: usize,
+        output_budget: usize,
+        abort_tx: tokio::sync::mpsc::Sender<anyhow::Error>,
+    ) -> Self {
+        Self {
+            inner,
+            availability,
+            total_tokens: AtomicUsize::new(0),
+            output_tokens: AtomicUsize::new(0),
+            token_budget,
+            output_budget,
+            abort_tx,
+        }
+    }
+
+    fn account_usage(&self, usage: &crate::ai::AiUsage) -> Result<()> {
+        let cached = usage.cached_tokens.unwrap_or(0);
+        let uncached = usage.prompt_tokens.saturating_sub(cached);
+        let amount = uncached.saturating_add(usage.completion_tokens);
+        let previous_total = self
+            .total_tokens
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |total| {
+                Some(total.saturating_add(amount))
+            })
+            .unwrap_or_else(|total| total);
+        let previous_output = self
+            .output_tokens
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |total| {
+                Some(total.saturating_add(usage.completion_tokens))
+            })
+            .unwrap_or_else(|total| total);
+        let current_total = previous_total.saturating_add(amount);
+        let current_output = previous_output.saturating_add(usage.completion_tokens);
+        let exceeded = if self.token_budget > 0 && current_total > self.token_budget {
+            Some(format!(
+                "Token budget exceeded: {} uncached input + output tokens used > {} limit",
+                current_total, self.token_budget
+            ))
+        } else if self.output_budget > 0 && current_output > self.output_budget {
+            Some(format!(
+                "Output token budget exceeded: {} output tokens used > {} limit",
+                current_output, self.output_budget
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = exceeded {
+            let _ = self
+                .abort_tx
+                .try_send(ReviewError::BudgetExceeded(message.clone()).into());
+            return Err(ReviewError::BudgetExceeded(message).into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -3422,6 +3487,7 @@ struct UsageAvailability {
 #[derive(Default)]
 struct UsageAvailabilityState {
     active: usize,
+    closed: bool,
     responses: Vec<crate::ai::AiResponse>,
 }
 
@@ -3450,8 +3516,24 @@ impl UsageAvailability {
         if self.unavailable.load(Ordering::SeqCst) {
             return Err(ReviewError::UsageUnavailable.into());
         }
+        if state.closed {
+            return Err(anyhow::anyhow!(
+                "Review worker is no longer accepting calls"
+            ));
+        }
         state.active += 1;
         Ok(ActiveUsageCall(self.clone()))
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.closed = true;
+        if state.active > 0 {
+            self.unavailable.store(true, Ordering::SeqCst);
+        }
     }
 
     fn record_response(&self, response: &crate::ai::AiResponse) {
@@ -3462,7 +3544,7 @@ impl UsageAvailability {
         if response.usage.is_none() {
             self.unavailable.store(true, Ordering::SeqCst);
         }
-        if self.unavailable.load(Ordering::SeqCst) {
+        if state.closed || self.unavailable.load(Ordering::SeqCst) {
             state.responses.push(response.clone());
         }
     }
@@ -3499,7 +3581,7 @@ impl UsageAvailability {
             && let Some(output) = output.0.as_object_mut()
         {
             output.insert(
-                "provider_responses_after_usage_unavailable".to_string(),
+                "provider_responses_after_worker_exit_or_usage_unavailable".to_string(),
                 json!(&state.responses),
             );
         }
@@ -3543,6 +3625,9 @@ impl AiProvider for UsageRequiredProvider {
         let _active = self.availability.begin_call()?;
         let response = self.inner.generate_content(request).await?;
         self.availability.record_response(&response);
+        if let Some(usage) = &response.usage {
+            self.account_usage(usage)?;
+        }
         Ok(response)
     }
 
@@ -3619,15 +3704,20 @@ async fn run_review_tool_with_cmd_and_overrides(
     worker_overrides: &WorkerSubprocessOverrides,
 ) -> Result<serde_json::Value> {
     let usage_availability = Arc::new(UsageAvailability::default());
-    let provider: Arc<dyn AiProvider> =
-        if settings.review.max_total_tokens > 0 || settings.review.max_total_output_tokens > 0 {
-            Arc::new(UsageRequiredProvider {
-                inner: provider,
-                availability: usage_availability.clone(),
-            })
-        } else {
-            provider
-        };
+    let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel::<anyhow::Error>(1);
+    let require_usage =
+        settings.review.max_total_tokens > 0 || settings.review.max_total_output_tokens > 0;
+    let provider: Arc<dyn AiProvider> = if require_usage {
+        Arc::new(UsageRequiredProvider::new(
+            provider,
+            usage_availability.clone(),
+            settings.review.max_total_tokens,
+            settings.review.max_total_output_tokens,
+            abort_tx.clone(),
+        ))
+    } else {
+        provider
+    };
     // Cap concurrent model calls with the shared limiter instead of taking the
     // semaphore by hand around each call. This also releases the permit as soon
     // as the call returns, so a request that is backing off no longer occupies
@@ -3798,7 +3888,7 @@ async fn run_review_tool_with_cmd_and_overrides(
 
     let stdin_writer = Arc::new(tokio::sync::Mutex::new(stdin));
 
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::time::Instant as TokioInstant;
     use tokio::time::{timeout, timeout_at};
@@ -3842,10 +3932,6 @@ async fn run_review_tool_with_cmd_and_overrides(
             let mut final_result: Option<Value> = None;
 
             let ai_started = Arc::new(AtomicBool::new(false));
-            let total_tokens_used = Arc::new(AtomicUsize::new(0));
-            let total_output_tokens_used = Arc::new(AtomicUsize::new(0));
-
-            let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel::<anyhow::Error>(1);
             let mut cancel_interval = tokio::time::interval(Duration::from_secs(2));
             cancel_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -3923,8 +4009,6 @@ async fn run_review_tool_with_cmd_and_overrides(
                                         let provider_clone = provider.clone();
                                         let settings_clone = settings.clone();
                                         let stdin_clone = stdin_writer.clone();
-                                        let total_tokens_used_clone = total_tokens_used.clone();
-                                        let total_output_tokens_used_clone = total_output_tokens_used.clone();
                                         let abort_tx_clone = abort_tx.clone();
 
                                         let handle = tokio::spawn(async move {
@@ -3972,26 +4056,6 @@ async fn run_review_tool_with_cmd_and_overrides(
 
                                             let reply = match resp_payload {
                                                 Ok(p) => {
-                                                    if let Some(usage) = &p.usage {
-                                                        let cached = usage.cached_tokens.unwrap_or(0);
-                                                        let uncached_input = usage.prompt_tokens.saturating_sub(cached);
-                                                        let current_total = total_tokens_used_clone.fetch_add(uncached_input + usage.completion_tokens, Ordering::SeqCst) + uncached_input + usage.completion_tokens;
-                                                        let current_output = total_output_tokens_used_clone.fetch_add(usage.completion_tokens, Ordering::SeqCst) + usage.completion_tokens;
-                                                        let token_budget = settings_clone.review.max_total_tokens;
-                                                        if token_budget > 0 && current_total > token_budget {
-                                                            let err_msg = format!("Token budget exceeded: {} uncached input + output tokens used > {} limit", current_total, token_budget);
-                                                            let _ = abort_tx_clone.send(ReviewError::BudgetExceeded(err_msg).into()).await;
-                                                            return;
-                                                        }
-
-                                                        let output_budget = settings_clone.review.max_total_output_tokens;
-                                                        if output_budget > 0 && current_output > output_budget {
-                                                            let err_msg = format!("Output token budget exceeded: {} output tokens used > {} limit", current_output, output_budget);
-                                                            let _ = abort_tx_clone.send(ReviewError::BudgetExceeded(err_msg).into()).await;
-                                                            return;
-                                                        }
-                                                    }
-
                                                     if let Some(tool_calls) = &p.tool_calls {
                                                         for call in tool_calls {
                                                             let _ = db_clone
@@ -4095,56 +4159,34 @@ async fn run_review_tool_with_cmd_and_overrides(
                 return Err(err);
             }
 
-            // Return result
             if let Some(res) = final_result {
-                if usage_availability.unavailable.load(Ordering::SeqCst) {
-                    Err(anyhow::Error::new(ReviewError::UsageUnavailable)
-                        .context(UsageUnavailableOutput(res)))
-                } else {
-                    Ok(res)
-                }
-            } else if usage_availability.unavailable.load(Ordering::SeqCst) {
-                Err(ReviewError::UsageUnavailable.into())
+                Ok(res)
             } else {
                 Err(anyhow::anyhow!("Review tool finished without valid result"))
             }
         }
         .await;
 
-    let mut interaction_result = match interaction_result {
-        Err(error)
-            if usage_availability.unavailable.load(Ordering::SeqCst)
-                && !error.downcast_ref::<ReviewError>().is_some_and(|error| {
-                    matches!(
-                        error,
-                        ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
-                    )
-                }) =>
-        {
-            let error = if error
-                .downcast_ref::<ReviewError>()
-                .is_some_and(|error| matches!(error, ReviewError::UsageUnavailable))
-            {
-                error
-            } else {
-                error.context(ReviewError::UsageUnavailable)
-            };
-            if error.downcast_ref::<UsageUnavailableOutput>().is_some() {
-                Err(error)
-            } else if let Some(output) = usage_availability.fallback_output() {
-                Err(error.context(output))
-            } else {
-                Err(error)
-            }
-        }
-        result => result,
-    };
-
-    if interaction_result.as_ref().err().is_some_and(|error| {
-        error
-            .downcast_ref::<ReviewError>()
-            .is_some_and(|error| matches!(error, ReviewError::UsageUnavailable))
-    }) {
+    let mut interaction_result = interaction_result;
+    let terminal_abort = interaction_result.as_ref().err().is_some_and(|error| {
+        error.downcast_ref::<ReviewError>().is_some_and(|error| {
+            matches!(
+                error,
+                ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
+            )
+        })
+    });
+    let deadline_expired = interaction_result.as_ref().err().is_some_and(|error| {
+        error.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("Review tool timed out (active time exceeded)")
+        })
+    });
+    if require_usage && !terminal_abort {
+        usage_availability.close();
+    }
+    if require_usage && !terminal_abort && !deadline_expired {
         let active_deadline = *deadline.lock().unwrap();
         let drain = async {
             let mut cancel_interval = tokio::time::interval(Duration::from_secs(2));
@@ -4166,13 +4208,53 @@ async fn run_review_tool_with_cmd_and_overrides(
         match timeout_at(active_deadline, drain).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => interaction_result = Err(error.into()),
-            Err(_) => warn!("Parallel provider calls did not finish before the review deadline"),
+            Err(_) => {
+                usage_availability.unavailable.store(true, Ordering::SeqCst);
+                warn!("Parallel provider calls did not finish before the review deadline");
+            }
         }
-        if let Err(error) = &mut interaction_result
-            && let Some(output) = error.downcast_mut::<UsageUnavailableOutput>()
+    }
+
+    let terminal_abort = interaction_result.as_ref().err().is_some_and(|error| {
+        error.downcast_ref::<ReviewError>().is_some_and(|error| {
+            matches!(
+                error,
+                ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
+            )
+        })
+    });
+    if !terminal_abort && let Ok(error) = abort_rx.try_recv() {
+        interaction_result = Err(error);
+    }
+
+    let mut interaction_result = match interaction_result {
+        Ok(result) if usage_availability.unavailable.load(Ordering::SeqCst) => {
+            Err(anyhow::Error::new(ReviewError::UsageUnavailable)
+                .context(UsageUnavailableOutput(result)))
+        }
+        Err(error)
+            if usage_availability.unavailable.load(Ordering::SeqCst)
+                && !error.downcast_ref::<ReviewError>().is_some_and(|error| {
+                    matches!(
+                        error,
+                        ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
+                    )
+                }) =>
         {
-            usage_availability.retain_responses(output);
+            let error = error.context(ReviewError::UsageUnavailable);
+            if let Some(output) = usage_availability.fallback_output() {
+                Err(error.context(output))
+            } else {
+                Err(error)
+            }
         }
+        result => result,
+    };
+    if usage_availability.unavailable.load(Ordering::SeqCst)
+        && let Err(error) = &mut interaction_result
+        && let Some(output) = error.downcast_mut::<UsageUnavailableOutput>()
+    {
+        usage_availability.retain_responses(output);
     }
 
     // Abort all spawned AI request tasks to drop their stdin clones
@@ -6919,6 +7001,104 @@ echo '{"patchset_id":1,"patches":[]}'
         Ok(())
     }
 
+    #[derive(Default)]
+    struct ParallelErrorProvider {
+        started: AtomicUsize,
+        both_started: tokio::sync::Notify,
+        release_error: tokio::sync::Notify,
+        release_response: tokio::sync::Notify,
+        reported_prompt_tokens: Option<usize>,
+    }
+
+    #[async_trait]
+    impl AiProvider for ParallelErrorProvider {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            let first = request.messages[0].content.as_deref() == Some("first");
+            if self.started.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.both_started.notify_one();
+            }
+            if first {
+                self.release_error.notified().await;
+                Err(anyhow::anyhow!("fatal first stage"))
+            } else {
+                self.release_response.notified().await;
+                Ok(AiResponse {
+                    content: Some("late response".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: self
+                        .reported_prompt_tokens
+                        .map(|prompt_tokens| crate::ai::AiUsage {
+                            prompt_tokens,
+                            completion_tokens: 1,
+                            total_tokens: prompt_tokens + 1,
+                            cached_tokens: Some(0),
+                        }),
+                    truncated: false,
+                })
+            }
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_failure_waits_for_in_flight_usage() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","tx_id":1,"payload":{"messages":[{"role":"user","content":"first"}]}}'
+echo '{"type":"ai_request","tx_id":2,"payload":{"messages":[{"role":"user","content":"second"}]}}'
+read -r response || exit 1
+echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}],"error":"fatal first stage"}'
+"#;
+        for (reported_prompt_tokens, exceeds_budget) in
+            [(None, false), (Some(1), false), (Some(10_000_001), true)]
+        {
+            let provider = Arc::new(ParallelErrorProvider {
+                reported_prompt_tokens,
+                ..ParallelErrorProvider::default()
+            });
+            let mut review = tokio::spawn({
+                let provider = provider.clone();
+                async move { run_single_ai_request_mock(mock_script, provider).await }
+            });
+            tokio::time::timeout(Duration::from_secs(2), provider.both_started.notified()).await?;
+            provider.release_error.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), &mut review)
+                    .await
+                    .is_err(),
+                "a worker failure must not discard an already-running provider call"
+            );
+            provider.release_response.notify_one();
+            let error = tokio::time::timeout(Duration::from_secs(2), review)
+                .await??
+                .expect_err("incomplete worker accounting must block retries");
+            if exceeds_budget {
+                assert!(
+                    error
+                        .downcast_ref::<ReviewError>()
+                        .is_some_and(|error| { matches!(error, ReviewError::BudgetExceeded(_)) })
+                );
+            } else {
+                assert!(
+                    error
+                        .downcast_ref::<ReviewError>()
+                        .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+                );
+                let output = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+                assert!(output.logs().unwrap().contains("late response"));
+            }
+        }
+        Ok(())
+    }
+
     struct HeldProviderWithoutUsage {
         inner: MockProviderWithoutUsage,
         started: tokio::sync::Notify,
@@ -6947,10 +7127,14 @@ echo '{"patchset_id":1,"patches":[]}'
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let guarded = Arc::new(UsageRequiredProvider {
-            inner: inner.clone(),
-            availability: Arc::new(UsageAvailability::default()),
-        });
+        let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
+        let guarded = Arc::new(UsageRequiredProvider::new(
+            inner.clone(),
+            Arc::new(UsageAvailability::default()),
+            1_000,
+            1_000,
+            abort_tx,
+        ));
         let provider = Arc::new(
             crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
                 guarded,
@@ -6974,6 +7158,87 @@ echo '{"patchset_id":1,"patches":[]}'
         );
         assert_eq!(inner.inner.calls.load(Ordering::SeqCst), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_timeout_with_in_flight_usage_is_not_retryable() -> Result<()> {
+        let provider = Arc::new(HeldProviderWithoutUsage {
+            inner: MockProviderWithoutUsage {
+                calls: AtomicUsize::new(0),
+            },
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let mock_script = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"first"}]}}'
+read -r response || exit 1
+"#;
+        let review = tokio::spawn({
+            let provider = provider.clone();
+            async move { run_single_ai_request_mock(mock_script, provider).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.started.notified()).await?;
+        let error = tokio::time::timeout(Duration::from_secs(7), review)
+            .await??
+            .expect_err("timed-out in-flight usage must block retries");
+        assert!(
+            error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+        );
+        assert!(error.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("Review tool timed out (active time exceeded)")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn test_token_budget_accounting_saturates_and_counts_unknown_cache() {
+        for (total_budget, output_budget) in [(1, 0), (0, 1)] {
+            let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel(1);
+            let guarded = UsageRequiredProvider::new(
+                Arc::new(MockProvider),
+                Arc::new(UsageAvailability::default()),
+                total_budget,
+                output_budget,
+                abort_tx,
+            );
+            let error = guarded
+                .account_usage(&crate::ai::AiUsage {
+                    prompt_tokens: usize::MAX,
+                    completion_tokens: usize::MAX,
+                    total_tokens: usize::MAX,
+                    cached_tokens: None,
+                })
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::BudgetExceeded(_)) })
+            );
+            assert!(abort_rx.try_recv().is_ok());
+        }
+
+        let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
+        let guarded = UsageRequiredProvider::new(
+            Arc::new(MockProvider),
+            Arc::new(UsageAvailability::default()),
+            3,
+            0,
+            abort_tx,
+        );
+        let error = guarded
+            .account_usage(&crate::ai::AiUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                cached_tokens: None,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("4 uncached input + output"));
     }
 
     #[tokio::test]

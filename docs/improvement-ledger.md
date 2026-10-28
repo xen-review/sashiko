@@ -124,6 +124,16 @@ preserves the prior workflow behavior but removes token-budget protection.
 Limits remain post-response thresholds, not hard per-generation caps. This
 change has not been deployed or tested with a live provider.
 
+A follow-up closes admission when a worker exits while provider calls remain
+in flight. Those calls may finish within the existing deadline, and incomplete
+worker accounting blocks automatic retry even if a late response reports usage.
+Reported token accounting now runs before the guarded call completes, preserving
+budget-overrun classification for late responses. Token sums saturate instead
+of wrapping, and a missing cache breakdown counts the full input conservatively.
+Fake-worker tests cover early failure, late measured and unmeasured responses,
+late budget overruns, and timeout with unknown in-flight usage. No live call or
+deployment was made.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for
