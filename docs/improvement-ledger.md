@@ -167,6 +167,12 @@ counters separately from successful responses, without changing its existing
 fatal classification or retry count. Fake-provider checks cover transient,
 rate-limit and feedback retries, absent counters, explicit zero, and preceding
 successful tool usage. Earlier internal attempts remain unaccounted for.
+Synthetic Codex streams also show completed-turn counters can precede a failed
+turn or nonzero CLI exit. The last validated pre-failure counters are now retained
+with the error, including managed-profile rejections, without treating the call
+as successful or adding them to successful totals. Malformed counters and events
+after a failed turn are not recovered. Fake CLI and local harness checks pass;
+this is not evidence that multiple native turns or billing are fully accounted.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

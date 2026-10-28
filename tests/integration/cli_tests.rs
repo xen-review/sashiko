@@ -296,6 +296,32 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         result["harness"]["trace"]["call_usage"],
         serde_json::json!([])
     );
+    std::fs::write(&source, "#!/bin/sh\nfixture=${0%/*}\ncat >/dev/null\ncat \"$fixture/response\"\nprintf '%s\\n' '{\"type\":\"error\",\"message\":\"provider rejected\"}'\nexit 1\n").unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let failed = run(&["--format", "json"]);
+    assert_eq!(failed.status.code(), Some(3));
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(result["harness"]["status"]["status"], "failed");
+    assert_eq!(
+        result["harness"]["trace"]["reported_failed_call_usage"]["usage"]["prompt_tokens"],
+        12
+    );
+    assert_eq!(
+        result["harness"]["trace"]["reported_failed_call_usage"]["usage"]["cached_tokens"],
+        0
+    );
+    assert_eq!(
+        result["harness"]["trace"]["call_usage"],
+        serde_json::json!([])
+    );
     let configuration = std::fs::read_to_string(&settings).unwrap();
     std::fs::write(
         &settings,

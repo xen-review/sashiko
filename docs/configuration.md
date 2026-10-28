@@ -421,7 +421,9 @@ internal retries and other parallel calls may still be missing. These budgets
 are checked after responses arrive and can be overshot by calls already in
 progress; they are not hard per-generation limits. After session retry exhaustion,
 reported counters on the terminal provider error can be retained; earlier internal
-attempts are not recovered by that observation.
+attempts are not recovered by that observation. A failed Codex CLI invocation
+can retain the last validated completed-turn counters before failure; these are
+not a complete total for hidden or multiple backend turns.
 
 #### Agent Harness
 

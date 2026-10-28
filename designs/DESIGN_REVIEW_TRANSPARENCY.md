@@ -129,7 +129,9 @@ a duplicate. Fake protocol and worker tests must check round trips, missing and
 zero counts, persisted diagnostics, and unchanged retry behavior. When a session
 exhausts provider retries, preserve the terminal error's reported counters while
 keeping its existing retry classification. Earlier internal attempts may still
-be missing.
+be missing. For a failed Codex invocation, retain only the last validated
+completed-turn counters preceding an explicit failure, not a reconstructed total
+for multiple backend turns.
 
 ## Acceptance Checks
 

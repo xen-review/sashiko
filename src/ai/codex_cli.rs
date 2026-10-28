@@ -152,11 +152,15 @@ impl CodexCliProvider {
             if !stderr.is_empty() {
                 detail.push(stderr);
             }
-            anyhow::bail!(
+            let error = anyhow::anyhow!(
                 "codex CLI exited with {}: {}",
                 output.status,
                 detail.join("; ")
             );
+            return Err(failure_with_usage(
+                error,
+                completed_usage_before_failure(&stdout),
+            ));
         }
 
         let raw = String::from_utf8_lossy(&output.stdout);
@@ -191,13 +195,16 @@ impl CodexCliProvider {
                 }
                 if event["type"] == "turn.failed" {
                     let detail = error_message(&event).unwrap_or("No failure detail reported");
-                    anyhow::bail!(
+                    let error = anyhow::anyhow!(
                         "codex CLI reported a failed turn: {}",
                         redact_secret(detail)
                     );
+                    return Err(failure_with_usage(error, usage));
                 }
-                if let Some(message) = error_message(&event) {
-                    self.check_error_message(message)?;
+                if let Some(message) = error_message(&event)
+                    && let Err(error) = self.check_error_message(message)
+                {
+                    return Err(failure_with_usage(error, usage));
                 }
                 match event["type"].as_str() {
                     Some("item.completed") if event["item"]["type"] == "agent_message" => {
@@ -217,10 +224,7 @@ impl CodexCliProvider {
         if response_text.trim().is_empty() {
             if saw_event || raw.trim().is_empty() {
                 let error = anyhow::anyhow!("codex CLI produced no agent message");
-                return Err(match usage {
-                    Some(usage) => ProviderFailureUsage::attach(error, usage),
-                    None => error,
-                });
+                return Err(failure_with_usage(error, usage));
             }
             // Fall back to raw output if no events parsed
             warn!("codex-cli: no item.completed events found, using raw output");
@@ -630,6 +634,27 @@ pub fn decode_codex_workspace_quota(
         decode_codex_subscription_quota(account_result, limits_result, &login_key, observed_at)?;
     snapshot.five_hour.account_key = workspace_key;
     Ok(CodexWorkspaceQuotaSnapshot(snapshot))
+}
+
+fn failure_with_usage(error: anyhow::Error, usage: Option<AiUsage>) -> anyhow::Error {
+    match usage {
+        Some(usage) => ProviderFailureUsage::attach(error, usage),
+        None => error,
+    }
+}
+
+fn completed_usage_before_failure(raw: &str) -> Option<AiUsage> {
+    let mut usage = None;
+    for line in raw.lines() {
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            match event["type"].as_str() {
+                Some("turn.completed") => usage = parse_usage(&event["usage"]),
+                Some("turn.failed") => break,
+                _ => {}
+            }
+        }
+    }
+    usage
 }
 
 fn parse_usage(value: &Value) -> Option<AiUsage> {
@@ -1725,6 +1750,62 @@ while :; do :; done
             assert!(error.contains(expected), "{error}");
             assert!(!error.contains("tok-123"), "{error}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_cli_retains_completed_turn_usage() {
+        let completed_zero = r#"{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3,"cached_input_tokens":0}}"#;
+        let completed_unknown =
+            r#"{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}"#;
+        let invalid = r#"{"type":"turn.completed","usage":{"input_tokens":12}}"#;
+        let failed =
+            r#"{"type":"turn.failed","error":{"message":"provider rejected token=tok-123"}}"#;
+        let error = r#"{"type":"error","message":"provider rejected token=tok-123"}"#;
+        let managed = r#"{"type":"error","message":"provider rejected token=tok-123: disallowed by requirements"}"#;
+
+        for (exit_code, first, second, expected_cached) in [
+            (1, completed_zero, error, Some(Some(0))),
+            (0, completed_zero, failed, Some(Some(0))),
+            (0, completed_zero, managed, Some(Some(0))),
+            (1, completed_unknown, failed, Some(None)),
+            (0, invalid, failed, None),
+            (1, failed, completed_zero, None),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("codex");
+            crate::test_support::write_executable_script(
+                &executable,
+                &format!(
+                    "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{first}' '{second}'\nexit {exit_code}\n"
+                ),
+            );
+            let provider = CodexCliProvider {
+                model: "test-model".to_string(),
+                effort: None,
+                timeout_seconds: 10,
+            };
+            let error = provider
+                .generate_content_with_binary(AiRequest::default(), executable.as_os_str())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("provider rejected"));
+            assert!(!format!("{error:?}").contains("tok-123"));
+            let usage = error.downcast_ref::<ProviderFailureUsage>();
+            assert_eq!(usage.is_some(), expected_cached.is_some());
+            if let Some(expected_cached) = expected_cached {
+                let usage = &usage.unwrap().usage;
+                assert_eq!(usage.prompt_tokens, 12);
+                assert_eq!(usage.completion_tokens, 3);
+                assert_eq!(usage.cached_tokens, expected_cached);
+            }
+        }
+        assert!(completed_usage_before_failure(&format!("{completed_zero}\n{invalid}")).is_none());
+        let zero = r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0,"cached_input_tokens":0}}"#;
+        let usage = completed_usage_before_failure(zero).unwrap();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.cached_tokens, Some(0));
     }
 
     #[test]
