@@ -21,6 +21,19 @@ const coverage = {
     responses_without_cached_usage: 0,
 };
 
+for (const missingCoverage of [undefined, null, { requests: 1 }]) {
+    const result = render(record, missingCoverage);
+    assert.match(result, /In: Unknown/);
+    assert.match(result, /Cached: Unknown/);
+    assert.match(result, /Out: 4 \(partial\)/);
+    assert.match(result, /Usage coverage: Unknown/);
+}
+
+const unknownPartial = render({ ...record, tokens_cached: 20, tokens_out: 0 }, null);
+assert.match(unknownPartial, /In: Unknown/);
+assert.match(unknownPartial, /Cached: 20 \(partial\)/);
+assert.match(unknownPartial, /Out: Unknown/);
+
 for (const responsesWithoutUsage of [0, 1]) {
     const result = render(record, {
         ...coverage,
@@ -126,6 +139,50 @@ const measuredZeroCheckpoint = render({
 assert.match(measuredZeroCheckpoint, /In: 0/);
 assert.match(measuredZeroCheckpoint, /Cached: 0/);
 assert.match(measuredZeroCheckpoint, /Out: 0/);
+
+const zeroCallCheckpoint = render({
+    tokens_in: 0,
+    tokens_cached: null,
+    tokens_out: 0,
+    checkpoint_session: {
+        provider_calls_recorded: 0,
+        provider_calls_attempted: 0,
+        usage_complete: true,
+    },
+});
+assert.equal(zeroCallCheckpoint, 'No provider requests recorded');
+
+const unconfirmedCallCheckpoint = render({
+    tokens_in: 0,
+    tokens_cached: 0,
+    tokens_out: 0,
+    checkpoint_session: { provider_calls_recorded: 0, usage_complete: false },
+}, {
+    requests: 0,
+    responses_with_usage: 0,
+    responses_without_usage: 0,
+    responses_without_cached_usage: 0,
+});
+assert.match(unconfirmedCallCheckpoint, /Unavailable/);
+assert.match(unconfirmedCallCheckpoint, /checkpoint usage incomplete/);
+assert.doesNotMatch(unconfirmedCallCheckpoint, /No provider requests recorded/);
+
+const contradictoryCheckpoint = render({
+    tokens_in: 0,
+    tokens_cached: 0,
+    tokens_out: 0,
+    checkpoint_session: {
+        provider_calls_recorded: 0,
+        provider_calls_attempted: 0,
+        usage_complete: true,
+    },
+}, {
+    requests: 1,
+    responses_with_usage: 1,
+    responses_without_usage: 0,
+    responses_without_cached_usage: 0,
+});
+assert.doesNotMatch(contradictoryCheckpoint, /No provider requests recorded/);
 
 const completedCheckpointWithoutCache = render({
     tokens_in: 100,

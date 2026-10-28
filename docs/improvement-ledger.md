@@ -1002,6 +1002,13 @@ renderer regression exercises interrupted and completed checkpoint records, and
 the diff-aware `make check-pr` gate passes. This has not been checked in the
 integrated browser or deployed.
 
+Unknown or invalid response coverage now also leaves cached and uncached web
+totals unknown and labels reported output partial. The local CLI labels known
+positive counters partial and unconfirmed zeros unknown. Completed checkpoints
+with measured calls retain their existing presentation; zero-call claims need
+consistent checkpoint and coverage evidence. This does not recover missing
+usage or establish complete backend billing.
+
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing

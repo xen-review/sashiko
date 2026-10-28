@@ -3139,20 +3139,35 @@ fn write_review_usage(out: &mut impl WriteColor, result: &Value) -> std::io::Res
         || tokens_cached > 0
         || coverage.is_some_and(|coverage| coverage.responses_with_usage > 0)
     {
-        let cached = if coverage.is_some_and(|coverage| coverage.responses_without_cached_usage > 0)
-        {
-            if tokens_cached > 0 {
-                format!("{tokens_cached} reported (partial)")
+        let incomplete = !coverage.is_some_and(|coverage| coverage.is_complete());
+        let partial = |tokens| {
+            if tokens > 0 {
+                format!("{tokens} (partial)")
             } else {
                 "unknown".to_string()
             }
+        };
+        let input = if incomplete {
+            partial(tokens_in)
+        } else {
+            tokens_in.to_string()
+        };
+        let output = if incomplete {
+            partial(tokens_out)
+        } else {
+            tokens_out.to_string()
+        };
+        let cached = if incomplete
+            || coverage.is_some_and(|coverage| coverage.responses_without_cached_usage > 0)
+        {
+            partial(tokens_cached)
         } else {
             tokens_cached.to_string()
         };
         writeln!(
             out,
             "\nReported tokens: {} in / {} out / {} cached",
-            tokens_in, tokens_out, cached
+            input, output, cached
         )?;
     } else if coverage.is_some_and(|coverage| coverage.requests == 0) {
         writeln!(out, "\nNo provider requests recorded.")?;
@@ -4387,6 +4402,39 @@ mod tests {
             let output = String::from_utf8(buffer.into_inner()).unwrap();
             assert!(output.contains(required), "{output}");
             assert!(!output.contains(forbidden), "{output}");
+        }
+    }
+
+    #[test]
+    fn write_review_usage_marks_unknown_and_incomplete_totals() {
+        for (coverage, tokens_out, tokens_cached, expected) in [
+            (
+                None,
+                0,
+                0,
+                "Reported tokens: 20 (partial) in / unknown out / unknown cached",
+            ),
+            (
+                Some(sashiko::ai::SessionUsageCoverage {
+                    requests: 2,
+                    responses_with_usage: 1,
+                    ..Default::default()
+                }),
+                4,
+                7,
+                "Reported tokens: 20 (partial) in / 4 (partial) out / 7 (partial) cached",
+            ),
+        ] {
+            let result = serde_json::json!({
+                "tokens_in": 20,
+                "tokens_out": tokens_out,
+                "tokens_cached": tokens_cached,
+                "usage_coverage": coverage,
+            });
+            let mut buffer = Buffer::no_color();
+            write_review_usage(&mut buffer, &result).unwrap();
+            let output = String::from_utf8(buffer.into_inner()).unwrap();
+            assert!(output.contains(expected), "{output}");
         }
     }
 
