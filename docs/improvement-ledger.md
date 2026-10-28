@@ -192,6 +192,8 @@ retry usage. Missing request records remain unknown; empty records describe only
 the observed decorator. Workflow stage records now retain these observations on
 success and session failure, with legacy records and skipped stages still unknown.
 Review-map exposure, failed-review diagnostics and worker transport remain pending.
+The optional turn logger now forwards per-call observations on success and error
+without treating unavailable data as empty or changing terminal classification.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the

@@ -200,6 +200,12 @@ the records attached to their originating stage across sequential and parallel
 execution, including session failures. This does not yet expose them in review
 maps, failed-review diagnostics, or the daemon worker protocol.
 
+Non-caching pass-through decorators must forward observed calls without
+converting unavailable observations into empty ones. In particular, the
+optional turn logger wraps a worker's stdio provider and must preserve the
+per-call result on success and error. This does not change cache replay or the
+daemon's budget admission decisions.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

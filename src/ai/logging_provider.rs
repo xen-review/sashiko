@@ -28,7 +28,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tracing::info;
 
-use crate::ai::{AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities};
+use crate::ai::{
+    AiProvider, AiRequest, AiResponse, CacheStats, ObservedProviderCall, ProviderCapabilities,
+};
 
 /// Wraps any [`AiProvider`], logging each request/response turn. All other
 /// behaviour is delegated unchanged to the inner provider.
@@ -49,6 +51,12 @@ impl LoggingProvider {
 #[async_trait]
 impl AiProvider for LoggingProvider {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_observations(request)
+            .await
+            .result
+    }
+
+    async fn generate_content_with_observations(&self, request: AiRequest) -> ObservedProviderCall {
         let turn = self.turn.fetch_add(1, Ordering::SeqCst) + 1;
         // The worker tags requests with their patch context (e.g. "[ps:0 p:1] ").
         let tag = request.context_tag.clone().unwrap_or_default();
@@ -75,7 +83,11 @@ impl AiProvider for LoggingProvider {
             }
         }
 
-        let response = self.inner.generate_content(request).await?;
+        let call = self.inner.generate_content_with_observations(request).await;
+        let response = match &call.result {
+            Ok(response) => response,
+            Err(_) => return call,
+        };
 
         // Log the response: text, any tool calls, and token usage.
         if let Some(content) = &response.content {
@@ -113,7 +125,7 @@ impl AiProvider for LoggingProvider {
             );
         }
 
-        Ok(response)
+        call
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -214,5 +226,100 @@ mod tests {
                 "{logs}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn logging_provider_forwards_observations_and_original_errors() {
+        struct ObservedProvider(bool);
+
+        #[async_trait]
+        impl AiProvider for ObservedProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                anyhow::bail!("unobserved call")
+            }
+
+            async fn generate_content_with_observations(
+                &self,
+                _request: AiRequest,
+            ) -> crate::ai::ObservedProviderCall {
+                let result = if self.0 {
+                    let error = crate::ai::RemoteAiError {
+                        message: "temporary".into(),
+                        class: crate::ai::AiErrorClass::Transient {
+                            retry_after: std::time::Duration::ZERO,
+                        },
+                    }
+                    .into();
+                    Err(crate::ai::ProviderFailureUsage::attach(
+                        error,
+                        AiUsage {
+                            prompt_tokens: 9,
+                            completion_tokens: 1,
+                            total_tokens: 10,
+                            cached_tokens: Some(0),
+                        },
+                    ))
+                } else {
+                    Ok(AiResponse {
+                        content: Some("done".into()),
+                        thought: None,
+                        thought_signature: None,
+                        tool_calls: None,
+                        usage: None,
+                        truncated: false,
+                    })
+                };
+                crate::ai::ObservedProviderCall {
+                    result,
+                    backoff_retries: Some(crate::ai::BackoffRetryObservations {
+                        retries: vec![crate::ai::BackoffRetryObservation {
+                            attempt: 1,
+                            usage: None,
+                        }],
+                        truncated: false,
+                    }),
+                }
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        for fail in [false, true] {
+            let provider: Arc<dyn AiProvider> =
+                Arc::new(LoggingProvider::new(Arc::new(ObservedProvider(fail))));
+            let call = provider
+                .generate_content_with_observations(AiRequest::default())
+                .await;
+            if fail {
+                let error = call.result.unwrap_err();
+                assert!(matches!(
+                    crate::ai::classify_ai_error(&error),
+                    crate::ai::AiErrorClass::Transient { .. }
+                ));
+                assert_eq!(
+                    error
+                        .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                        .unwrap()
+                        .usage
+                        .cached_tokens,
+                    Some(0)
+                );
+            } else {
+                assert_eq!(call.result.unwrap().content.as_deref(), Some("done"));
+            }
+            assert_eq!(call.backoff_retries.unwrap().retries.len(), 1);
+        }
+
+        let provider = LoggingProvider::new(Arc::new(FakeProvider(AiUsage::default())));
+        let call = provider
+            .generate_content_with_observations(AiRequest::default())
+            .await;
+        assert!(call.result.is_ok());
+        assert!(call.backoff_retries.is_none());
     }
 }
