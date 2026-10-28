@@ -525,6 +525,10 @@ fn decode_quota_window(
     let used = value["usedPercent"]
         .as_f64()
         .context("Measured Codex quota percentage unavailable")?;
+    ensure!(
+        used.is_finite() && (0.0..=100.0).contains(&used),
+        "Invalid Codex used quota percentage"
+    );
     let remaining = super::quota::RemainingQuotaPercent::new(100.0 - used)?;
     let resets_at = value["resetsAt"]
         .as_i64()
@@ -1048,7 +1052,12 @@ while IFS= read -r request; do :; done
         }
         for (pointer, value) in [
             ("/rateLimits/primary/usedPercent", serde_json::json!(-0.1)),
+            ("/rateLimits/primary/usedPercent", serde_json::json!(-1e-30)),
             ("/rateLimits/primary/usedPercent", serde_json::json!(100.1)),
+            (
+                "/rateLimits/secondary/usedPercent",
+                serde_json::json!(-1e-30),
+            ),
             ("/rateLimits/secondary/usedPercent", serde_json::json!("47")),
             (
                 "/rateLimits/primary/windowDurationMins",
@@ -1080,6 +1089,15 @@ while IFS= read -r request; do :; done
             decode_codex_subscription_quota(&account, &exhausted, &key, 100)?.weekly_remaining,
             super::super::quota::RemainingQuotaPercent::new(0.0)?
         );
+        for (used, remaining) in [(0.0, 100.0), (100.0, 0.0)] {
+            let mut boundary = limits.clone();
+            boundary["rateLimits"]["primary"]["usedPercent"] = serde_json::json!(used);
+            boundary["rateLimits"]["secondary"]["usedPercent"] = serde_json::json!(used);
+            let decoded = decode_codex_subscription_quota(&account, &boundary, &key, 100)?;
+            let expected = super::super::quota::RemainingQuotaPercent::new(remaining)?;
+            assert_eq!(decoded.five_hour.remaining, expected);
+            assert_eq!(decoded.weekly_remaining, expected);
+        }
         assert!(decode_codex_subscription_quota(&account, &limits, &key, -1).is_err());
         Ok(())
     }

@@ -693,6 +693,11 @@ the last credible sample. Fake-clock tests cover reset shifts and reopening a
 database, and make check-pr passes. This transition has no production caller
 and its FiveHourReady result is not authorization for a model call.
 
+The metadata decoder now validates reported used percentages before subtracting
+them from 100. A synthetic tiny negative value previously rounded to 100%
+remaining and passed validation. Tests cover both windows and exact zero and
+100% boundaries. This decoder remains unwired from model-call admission.
+
 Status: requested on 2026-10-26; the staged
 [Codex account quota design](../designs/DESIGN_CODEX_ACCOUNT_QUOTA.md) now selects
 a disabled pure five-hour admission policy as the first increment. Its five
