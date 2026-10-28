@@ -76,6 +76,10 @@ impl AiProvider for ConcurrencyLimitedProvider {
         self.inner.get_capabilities()
     }
 
+    fn cache_identity(&self) -> String {
+        self.inner.cache_identity()
+    }
+
     fn cache_stats(&self) -> Option<CacheStats> {
         self.inner.cache_stats()
     }

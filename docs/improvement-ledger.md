@@ -504,6 +504,12 @@ responses are not replayed under the corrected framing. Focused formatter and
 cache-profile checks and the full `make check-pr` gate pass. This is not a claim
 that prompt injection is eliminated, and no live model call was made.
 
+An offline cache test found that placing a response cache outside the logging,
+concurrency, or backoff decorators collapsed distinct provider profiles to the
+model name. The decorators now forward the full identity, and fake low/high
+profiles retain separate entries and normal cache hits. The built-in ordering
+already places its cache inside these decorators; no live collision was shown.
+
 Done when: offline subprocess tests verify effective arguments, working
 directory, cleanup, cache-profile separation, and failure handling. Do not claim
 that read-only sandboxing disables native tools. Any later paid confirmation

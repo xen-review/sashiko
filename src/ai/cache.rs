@@ -240,6 +240,78 @@ mod tests {
     use crate::ai::session::{LlmSession, SessionRunner, ValidationError};
     use serde_json::Value;
 
+    struct ProfiledProvider {
+        effort: &'static str,
+        calls: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AiProvider for ProfiledProvider {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AiResponse {
+                content: Some(self.effort.to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: None,
+                truncated: false,
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "same-model".to_string(),
+                context_window_size: 4096,
+            }
+        }
+
+        fn cache_identity(&self) -> String {
+            format!("same-model:effort={}", self.effort)
+        }
+    }
+
+    #[tokio::test]
+    async fn decorated_provider_profiles_keep_separate_cache_entries() {
+        for decorator in ["logging", "concurrency", "backoff"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("response_cache.db");
+            let calls = Arc::new(AtomicU64::new(0));
+            for effort in ["low", "high"] {
+                let inner: Arc<dyn AiProvider> = Arc::new(ProfiledProvider {
+                    effort,
+                    calls: calls.clone(),
+                });
+                let decorated: Arc<dyn AiProvider> = match decorator {
+                    "logging" => Arc::new(crate::ai::logging_provider::LoggingProvider::new(inner)),
+                    "concurrency" => Arc::new(
+                        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
+                            inner,
+                            Arc::new(tokio::sync::Semaphore::new(1)),
+                        ),
+                    ),
+                    "backoff" => Arc::new(crate::ai::backoff_provider::BackoffProvider::new(
+                        inner,
+                        Arc::new(crate::ai::quota::QuotaManager::new()),
+                        None,
+                    )),
+                    _ => unreachable!(),
+                };
+                let provider = CachingAiProvider::new(decorated, path.to_str().unwrap(), 30)
+                    .await
+                    .unwrap();
+                for _ in 0..2 {
+                    let response = provider
+                        .generate_content(AiRequest::default())
+                        .await
+                        .unwrap();
+                    assert_eq!(response.content.as_deref(), Some(effort), "{decorator}");
+                }
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{decorator}");
+        }
+    }
+
     /// Answers every request with text the session below rejects, and counts
     /// how often it was actually asked.
     struct RejectedAnswers {
