@@ -176,6 +176,13 @@ impl CodexCliProvider {
                 continue;
             }
             if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
+                if event["type"] == "turn.failed" {
+                    let detail = error_message(&event).unwrap_or("No failure detail reported");
+                    anyhow::bail!(
+                        "codex CLI reported a failed turn: {}",
+                        redact_secret(detail)
+                    );
+                }
                 if let Some(message) = error_message(&event) {
                     self.check_error_message(message)?;
                 }
@@ -643,6 +650,7 @@ impl AiProvider for CodexCliProvider {
                 ("effort", self.effort.as_deref()),
                 ("completion_profile", Some("restricted-v2")),
                 ("usage_profile", Some("measured-v1")),
+                ("terminal_profile", Some("failed-turn-v1")),
             ],
         )
     }
@@ -671,10 +679,15 @@ impl CodexCliProvider {
     }
 }
 
-/// Returns the explanation an error event carries. A rejected invocation
-/// surfaces either as a bare `{"type":"error"}` line or as an
-/// `item.completed` wrapping an error item; both carry it in `message`.
+/// Returns the explanation from a CLI error or failed-turn event.
 fn error_message(event: &Value) -> Option<&str> {
+    if event["type"] == "turn.failed" {
+        return Some(
+            event["error"]["message"]
+                .as_str()
+                .unwrap_or("No failure detail reported"),
+        );
+    }
     [event, &event["item"]]
         .into_iter()
         .find(|candidate| candidate["type"] == "error")
@@ -1329,6 +1342,17 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
                 ]
             )
         );
+        assert_ne!(
+            provider.cache_identity(),
+            cache_identity_with(
+                "test-model",
+                &[
+                    ("effort", Some("low")),
+                    ("completion_profile", Some("restricted-v2")),
+                    ("usage_profile", Some("measured-v1")),
+                ]
+            )
+        );
     }
 
     #[tokio::test]
@@ -1399,13 +1423,15 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
     }
 
     #[test]
-    fn error_messages_come_from_both_event_shapes() {
+    fn error_messages_include_failed_turns() {
         let raw = concat!(
             r#"{"type":"session.created"}"#,
             "\n",
             r#"{"type":"error","message":"[reasoning.effort] Invalid value: 'higest'"}"#,
             "\n",
             r#"{"type":"item.completed","item":{"type":"error","message":"disallowed by requirements"}}"#,
+            "\n",
+            r#"{"type":"turn.failed","error":{"message":"provider rejected the turn"}}"#,
             "\n",
             r#"not json"#,
             "\n",
@@ -1415,8 +1441,49 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             vec![
                 "[reasoning.effort] Invalid value: 'higest'".to_string(),
                 "disallowed by requirements".to_string(),
+                "provider rejected the turn".to_string(),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_turn_is_never_returned_as_success() {
+        for (exit_code, failure, expected) in [
+            (
+                0,
+                r#"{"type":"turn.failed","error":{"message":"provider rejected token=tok-123"}}"#,
+                "provider rejected token=[REDACTED]",
+            ),
+            (
+                1,
+                r#"{"type":"turn.failed","error":{"message":"provider rejected token=tok-123"}}"#,
+                "provider rejected token=[REDACTED]",
+            ),
+            (0, r#"{"type":"turn.failed"}"#, "No failure detail reported"),
+            (1, r#"{"type":"turn.failed"}"#, "No failure detail reported"),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("codex");
+            crate::test_support::write_executable_script(
+                &executable,
+                &format!(
+                    "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"text\":\"{{\\\"content\\\":\\\"OK\\\"}}\"}}}}'\nprintf '%s\\n' '{failure}'\nexit {exit_code}\n"
+                ),
+            );
+            let provider = CodexCliProvider {
+                model: "test-model".to_string(),
+                effort: None,
+                timeout_seconds: 10,
+            };
+            let error = provider
+                .generate_content_with_binary(AiRequest::default(), executable.as_os_str())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("tok-123"), "{error}");
+        }
     }
 
     #[test]

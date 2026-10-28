@@ -168,6 +168,15 @@ boundary, and the daemon restarted. No hour-long model trial was run.
 
 ### P0: Track Provider JSON Failures Without Inventing Results
 
+An offline fake-CLI regression found that an explicit turn.failed event after a
+valid message could be returned as success when the process exited zero. The
+provider now treats that event as failure for either exit status, retains a
+redacted nested diagnostic or an explicit missing-detail message, and separates
+old response-cache entries from the corrected parser. The installed CLI contains
+the event name, but no live failure was induced or replayed. This does not
+classify subscription exhaustion or enable retries. Focused provider tests and
+the full `make check-pr` gate passed.
+
 Update at 13:22 CET: the operator authorized raising Luna effort progressively
 and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
 model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
