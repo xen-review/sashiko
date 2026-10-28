@@ -181,7 +181,9 @@ provider retries and other missing backend usage remain unaccounted for.
 When an earlier local workflow attempt has unknown aggregate coverage, its
 retained stage records now keep an explicitly measured zero in retry
 diagnostics. A skipped stage is not evidence of a response, and a missing cache
-counter stays unknown. This observation does not cover the cancelled sibling.
+counter stays unknown. A zero-only final attempt is also retained when aggregate
+coverage is unknown; positive and fully covered final totals remain deduplicated.
+These observations do not cover the cancelled sibling.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

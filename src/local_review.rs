@@ -792,8 +792,12 @@ async fn review_single_patch(
         },
     );
     let error = last_error.unwrap_or_else(|| anyhow!("Patch review failed"));
-    if error.is::<crate::workflow::WorkflowFailure>() {
-        failed_workflow_usage.retain(|usage| usage.attempt != max_attempts);
+    if let Some(failure) = error.downcast_ref::<crate::workflow::WorkflowFailure>() {
+        retain_nonduplicate_failed_workflow_usage(
+            &mut failed_workflow_usage,
+            max_attempts,
+            &failure.outcome,
+        );
     }
     if reported_failed_attempts.is_empty() && failed_workflow_usage.is_empty() {
         Err(error)
@@ -892,6 +896,20 @@ impl FailedWorkflowUsage {
             usage_coverage,
         })
     }
+}
+
+fn retain_nonduplicate_failed_workflow_usage(
+    observations: &mut Vec<FailedWorkflowUsage>,
+    final_attempt: usize,
+    final_outcome: &crate::workflow::WorkflowOutcome,
+) {
+    observations.retain(|usage| {
+        usage.attempt != final_attempt
+            || (final_outcome.usage_coverage.is_none()
+                && usage.tokens_in == 0
+                && usage.tokens_out == 0
+                && usage.tokens_cached.unwrap_or(0) == 0)
+    });
 }
 
 fn reported_failure_usage_diagnostic(
@@ -2956,6 +2974,54 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn final_failed_attempt_retains_zero_when_aggregate_coverage_is_unknown() {
+        let stage = crate::workflow::StageRunRecord {
+            name: "completed".into(),
+            usage_coverage: Some(crate::ai::SessionUsageCoverage {
+                requests: 1,
+                responses_with_usage: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let outcome = crate::workflow::WorkflowOutcome {
+            stage_runs: vec![stage],
+            ..Default::default()
+        };
+        let usage = FailedWorkflowUsage::new(1, 3, 0, 0, 0, None, &outcome.stage_runs).unwrap();
+        let earlier = FailedWorkflowUsage::new(1, 1, 10, 2, 0, None, &[]).unwrap();
+        let mut observations = vec![earlier, usage];
+        retain_nonduplicate_failed_workflow_usage(&mut observations, 3, &outcome);
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].attempt, 1);
+        assert_eq!(observations[1].tokens_cached, Some(0));
+        assert!(observations[1].usage_coverage.is_none());
+    }
+
+    #[test]
+    fn final_failed_attempt_deduplicates_accounted_totals() {
+        let coverage = crate::ai::SessionUsageCoverage {
+            requests: 1,
+            responses_with_usage: 1,
+            ..Default::default()
+        };
+        for (tokens, aggregate_coverage) in [(0, Some(coverage)), (10, None)] {
+            let outcome = crate::workflow::WorkflowOutcome {
+                tokens_in: tokens,
+                usage_coverage: aggregate_coverage,
+                ..Default::default()
+            };
+            let earlier = FailedWorkflowUsage::new(1, 1, 5, 1, 0, None, &[]).unwrap();
+            let final_usage =
+                FailedWorkflowUsage::new(1, 3, tokens, 0, 0, Some(coverage), &[]).unwrap();
+            let mut observations = vec![earlier, final_usage];
+            retain_nonduplicate_failed_workflow_usage(&mut observations, 3, &outcome);
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].attempt, 1);
+        }
     }
 
     #[test]
