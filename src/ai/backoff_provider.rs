@@ -41,7 +41,8 @@ use tracing::warn;
 
 use crate::ai::quota::QuotaManager;
 use crate::ai::{
-    AiErrorClass, AiProvider, AiRequest, AiResponse, AiUsage, CacheStats, ProviderCapabilities,
+    AiErrorClass, AiProvider, AiRequest, AiResponse, BackoffRetryObservation,
+    BackoffRetryObservations, CacheStats, ObservedProviderCall, ProviderCapabilities,
     classify_ai_error, classify_provider_ai_error, get_log_prefix,
 };
 
@@ -51,12 +52,6 @@ use crate::ai::{
 /// within this.
 const MAX_ATTEMPTS: u32 = 6;
 const MAX_RETRY_OBSERVATIONS: usize = 32;
-
-#[derive(Debug)]
-pub(crate) struct BackoffRetryObservation {
-    pub attempt: u32,
-    pub usage: Option<AiUsage>,
-}
 
 #[derive(Debug)]
 pub(crate) struct BackoffObservedSuccess {
@@ -417,14 +412,32 @@ impl BackoffProvider {
 #[async_trait]
 impl AiProvider for BackoffProvider {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_observations(request)
+            .await
+            .result
+    }
+
+    async fn generate_content_with_observations(&self, request: AiRequest) -> ObservedProviderCall {
         match self.generate_content_observed(request).await {
             Ok(outcome) => {
                 log_retry_observations(&outcome.retries, outcome.truncated);
-                Ok(outcome.response)
+                ObservedProviderCall {
+                    result: Ok(outcome.response),
+                    backoff_retries: Some(BackoffRetryObservations {
+                        retries: outcome.retries,
+                        truncated: outcome.truncated,
+                    }),
+                }
             }
             Err(failure) => {
                 log_retry_observations(&failure.retries, failure.truncated);
-                Err(failure.error)
+                ObservedProviderCall {
+                    result: Err(failure.error),
+                    backoff_retries: Some(BackoffRetryObservations {
+                        retries: failure.retries,
+                        truncated: failure.truncated,
+                    }),
+                }
             }
         }
     }
@@ -452,6 +465,120 @@ mod tests {
     use crate::ai::gemini::GeminiError;
     use crate::ai::{AiMessage, AiRole};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test]
+    async fn observed_provider_dispatch_preserves_unknown_retries_and_errors() {
+        let plain: Arc<dyn AiProvider> = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let call = plain
+            .generate_content_with_observations(AiRequest::default())
+            .await;
+        assert!(call.result.is_ok());
+        assert!(call.backoff_retries.is_none());
+
+        let inner = mock(Behaviour::Transient, 1, Duration::ZERO);
+        let mut backoff = fast(inner);
+        backoff.base_delay = Duration::ZERO;
+        let backoff: Arc<dyn AiProvider> = Arc::new(backoff);
+        let call = backoff
+            .generate_content_with_observations(AiRequest::default())
+            .await;
+        assert!(call.result.is_ok());
+        let retries = call.backoff_retries.unwrap();
+        assert_eq!(retries.retries.len(), 1);
+        assert_eq!(retries.retries[0].attempt, 1);
+        assert!(retries.retries[0].usage.is_none());
+        assert!(!retries.truncated);
+
+        let inner = mock(Behaviour::Transient, 2, Duration::ZERO);
+        let mut backoff = fast(inner);
+        backoff.base_delay = Duration::ZERO;
+        backoff.max_attempts = Some(2);
+        let backoff: Arc<dyn AiProvider> = Arc::new(backoff);
+        let call = backoff
+            .generate_content_with_observations(AiRequest::default())
+            .await;
+        assert!(matches!(
+            classify_ai_error(&call.result.unwrap_err()),
+            AiErrorClass::Transient { .. }
+        ));
+        assert_eq!(call.backoff_retries.unwrap().retries.len(), 1);
+    }
+
+    #[test]
+    fn backoff_observations_round_trip_unknown_and_measured_zero() {
+        let observations = BackoffRetryObservations {
+            retries: vec![
+                BackoffRetryObservation {
+                    attempt: 1,
+                    usage: None,
+                },
+                BackoffRetryObservation {
+                    attempt: 2,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        cached_tokens: Some(0),
+                    }),
+                },
+            ],
+            truncated: true,
+        };
+        let encoded = serde_json::to_string(&observations).unwrap();
+        let decoded: BackoffRetryObservations = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, observations);
+    }
+
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn observed_provider_calls_do_not_replay_cached_retries() {
+        for backoff_outside_cache in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("response_cache.db");
+            let inner = mock(Behaviour::Transient, 1, Duration::ZERO);
+            let provider: Arc<dyn AiProvider> = if backoff_outside_cache {
+                let cache = crate::ai::cache::CachingAiProvider::new(
+                    inner.clone(),
+                    path.to_str().unwrap(),
+                    30,
+                )
+                .await
+                .unwrap();
+                let mut backoff = fast(Arc::new(cache));
+                backoff.base_delay = Duration::ZERO;
+                Arc::new(backoff)
+            } else {
+                let mut backoff = fast(inner.clone());
+                backoff.base_delay = Duration::ZERO;
+                Arc::new(
+                    crate::ai::cache::CachingAiProvider::new(
+                        Arc::new(backoff),
+                        path.to_str().unwrap(),
+                        30,
+                    )
+                    .await
+                    .unwrap(),
+                )
+            };
+
+            let first = provider
+                .generate_content_with_observations(AiRequest::default())
+                .await;
+            let second = provider
+                .generate_content_with_observations(AiRequest::default())
+                .await;
+            assert!(first.result.is_ok());
+            assert!(second.result.is_ok());
+            assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+            if backoff_outside_cache {
+                assert_eq!(first.backoff_retries.unwrap().retries.len(), 1);
+                assert!(second.backoff_retries.unwrap().retries.is_empty());
+            } else {
+                assert!(first.backoff_retries.is_none());
+                assert!(second.backoff_retries.is_none());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn observed_backoff_retains_reported_and_unknown_retry_usage() {
@@ -524,6 +651,32 @@ mod tests {
             );
             assert!(!outcome.truncated);
         }
+
+        let usage = crate::ai::AiUsage {
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            total_tokens: 15,
+            cached_tokens: Some(0),
+        };
+        let inner = Arc::new(RetryProvider {
+            calls: AtomicU32::new(0),
+            reported: Some(usage.clone()),
+        });
+        let mut provider = BackoffProvider::new(inner, Arc::new(QuotaManager::new()), None);
+        provider.max_attempts = Some(1);
+        let provider: Arc<dyn AiProvider> = Arc::new(provider);
+        let call = provider
+            .generate_content_with_observations(AiRequest::default())
+            .await;
+        let error = call.result.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                .unwrap()
+                .usage,
+            usage
+        );
+        assert!(call.backoff_retries.unwrap().retries.is_empty());
     }
 
     #[tokio::test]

@@ -182,6 +182,10 @@ emits numeric-only debug diagnostics, including an explicit truncation marker.
 Fake tests cover missing and measured counters, terminal errors, budget expiry,
 admission rejections and the 32-observation bound. These observations are not
 yet carried to session or daemon review results; no retry or budget rule changed.
+An opt-in provider trait call now returns those observations separately from
+the original response or error. Providers that do not expose the decorator report
+observations unavailable, not an empty list. Fake cache tests cover both wrapper
+orders and prevent old retry observations from being replayed on a cache hit.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the

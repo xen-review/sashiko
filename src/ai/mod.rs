@@ -298,6 +298,24 @@ pub struct AiResponse {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackoffRetryObservation {
+    pub attempt: u32,
+    pub usage: Option<AiUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackoffRetryObservations {
+    pub retries: Vec<BackoffRetryObservation>,
+    pub truncated: bool,
+}
+
+#[derive(Debug)]
+pub struct ObservedProviderCall {
+    pub result: Result<AiResponse>,
+    pub backoff_retries: Option<BackoffRetryObservations>,
+}
+
 /// Classifies a remote AI error using the typed stdio protocol payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case")]
@@ -508,6 +526,13 @@ pub struct CacheStats {
 pub trait AiProvider: Send + Sync {
     /// Generates content based on the provided request.
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse>;
+
+    async fn generate_content_with_observations(&self, request: AiRequest) -> ObservedProviderCall {
+        ObservedProviderCall {
+            result: self.generate_content(request).await,
+            backoff_retries: None,
+        }
+    }
 
     /// Returns the capabilities and constraints of this provider.
     fn get_capabilities(&self) -> ProviderCapabilities;

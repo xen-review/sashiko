@@ -172,6 +172,18 @@ model-generation counts or complete billing; backend-internal work and cancelled
 calls may remain unobserved. No model call, scheduling, or retry-policy change
 is authorized by this accounting work.
 
+For the next increment, add an object-safe observed provider call alongside the
+existing response-only method. Its default invokes the existing method and marks
+backoff observations unavailable, rather than asserting that none occurred.
+The backoff decorator overrides it with its per-call bounded observations and
+the original response or error. Observations travel separately from AiResponse,
+so a response cache cannot replay them as current work. A known empty backoff
+list describes only that decorator, not hidden backend attempts. The first step
+does not change session accounting or the worker protocol. Subsequent steps must
+preserve request identity, distinguish unavailable from empty and truncated
+observations, and validate the complete in-process and worker paths before
+reporting anything as durable.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final
