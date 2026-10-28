@@ -4560,9 +4560,10 @@
             const positive = values.some(value => valid(value) && value > 0);
             if (hasCoverage && coverage.requests === 0 && !positive) return 'No provider requests recorded';
             const complete = hasCoverage && coverage.requests > 0 && coverage.responses_with_usage === coverage.requests && coverage.responses_without_usage === 0;
-            const usageIncomplete = hasCoverage && coverage.responses_with_usage < coverage.requests;
-            const cachedUnknown = hasCoverage && (coverage.responses_without_cached_usage > 0 || usageIncomplete);
-            const status = hasCoverage ? `<br><span class="text-muted-sm">Requests with reported usage: ${coverage.responses_with_usage} / ${coverage.requests}${complete ? '' : ' (incomplete)'}${cachedUnknown ? '; cached usage incomplete' : ''}</span>` : session ? '' : '<br><span class="text-muted-sm">Usage coverage: Unknown</span>';
+            const checkpointIncomplete = !!session && session.usage_complete !== true;
+            const usageIncomplete = (hasCoverage && coverage.responses_with_usage < coverage.requests) || checkpointIncomplete;
+            const cachedUnknown = (hasCoverage && coverage.responses_without_cached_usage > 0) || usageIncomplete;
+            const status = hasCoverage ? `<br><span class="text-muted-sm">Requests with reported usage: ${coverage.responses_with_usage} / ${coverage.requests}${complete ? '' : ' (incomplete)'}${cachedUnknown ? '; cached usage incomplete' : ''}${checkpointIncomplete ? '; checkpoint usage incomplete or unconfirmed' : ''}</span>` : checkpointIncomplete ? '<br><span class="text-muted-sm">Usage incomplete or unconfirmed for checkpoint session</span>' : session ? '' : '<br><span class="text-muted-sm">Usage coverage: Unknown</span>';
             const confirmedZero = session?.usage_complete === true && session.provider_calls_recorded > 0;
             if (!positive && !confirmedZero && !(hasCoverage && coverage.responses_with_usage > 0)) return `Unavailable (not recorded or unconfirmed)${status}`;
             const uncached = !cachedUnknown && valid(record?.tokens_in) && valid(record?.tokens_cached) && record.tokens_in >= record.tokens_cached ? record.tokens_in - record.tokens_cached : null;

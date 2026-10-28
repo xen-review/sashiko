@@ -78,4 +78,64 @@ assert.match(measuredZero, /In: 0/);
 assert.match(measuredZero, /Cached: 0/);
 assert.match(measuredZero, /Out: 0/);
 
+const interruptedCheckpoint = render({
+    tokens_in: 100,
+    tokens_cached: 20,
+    tokens_out: 4,
+    checkpoint_session: {
+        provider_calls_recorded: 1,
+        provider_calls_attempted: null,
+        usage_complete: false,
+    },
+});
+assert.match(interruptedCheckpoint, /In: Unknown/);
+assert.match(interruptedCheckpoint, /Cached: 20 \(partial\)/);
+assert.match(interruptedCheckpoint, /Out: 4 \(partial\)/);
+assert.match(interruptedCheckpoint, /Usage incomplete/);
+
+const completedCheckpoint = render({
+    tokens_in: 100,
+    tokens_cached: 20,
+    tokens_out: 4,
+    checkpoint_session: {
+        provider_calls_recorded: 1,
+        provider_calls_attempted: 1,
+        usage_complete: true,
+    },
+});
+assert.match(completedCheckpoint, /In: 80/);
+assert.match(completedCheckpoint, /Cached: 20/);
+assert.match(completedCheckpoint, /Out: 4/);
+assert.doesNotMatch(completedCheckpoint, /partial|incomplete/i);
+
+const unconfirmedZeroCheckpoint = render({
+    tokens_in: 0,
+    tokens_cached: 0,
+    tokens_out: 0,
+    checkpoint_session: { provider_calls_recorded: 1, usage_complete: false },
+});
+assert.match(unconfirmedZeroCheckpoint, /Unavailable/);
+assert.match(unconfirmedZeroCheckpoint, /Usage incomplete/);
+
+const measuredZeroCheckpoint = render({
+    tokens_in: 0,
+    tokens_cached: 0,
+    tokens_out: 0,
+    checkpoint_session: { provider_calls_recorded: 1, usage_complete: true },
+});
+assert.match(measuredZeroCheckpoint, /In: 0/);
+assert.match(measuredZeroCheckpoint, /Cached: 0/);
+assert.match(measuredZeroCheckpoint, /Out: 0/);
+
+const completedCheckpointWithoutCache = render({
+    tokens_in: 100,
+    tokens_cached: null,
+    tokens_out: 4,
+    checkpoint_session: { provider_calls_recorded: 1, usage_complete: true },
+});
+assert.match(completedCheckpointWithoutCache, /In: Unknown/);
+assert.match(completedCheckpointWithoutCache, /Cached: Unknown/);
+assert.match(completedCheckpointWithoutCache, /Out: 4/);
+assert.doesNotMatch(completedCheckpointWithoutCache, /partial/);
+
 console.log('Review token rendering checks passed');

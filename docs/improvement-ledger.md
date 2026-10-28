@@ -902,6 +902,13 @@ cached-token coverage missing retain their measured output values. The existing
 Node regression exercises these cases, and the diff-aware `make check-pr` gate
 passes. No live model call or browser verification was performed.
 
+Checkpoint sessions also use their persisted usage-complete flag when rendering
+review tokens. Unconfirmed checkpoint totals are labeled partial or unknown;
+complete measured totals, including explicit zeros, remain distinct. The Node
+renderer regression exercises interrupted and completed checkpoint records, and
+the diff-aware `make check-pr` gate passes. This has not been checked in the
+integrated browser or deployed.
+
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing
