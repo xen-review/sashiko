@@ -79,6 +79,14 @@ present its unconfirmed counters as a measured zero. Backend-confirmed per-stage
 effort and complete native-call/live telemetry remain open; see the report for
 browser limits and the response-coverage scope below.
 
+An offline Copilot parser check found that output-only telemetry was presented
+as complete usage with zero input tokens. Because AiUsage requires both input
+and output counts, the parser now leaves usage unavailable and separates prior
+cache entries. The harness consequently refuses continuation without measured
+input usage; workflow output can still retain the reply but cannot report even
+the partial output count through AiUsage. Parser and harness checks and the full
+`make check-pr` gate pass. No live Copilot call was made.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for

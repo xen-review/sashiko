@@ -951,8 +951,10 @@ mod tests {
             assert!(!events[5].provider_in_flight);
         }
 
-        let mut missing = response(Some("Report"), 0, 20);
-        missing.usage = None;
+        let missing = crate::ai::copilot_cli::parse_jsonl_events(
+            r#"{"type":"assistant.message","data":{"content":"Report","outputTokens":20}}"#,
+        )
+        .unwrap();
         let provider = Provider {
             replies: Mutex::new(VecDeque::from([missing])),
             calls: AtomicUsize::new(0),

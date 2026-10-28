@@ -122,8 +122,8 @@ Context window sizes:
 
 Uses a local
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
-installation as the completion backend. This uses your GitHub Copilot
-subscription -- no per-token charge, no API key.
+installation as the completion backend. Billing and usage limits depend on the
+GitHub Copilot account and plan.
 
 **Prerequisites:**
 
@@ -146,6 +146,10 @@ cp docs/examples/Settings.copilot-cli.toml Settings.toml
 - The prompt is sent via stdin (not `-p`) to avoid Linux's
   `MAX_ARG_STRLEN` cap (~128 KB per argv element).
 - `max_interactions` controls tool-call rounds before aborting.
+- The parsed event stream does not provide a verified input-token count.
+  Usage is unavailable, including an output count reported on its own. The
+  agent harness therefore stops rather than continuing without measured input
+  usage for its token budget.
 
 **Note:** Each review may spawn many `copilot` processes. Lower
 `review.concurrency` if you hit subscription rate limits.

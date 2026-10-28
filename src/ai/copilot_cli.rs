@@ -38,7 +38,7 @@ use super::claude_cli::{
     CLI_PROMPT_FORMAT_PROFILE, build_prompt, collect_cli_output, log_and_redact_stderr,
     parse_inner_response,
 };
-use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
+use crate::ai::{AiProvider, AiRequest, AiResponse, ProviderCapabilities};
 
 pub struct CopilotCliProvider {
     pub model: String,
@@ -126,6 +126,7 @@ impl AiProvider for CopilotCliProvider {
             &[
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
                 ("terminal_profile", Some("failed-result-v1")),
+                ("usage_profile", Some("input-unavailable-v1")),
             ],
         )
     }
@@ -141,7 +142,6 @@ impl AiProvider for CopilotCliProvider {
 /// All other event types (deltas, MCP server status, etc.) are ignored.
 pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
     let mut content: Option<String> = None;
-    let mut usage: Option<AiUsage> = None;
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -158,17 +158,6 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
             Some("assistant.message") => {
                 if let Some(text) = event["data"]["content"].as_str() {
                     content = Some(text.to_string());
-                }
-                // Per-message output tokens
-                if usage.is_none()
-                    && let Some(out_tokens) = event["data"]["outputTokens"].as_u64()
-                {
-                    usage = Some(AiUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: out_tokens as usize,
-                        total_tokens: out_tokens as usize,
-                        cached_tokens: None,
-                    });
                 }
             }
             Some("result") => {
@@ -192,7 +181,7 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
 
     // If we captured structured content, try to parse it for tool calls
     if let Some(text) = &content {
-        return parse_inner_response(text, usage);
+        return parse_inner_response(text, None);
     }
 
     // No assistant.message events found — return empty
@@ -202,7 +191,7 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
         thought: None,
         thought_signature: None,
         tool_calls: None,
-        usage,
+        usage: None,
         truncated: false,
     })
 }
@@ -340,6 +329,16 @@ printf '%s\n' '{"type":"assistant.message","data":{"content":"{\"content\":\"OK\
                 &[("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE))],
             )
         );
+        assert_ne!(
+            provider.cache_identity(),
+            crate::ai::cache_identity_with(
+                &provider.model,
+                &[
+                    ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                    ("terminal_profile", Some("failed-result-v1")),
+                ],
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -386,8 +385,21 @@ exit 0
 
         let resp = parse_jsonl_events(&raw).unwrap();
         assert_eq!(resp.content.as_deref(), Some("2 + 2 = 4"));
-        let usage = resp.usage.unwrap();
-        assert_eq!(usage.completion_tokens, 10);
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn output_only_usage_is_unavailable() {
+        for output in [json!(null), json!(0), json!(10), json!("unknown")] {
+            let raw = json!({
+                "type": "assistant.message",
+                "data": {"content": "reply", "outputTokens": output}
+            })
+            .to_string();
+            let response = parse_jsonl_events(&raw).unwrap();
+            assert_eq!(response.content.as_deref(), Some("reply"));
+            assert!(response.usage.is_none());
+        }
     }
 
     #[test]
