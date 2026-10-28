@@ -188,7 +188,8 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
     ]});
     let response = |content: &str| {
         format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"item.completed", "item":{"type":"reasoning", "text":"internal reasoning"}}),
             serde_json::json!({"type":"item.completed", "item":{"type":"agent_message", "text":serde_json::json!({"content":content}).to_string()}}),
             serde_json::json!({"type":"turn.completed", "usage":{"input_tokens":30, "output_tokens":10, "cached_input_tokens":20}})
         )

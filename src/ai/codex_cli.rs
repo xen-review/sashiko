@@ -166,6 +166,7 @@ impl CodexCliProvider {
         //   {"type": "error", "message": "..."}
         let mut text_parts = Vec::new();
         let mut usage: Option<AiUsage> = None;
+        let mut saw_event = false;
 
         for line in raw.lines() {
             let trimmed = line.trim();
@@ -173,6 +174,20 @@ impl CodexCliProvider {
                 continue;
             }
             if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
+                if matches!(
+                    event["type"].as_str(),
+                    Some(
+                        "thread.started"
+                            | "turn.started"
+                            | "turn.completed"
+                            | "item.started"
+                            | "item.updated"
+                            | "item.completed"
+                            | "error"
+                    )
+                ) {
+                    saw_event = true;
+                }
                 if event["type"] == "turn.failed" {
                     let detail = error_message(&event).unwrap_or("No failure detail reported");
                     anyhow::bail!(
@@ -184,7 +199,7 @@ impl CodexCliProvider {
                     self.check_error_message(message)?;
                 }
                 match event["type"].as_str() {
-                    Some("item.completed") => {
+                    Some("item.completed") if event["item"]["type"] == "agent_message" => {
                         if let Some(text) = event["item"]["text"].as_str() {
                             text_parts.push(text.to_string());
                         }
@@ -198,7 +213,10 @@ impl CodexCliProvider {
         }
 
         let response_text = text_parts.join("\n");
-        if response_text.is_empty() {
+        if response_text.trim().is_empty() {
+            if saw_event || raw.trim().is_empty() {
+                anyhow::bail!("codex CLI produced no agent message");
+            }
             // Fall back to raw output if no events parsed
             warn!("codex-cli: no item.completed events found, using raw output");
             return parse_inner_response(&raw, usage);
@@ -652,6 +670,7 @@ impl AiProvider for CodexCliProvider {
                 ("completion_profile", Some("restricted-v2")),
                 ("usage_profile", Some("measured-v1")),
                 ("terminal_profile", Some("failed-turn-v1")),
+                ("item_profile", Some("agent-message-v1")),
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
             ],
         )
@@ -1217,6 +1236,7 @@ fixture_dir=${0%/*}
 printf '%s\n' "$PWD" "$@" > "$fixture_dir/args"
 cat completion.md > "$fixture_dir/instructions"
 cat > "$fixture_dir/stdin"
+printf '%s\n' '{"type":"item.completed","item":{"type":"reasoning","text":"internal reasoning"}}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"content\":\"OK\"}"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
 "#,
@@ -1305,6 +1325,60 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_distinguishes_missing_message_from_plain_output() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("codex");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"item.completed","item":{"type":"reasoning","text":"internal reasoning"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
+"#,
+        );
+        let provider = CodexCliProvider {
+            model: "test-model".to_string(),
+            effort: None,
+            timeout_seconds: 600,
+        };
+        let request = AiRequest {
+            system: None,
+            messages: vec![],
+            tools: None,
+            temperature: None,
+            response_format: None,
+            context_tag: None,
+            reasoning_effort: None,
+        };
+        let result = provider
+            .generate_content_with_binary(request.clone(), executable.as_os_str())
+            .await;
+        assert!(result.is_err());
+
+        for script in [
+            "#!/bin/sh\ncat >/dev/null\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"   \"}}'\n",
+        ] {
+            crate::test_support::write_executable_script(&executable, script);
+            let result = provider
+                .generate_content_with_binary(request.clone(), executable.as_os_str())
+                .await;
+            assert!(result.is_err());
+        }
+
+        crate::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"content\":\"plain reply\"}'\n",
+        );
+        let response = provider
+            .generate_content_with_binary(request, executable.as_os_str())
+            .await
+            .unwrap();
+        assert_eq!(response.content.as_deref(), Some("plain reply"));
+    }
+
     #[test]
     fn usage_requires_measured_counters_and_preserves_explicit_cached_zero() {
         for value in [
@@ -1378,6 +1452,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
                     ("completion_profile", Some("restricted-v2")),
                     ("usage_profile", Some("measured-v1")),
                     ("terminal_profile", Some("failed-turn-v1")),
+                    ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
                 ]
             )
         );

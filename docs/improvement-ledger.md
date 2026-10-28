@@ -169,6 +169,12 @@ call or historical backfill was used. The completion stream does not supply a
 trustworthy effective-effort field, so the UI must retain Unknown rather than
 promoting configured effort into backend confirmation.
 
+The Codex event parser now takes answer text only from completed agent-message
+items and rejects structured or blank streams without an answer. Plain-output
+compatibility remains, and the cache identity separates older parser results.
+Fake-CLI and harness integration tests cover mixed items and missing answers;
+this change has not been deployed or tested with a live model.
+
 The optional per-turn logger also rendered an unavailable cached-token count as
 zero. It now logs unknown separately from measured zero and positive counts,
 without changing the provider response. A fake-provider log capture covers all
