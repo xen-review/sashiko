@@ -80,14 +80,11 @@ impl DeadlineBudget {
             last_credit_end: std::sync::Mutex::new(None),
         }
     }
-}
 
-impl RetryBudget for DeadlineBudget {
-    fn credit_wait(&self, slept: Duration) {
+    fn credit_wait_at(&self, slept: Duration, now: tokio::time::Instant) {
         if slept.is_zero() {
             return;
         }
-        let now = tokio::time::Instant::now();
         let sleep_start = now.checked_sub(slept).unwrap_or(now);
         let mut last_end = self.last_credit_end.lock().unwrap();
         let effective_start = match *last_end {
@@ -104,6 +101,12 @@ impl RetryBudget for DeadlineBudget {
                 *last_end = Some(now);
             }
         }
+    }
+}
+
+impl RetryBudget for DeadlineBudget {
+    fn credit_wait(&self, slept: Duration) {
+        self.credit_wait_at(slept, tokio::time::Instant::now());
     }
 
     fn check(&self) -> Result<()> {
@@ -406,23 +409,27 @@ mod tests {
 
     #[tokio::test]
     async fn deadline_budget_credit_wait_deduplicates_overlapping_sleeps() {
-        let deadline = Arc::new(std::sync::Mutex::new(
-            tokio::time::Instant::now() + Duration::from_secs(60),
-        ));
+        let now = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = Arc::new(std::sync::Mutex::new(now + Duration::from_secs(60)));
         let budget = DeadlineBudget::new(deadline.clone());
 
-        // First sleep of 10s credits approximately 10s.
-        budget.credit_wait(Duration::from_secs(10));
-        let d1 = *deadline.lock().unwrap();
+        budget.credit_wait_at(Duration::from_secs(10), now);
+        let first_credit = *deadline.lock().unwrap();
+        assert_eq!(first_credit, now + Duration::from_secs(70));
 
-        // An immediately following call reporting the same 10s sleep should not add another 10s.
-        budget.credit_wait(Duration::from_secs(10));
-        let d2 = *deadline.lock().unwrap();
-        assert_eq!(d1, d2);
+        budget.credit_wait_at(Duration::from_secs(10), now);
+        let repeated_credit = *deadline.lock().unwrap();
+        assert_eq!(first_credit, repeated_credit);
 
-        // Zero sleep should not affect deadline.
-        budget.credit_wait(Duration::ZERO);
-        let d3 = *deadline.lock().unwrap();
-        assert_eq!(d2, d3);
+        budget.credit_wait_at(Duration::from_secs(10), now + Duration::from_secs(5));
+        let overlap_credit = *deadline.lock().unwrap();
+        assert_eq!(overlap_credit, repeated_credit + Duration::from_secs(5));
+
+        budget.credit_wait_at(Duration::from_secs(10), now + Duration::from_secs(20));
+        let separate_credit = *deadline.lock().unwrap();
+        assert_eq!(separate_credit, overlap_credit + Duration::from_secs(10));
+
+        budget.credit_wait_at(Duration::ZERO, now + Duration::from_secs(20));
+        assert_eq!(*deadline.lock().unwrap(), separate_credit);
     }
 }

@@ -1015,6 +1015,10 @@ A final rate-limited attempt now records the shared backoff even when that
 request has exhausted its attempts. A fake-provider test verifies that it does
 not retry and that other requests remain blocked.
 
+The wait-credit regression now uses explicit instants after a real-clock
+assertion failed under scheduler delay. It covers duplicate, overlapping and
+separate waits without changing runtime clock behavior.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model
