@@ -35,7 +35,8 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::claude_cli::{
-    CLI_PROMPT_FORMAT_PROFILE, build_prompt, log_and_redact_stderr, parse_inner_response,
+    CLI_PROMPT_FORMAT_PROFILE, build_prompt, collect_cli_output, log_and_redact_stderr,
+    parse_inner_response,
 };
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
@@ -59,9 +60,13 @@ pub fn build_copilot_args(model: &str) -> Vec<String> {
     ]
 }
 
-#[async_trait]
-impl AiProvider for CopilotCliProvider {
-    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+impl CopilotCliProvider {
+    async fn generate_content_with_binary(
+        &self,
+        request: AiRequest,
+        binary: &std::ffi::OsStr,
+        call_timeout: Duration,
+    ) -> Result<AiResponse> {
         let prompt = build_prompt(&request);
 
         debug!("copilot-cli prompt length: {} chars", prompt.len());
@@ -71,7 +76,7 @@ impl AiProvider for CopilotCliProvider {
         // prompts (subsystem guides + diff + tool definitions) routinely
         // exceed that and cause spawn() to fail with E2BIG. Stdin has no such
         // limit and the timing is equivalent in copilot's non-interactive mode.
-        let mut child = Command::new("copilot")
+        let child = Command::new(binary)
             .args(build_copilot_args(&self.model))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -80,18 +85,7 @@ impl AiProvider for CopilotCliProvider {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn copilot CLI: {}. Is it installed?", e))?;
 
-        // Write the prompt to copilot's stdin and close the pipe so it
-        // proceeds to non-interactive (--print-like) mode.
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|e| anyhow::anyhow!("copilot CLI stdin write failed: {}", e))?;
-            drop(stdin);
-        }
-
-        let output = timeout(Duration::from_secs(600), child.wait_with_output())
+        let output = timeout(call_timeout, collect_cli_output(child, &prompt))
             .await
             .map_err(|_| anyhow::anyhow!("copilot CLI timed out after 10 minutes"))?
             .map_err(|e| anyhow::anyhow!("copilot CLI wait error: {}", e))?;
@@ -105,6 +99,18 @@ impl AiProvider for CopilotCliProvider {
         }
 
         parse_jsonl_events(&raw)
+    }
+}
+
+#[async_trait]
+impl AiProvider for CopilotCliProvider {
+    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_binary(
+            request,
+            std::ffi::OsStr::new("copilot"),
+            Duration::from_secs(600),
+        )
+        .await
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -202,6 +208,121 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_timeout_includes_prompt_transfer() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("copilot");
+        crate::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nfixture_dir=${0%/*}\nprintf '%s\\n' \"$$\" > \"$fixture_dir/pid\"\nwhile :; do :; done\n",
+        );
+        let provider = CopilotCliProvider {
+            model: "test-model".to_string(),
+        };
+        let result = timeout(
+            Duration::from_secs(3),
+            provider.generate_content_with_binary(
+                AiRequest {
+                    system: Some("x".repeat(1024 * 1024)),
+                    ..Default::default()
+                },
+                executable.as_os_str(),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("prompt transfer exceeded the provider deadline")
+        .unwrap_err();
+        assert!(result.to_string().contains("timed out"));
+        #[cfg(target_os = "linux")]
+        {
+            let pid = std::fs::read_to_string(fixture.path().join("pid")).unwrap();
+            let process = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+            timeout(Duration::from_secs(2), async {
+                while process.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_drains_output_while_sending_prompt() {
+        for redirect in ["", ">&2"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("copilot");
+            let script = r#"#!/bin/sh
+fixture_dir=${0%/*}
+head -c 262144 /dev/zero | tr '\000' ' ' REDIRECT
+printf '\n'
+cat > "$fixture_dir/stdin"
+printf '%s\n' '{"type":"assistant.message","data":{"content":"{\"content\":\"OK\"}"}}'
+"#
+            .replace("REDIRECT", redirect);
+            crate::test_support::write_executable_script(&executable, &script);
+            let provider = CopilotCliProvider {
+                model: "test-model".to_string(),
+            };
+            let request = AiRequest {
+                system: Some("x".repeat(1024 * 1024)),
+                ..Default::default()
+            };
+            let expected_prompt = build_prompt(&request);
+            let response = provider
+                .generate_content_with_binary(
+                    request,
+                    executable.as_os_str(),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.content.as_deref(), Some("OK"));
+            assert_eq!(
+                std::fs::read_to_string(fixture.path().join("stdin")).unwrap(),
+                expected_prompt
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn early_exit_preserves_failure_and_rejects_incomplete_prompt() {
+        for (exit_code, expected) in [
+            (0, "failed to write prompt"),
+            (1, "provider rejected token=[REDACTED]"),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("copilot");
+            crate::test_support::write_executable_script(
+                &executable,
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' 'provider rejected token=tok-123' >&2\nexit {exit_code}\n"
+                ),
+            );
+            let provider = CopilotCliProvider {
+                model: "test-model".to_string(),
+            };
+            let error = provider
+                .generate_content_with_binary(
+                    AiRequest {
+                        system: Some("x".repeat(1024 * 1024)),
+                        ..Default::default()
+                    },
+                    executable.as_os_str(),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("tok-123"), "{error}");
+        }
+    }
 
     #[test]
     fn cache_identity_excludes_old_prompt_format() {

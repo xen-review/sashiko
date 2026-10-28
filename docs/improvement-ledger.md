@@ -184,6 +184,13 @@ rejecting incomplete prompt delivery on a zero exit. Fake-process checks cover
 stdout and stderr backpressure, timeout, redaction, and cancellation cleanup;
 the full `make check-pr` gate passes. No equivalent live stall was established.
 
+A separate fake Copilot CLI showed that its 600-second deadline began only
+after prompt delivery, allowing a blocked stdin write to wait indefinitely.
+The shared collector now bounds delivery and output collection together.
+Fake-process checks cover both output streams, incomplete delivery, redacted
+early failure and timeout child cleanup; the full `make check-pr` gate passes.
+No authenticated Copilot call or live stall was used for this fix.
+
 Update at 13:22 CET: the operator authorized raising Luna effort progressively
 and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
 model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
