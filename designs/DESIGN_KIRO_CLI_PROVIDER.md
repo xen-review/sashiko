@@ -1,5 +1,10 @@
 # DESIGN: Kiro CLI Provider Support
 
+The implementation now leaves token usage unavailable rather than presenting
+the estimates described below as measured usage. The agent harness stops when
+measured usage is unavailable; the remaining design describes the original
+provider implementation.
+
 ## Context
 
 Sashiko supports API-backed and CLI-backed providers through the generic

@@ -102,6 +102,12 @@ entries. The harness stops when required counters are unavailable. This was
 tested with fake ACP responses and the full `make check-pr` gate, not a live
 Goose backend.
 
+Kiro's fake ACP fixture likewise exposed character-based estimates as measured
+usage. The adapter now keeps usage unknown and separates earlier cache entries.
+The agent harness stops without measured counts; replies remain available to
+workflow callers. Focused tests and the full `make check-pr` gate pass. This
+change has not been tested with a live Kiro account.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for

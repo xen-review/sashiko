@@ -29,8 +29,7 @@ use tracing::debug;
 
 use super::acp::AcpProcess;
 use super::claude_cli::{CLI_PROMPT_FORMAT_PROFILE, build_prompt, parse_inner_response};
-use super::token_budget::TokenBudget;
-use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
+use crate::ai::{AiProvider, AiRequest, AiResponse, ProviderCapabilities};
 
 pub struct KiroCliProvider {
     pub model: String,
@@ -140,18 +139,7 @@ impl AiProvider for KiroCliProvider {
             anyhow::anyhow!("kiro-cli ACP timed out after {} seconds", self.timeout_secs)
         })??;
 
-        // Synthesize usage from token estimates since kiro-cli does not
-        // expose provider token counts.
-        let prompt_tokens = TokenBudget::approximate_tokens(&prompt);
-        let completion_tokens = TokenBudget::approximate_tokens(&text);
-        let usage = Some(AiUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-            cached_tokens: None,
-        });
-
-        parse_inner_response(&text, usage)
+        parse_inner_response(&text, None)
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -169,6 +157,7 @@ impl AiProvider for KiroCliProvider {
             &[
                 ("agent", self.agent.as_deref()),
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ("usage_profile", Some("unavailable-v1")),
             ],
         )
     }
@@ -196,6 +185,16 @@ mod tests {
         let named = test_provider(Some("reviewer"));
         assert_ne!(base.cache_identity(), named.cache_identity());
         assert_ne!(base.cache_identity(), base.model);
+        assert_ne!(
+            base.cache_identity(),
+            crate::ai::cache_identity_with(
+                &base.model,
+                &[
+                    ("agent", base.agent.as_deref()),
+                    ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ],
+            )
+        );
     }
 
     fn sample_request() -> AiRequest {
@@ -362,6 +361,7 @@ done
         };
         let response = provider.generate_content(sample_request()).await.unwrap();
         assert_eq!(response.content.as_deref(), Some("ok"));
+        assert!(response.usage.is_none());
     }
 
     #[tokio::test]

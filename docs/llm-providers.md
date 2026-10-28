@@ -274,6 +274,9 @@ cp docs/examples/Settings.kiro-cli.toml Settings.toml
   is used instead
 - An isolated temporary agent with a deny-all hook prevents accidental
   tool execution
+- Kiro usage is unavailable because this adapter does not receive measured
+  token counts. The agent harness stops rather than continuing without a
+  measured total.
 
 ## goose
 
