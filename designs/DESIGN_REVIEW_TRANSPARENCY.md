@@ -229,6 +229,12 @@ retain both truncation flags and missing-versus-measured usage. This map field
 alone does not establish complete native or billed usage and does not change
 the UI or failed-review diagnostics.
 
+The review-map stage table may display observed backoff retries separately
+from both response totals and session-visible retry usage. Limit the rendered
+rows, label omitted or truncated observations, and render malformed or missing
+numeric values as unknown. An empty record does not assert that the backend
+performed no hidden work. Legacy maps without the field remain unchanged.
+
 For failed workflow attempts, preserve stage-scoped backoff records in a
 separate diagnostic labeled by patch, workflow attempt, stage name, and
 one-based stage-run position. Bound retained stage records per patch and mark

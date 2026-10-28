@@ -8,8 +8,8 @@ const start = html.indexOf('function renderReviewTokens(');
 const end = html.indexOf('function renderActiveHarnessUsage(', start);
 assert(start >= 0 && end > start, 'review token renderer not found');
 
-const { render, renderRetries } = vm.runInNewContext(
-    `(function() { ${html.slice(start, end)}; return { render: renderReviewTokens, renderRetries: renderStageRetryUsage }; })()`,
+const { render, renderRetries, renderBackoff } = vm.runInNewContext(
+    `(function() { ${html.slice(start, end)}; return { render: renderReviewTokens, renderRetries: renderStageRetryUsage, renderBackoff: renderStageBackoffUsage }; })()`,
     { formatTokenCount: value => String(value) },
 );
 
@@ -33,6 +33,43 @@ const invalidRetry = renderRetries([
 ]);
 assert.match(invalidRetry, /Session request Unknown: Input 5.*Cached Unknown.*Output Unknown/);
 assert.match(invalidRetry, /Session request Unknown: Input Unknown.*Cached Unknown.*Output 0/);
+
+assert.equal(renderBackoff(undefined), '');
+assert.equal(renderBackoff({ requests: [], truncated: false }), '');
+const backoff = renderBackoff({
+    requests: [
+        { request: 2, observations: { retries: [
+            { attempt: 1, usage: null },
+            { attempt: 3, usage: { prompt_tokens: 12, completion_tokens: 3, cached_tokens: 0 } },
+        ], truncated: true } },
+        { request: '<img>', observations: { retries: [
+            { attempt: '<script>', usage: { prompt_tokens: '<script>', completion_tokens: -1, cached_tokens: 0 } },
+        ], truncated: false } },
+    ],
+    truncated: false,
+});
+assert.match(backoff, /Session request 2, backoff attempt 1: Input Unknown.*Cached Unknown.*Output Unknown/);
+assert.match(backoff, /Session request 2, backoff attempt 3: Input 12.*Cached 0.*Output 3/);
+assert.match(backoff, /Session request Unknown, backoff attempt Unknown: Input Unknown/);
+assert.match(backoff, /separate from stage totals/i);
+assert.match(backoff, /truncated/i);
+assert.doesNotMatch(backoff, /<img|<script>/);
+const manyBackoff = renderBackoff({
+    requests: [{ request: 1, observations: { retries: Array(33).fill({ attempt: 1, usage: null }), truncated: false } }],
+    truncated: false,
+});
+assert.equal((manyBackoff.match(/backoff attempt/g) || []).length, 32);
+assert.match(manyBackoff, /truncated/i);
+assert.match(renderBackoff({ requests: [{ request: 1, observations: {} }], truncated: false }), /unavailable/i);
+assert.match(renderBackoff({ requests: [], truncated: true }), /truncated/i);
+assert.match(renderBackoff({ requests: [], truncated: 'yes' }), /unavailable/i);
+const invalidBackoff = renderBackoff({
+    requests: [{ request: 0, observations: { retries: [
+        { attempt: Number.MAX_SAFE_INTEGER + 1, usage: { prompt_tokens: 5, completion_tokens: 0, cached_tokens: 6 } },
+    ], truncated: false } }],
+    truncated: false,
+});
+assert.match(invalidBackoff, /Session request Unknown, backoff attempt Unknown: Input 5.*Cached Unknown.*Output 0/);
 
 const record = { tokens_in: 100, tokens_cached: 0, tokens_out: 4 };
 const coverage = {

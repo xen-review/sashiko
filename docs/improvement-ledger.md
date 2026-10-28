@@ -175,13 +175,13 @@ and successful review maps expose them under the originating stage. Failed
 workflow-engine outcomes retain separate patch, attempt, stage-run and
 request-scoped retry diagnostics. A fake CLI covers exhausted attempts for two
 patches, and a fake worker verifies persistence in failed-review logs. Retry
-observations from post-processing failures, provider decorators, cancelled work
-and missing counters remain unknown.
+observations from post-processing failures, cancelled work and missing counters
+remain unknown; decorator-specific support is described below.
 BackoffProvider now records a bounded internal list of retry observations and
 emits numeric-only debug diagnostics, including an explicit truncation marker.
 Fake tests cover missing and measured counters, terminal errors, budget expiry,
 admission rejections and the 32-observation bound. These observations are not
-yet carried to session or daemon review results; no retry or budget rule changed.
+merged into successful response usage, and no retry or budget rule changed.
 An opt-in provider trait call now returns those observations separately from
 the original response or error. Providers that do not expose the decorator report
 observations unavailable, not an empty list. Fake cache tests cover both wrapper
@@ -203,8 +203,9 @@ budgeted provider errors still fail closed. An outer response cache now forwards
 current miss or failure observations but never replays them on hits. Cancellation
 or backend-internal work remains unknown.
 The review-map stage table now displays bounded, validated retry observations
-separately from stage totals, preserving measured zero versus unknown cache
-counts. Standalone renderer checks cover malformed and hostile values; the
+separately from stage totals, including backoff retry records and preserving
+measured zero versus unknown cache counts. Standalone renderer checks cover
+malformed and hostile values and truncated records; the
 integrated browser connection remains unavailable for a visual layout check.
 Synthetic Codex streams also show completed-turn counters can precede a failed
 turn or nonzero CLI exit. The last validated pre-failure counters are now retained
