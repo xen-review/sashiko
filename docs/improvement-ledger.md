@@ -441,6 +441,14 @@ native tool features, and ignores user configuration. Existing authentication
 is retained, but custom routing from user config is intentionally not loaded;
 this compatibility change is documented. The active daemon remains on Luna.
 
+An offline formatter regression also found that model-supplied tool IDs and
+names could break quoted prompt attributes. The shared CLI formatter now encodes
+attribute delimiters and line breaks while retaining ordinary IDs unchanged.
+All six CLI adapters use a new prompt-format cache identity, so their earlier
+responses are not replayed under the corrected framing. Focused formatter and
+cache-profile checks and the full `make check-pr` gate pass. This is not a claim
+that prompt injection is eliminated, and no live model call was made.
+
 Done when: offline subprocess tests verify effective arguments, working
 directory, cleanup, cache-profile separation, and failure handling. Do not claim
 that read-only sandboxing disables native tools. Any later paid confirmation

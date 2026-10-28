@@ -34,7 +34,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use super::claude_cli::{build_prompt, log_and_redact_stderr, parse_inner_response};
+use super::claude_cli::{
+    CLI_PROMPT_FORMAT_PROFILE, build_prompt, log_and_redact_stderr, parse_inner_response,
+};
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
 pub struct CopilotCliProvider {
@@ -110,6 +112,13 @@ impl AiProvider for CopilotCliProvider {
             model_name: self.model.clone(),
             context_window_size: 200_000,
         }
+    }
+
+    fn cache_identity(&self) -> String {
+        crate::ai::cache_identity_with(
+            &self.model,
+            &[("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE))],
+        )
     }
 }
 
@@ -193,6 +202,14 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cache_identity_excludes_old_prompt_format() {
+        let provider = CopilotCliProvider {
+            model: "test-model".to_string(),
+        };
+        assert_ne!(provider.cache_identity(), provider.model);
+    }
 
     #[test]
     fn test_parse_simple_response() {

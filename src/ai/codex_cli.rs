@@ -27,7 +27,8 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::claude_cli::{
-    build_prompt, collect_cli_output, log_and_redact_stderr, parse_inner_response,
+    CLI_PROMPT_FORMAT_PROFILE, build_prompt, collect_cli_output, log_and_redact_stderr,
+    parse_inner_response,
 };
 use crate::ai::{
     AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, cache_identity_with,
@@ -647,6 +648,7 @@ impl AiProvider for CodexCliProvider {
                 ("completion_profile", Some("restricted-v2")),
                 ("usage_profile", Some("measured-v1")),
                 ("terminal_profile", Some("failed-turn-v1")),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
             ],
         )
     }
@@ -1346,6 +1348,18 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
                     ("effort", Some("low")),
                     ("completion_profile", Some("restricted-v2")),
                     ("usage_profile", Some("measured-v1")),
+                ]
+            )
+        );
+        assert_ne!(
+            provider.cache_identity(),
+            cache_identity_with(
+                "test-model",
+                &[
+                    ("effort", Some("low")),
+                    ("completion_profile", Some("restricted-v2")),
+                    ("usage_profile", Some("measured-v1")),
+                    ("terminal_profile", Some("failed-turn-v1")),
                 ]
             )
         );

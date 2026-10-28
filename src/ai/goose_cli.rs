@@ -46,7 +46,7 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use super::acp::AcpProcess;
-use super::claude_cli::{build_prompt, parse_inner_response};
+use super::claude_cli::{CLI_PROMPT_FORMAT_PROFILE, build_prompt, parse_inner_response};
 use super::token_budget::TokenBudget;
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
@@ -256,6 +256,7 @@ impl AiProvider for GooseCliProvider {
                 ("provider", Some(&self.goose_provider)),
                 ("context_limit", Some(context_limit.as_str())),
                 ("env", env_digest.as_deref()),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
             ],
         )
     }
@@ -399,6 +400,16 @@ mod tests {
         let openai = test_provider("goose", "openai");
         let ollama = test_provider("goose", "ollama");
         assert_ne!(openai.cache_identity(), ollama.cache_identity());
+        let context_limit = openai.context_window_size.to_string();
+        let legacy = crate::ai::cache_identity_with(
+            &openai.model,
+            &[
+                ("provider", Some(&openai.goose_provider)),
+                ("context_limit", Some(&context_limit)),
+                ("env", None),
+            ],
+        );
+        assert_ne!(openai.cache_identity(), legacy);
     }
 
     #[test]

@@ -28,7 +28,7 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use super::acp::AcpProcess;
-use super::claude_cli::{build_prompt, parse_inner_response};
+use super::claude_cli::{CLI_PROMPT_FORMAT_PROFILE, build_prompt, parse_inner_response};
 use super::token_budget::TokenBudget;
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
@@ -164,7 +164,13 @@ impl AiProvider for KiroCliProvider {
     fn cache_identity(&self) -> String {
         // context_window_size stays out. Unlike ollama's num_ctx it never
         // reaches the wire; it only budgets the prompt the cache hashes.
-        crate::ai::cache_identity_with(&self.model, &[("agent", self.agent.as_deref())])
+        crate::ai::cache_identity_with(
+            &self.model,
+            &[
+                ("agent", self.agent.as_deref()),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+            ],
+        )
     }
 }
 
@@ -189,6 +195,7 @@ mod tests {
         let base = test_provider(None);
         let named = test_provider(Some("reviewer"));
         assert_ne!(base.cache_identity(), named.cache_identity());
+        assert_ne!(base.cache_identity(), base.model);
     }
 
     fn sample_request() -> AiRequest {

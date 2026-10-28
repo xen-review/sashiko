@@ -33,7 +33,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use super::claude_cli::{build_prompt, log_and_redact_stderr, parse_inner_response};
+use super::claude_cli::{
+    CLI_PROMPT_FORMAT_PROFILE, build_prompt, log_and_redact_stderr, parse_inner_response,
+};
 use crate::ai::{
     AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, token_budget::TokenBudget,
 };
@@ -167,6 +169,7 @@ impl AiProvider for DevinCliProvider {
             &[
                 ("agent_config", self.agent_config.as_deref()),
                 ("config", self.config.as_deref()),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
             ],
         )
     }
@@ -187,6 +190,7 @@ mod tests {
     #[test]
     fn cache_identity_tracks_the_config_files() {
         let base = test_provider(None, None);
+        assert_ne!(base.cache_identity(), base.get_capabilities().model_name);
 
         let no_tools = test_provider(Some("/etc/sashiko/no-tools.json"), None);
         assert_ne!(base.cache_identity(), no_tools.cache_identity());

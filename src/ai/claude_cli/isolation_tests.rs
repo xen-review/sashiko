@@ -24,6 +24,14 @@ fn cache_identity_excludes_unrestricted_responses() {
             effort: effort.map(str::to_string),
         };
         assert_ne!(provider.cache_identity(), legacy);
+        let legacy_restricted = cache_identity_with(
+            model,
+            &[
+                ("effort", effort),
+                ("completion_profile", Some("restricted-v1")),
+            ],
+        );
+        assert_ne!(provider.cache_identity(), legacy_restricted);
     }
 }
 
