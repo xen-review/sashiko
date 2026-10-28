@@ -511,13 +511,17 @@ async fn review_single_patch(
     let ai = &settings.ai;
     let stages = settings.review.stages.clone();
     let retry_budget: Option<Arc<dyn crate::ai::backoff_provider::RetryBudget>> =
-        (timeout_seconds > 0).then(|| {
-            let deadline = Arc::new(std::sync::Mutex::new(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
-            ));
-            Arc::new(crate::ai::backoff_provider::DeadlineBudget::new(deadline))
-                as Arc<dyn crate::ai::backoff_provider::RetryBudget>
-        });
+        if timeout_seconds > 0 {
+            let deadline = tokio::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(timeout_seconds))
+                .context("local review deadline overflows")?;
+            let deadline = Arc::new(std::sync::Mutex::new(deadline));
+            Some(Arc::new(crate::ai::backoff_provider::DeadlineBudget::new(
+                deadline,
+            )))
+        } else {
+            None
+        };
     let max_attempts = worker_max_attempts(ai);
     let mut last_error = None;
     for attempt in 1..=max_attempts {
@@ -1968,6 +1972,52 @@ mod tests {
             context_tag: None,
             reasoning_effort: None,
         }
+    }
+
+    #[tokio::test]
+    async fn overflowing_local_review_deadline_is_rejected() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let worktree = GitWorktree::from_path(
+            directory.path().to_path_buf(),
+            directory.path().to_path_buf(),
+        );
+        let settings = Settings::new()?;
+        let patch = PatchInput {
+            index: 1,
+            diff: String::new(),
+            subject: None,
+            author: None,
+            date: None,
+            message_id: None,
+            commit_id: None,
+        };
+        let semaphore = Arc::new(Semaphore::new(1));
+        let quota = Arc::new(crate::ai::quota::QuotaManager::new());
+
+        let error = review_single_patch(
+            &worktree,
+            &settings,
+            1,
+            "subject",
+            &patch,
+            std::slice::from_ref(&patch),
+            &[],
+            &HashMap::new(),
+            &WorkerOptions::default(),
+            "baseline",
+            &semaphore,
+            &quota,
+            u64::MAX,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("local review deadline overflows")
+        );
+        Ok(())
     }
 
     #[tokio::test]
