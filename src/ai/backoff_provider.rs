@@ -278,6 +278,9 @@ impl AiProvider for BackoffProvider {
         loop {
             // Honour any active global rate-limit window before trying. The
             // wait is reported so a caller can keep it off its own deadline.
+            if let Some(budget) = &self.budget {
+                budget.check()?;
+            }
             let mut wait = BudgetWait::new(self.budget.as_deref());
             let slept = self.quota.wait_for_access_with(|| wait.start()).await;
             wait.finish(slept);
@@ -499,6 +502,32 @@ mod tests {
         assert!(provider.generate_content(dummy_request()).await.is_err());
         // The budget gates the loop, so the inner provider is never reached.
         assert_eq!(m.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn expired_budget_stops_before_quota_wait() {
+        let inner = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let quota = Arc::new(QuotaManager::new());
+        quota.report_quota_error(Duration::from_secs(60)).await;
+        let deadline = Arc::new(std::sync::Mutex::new(
+            tokio::time::Instant::now() - Duration::from_secs(1),
+        ));
+        let budget = Arc::new(DeadlineBudget::new(deadline));
+        let provider = BackoffProvider::new(inner.clone(), quota, Some(budget));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            provider.generate_content(dummy_request()),
+        )
+        .await
+        .expect("an expired budget must not enter quota backoff");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("active time exceeded")
+        );
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(feature = "server")]

@@ -1048,6 +1048,10 @@ attempt. In-process calls also recheck their retry budget when configured.
 Focused fake-provider tests cover this race; this is still in-memory backoff,
 not durable deferral.
 
+An already-expired retry budget now fails before entering a shared quota wait.
+A focused test uses the real deadline budget and an active barrier; the change
+has not been deployed or tested with a live provider.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model
