@@ -134,6 +134,10 @@ Fake-worker tests cover early failure, late measured and unmeasured responses,
 late budget overruns, and timeout with unknown in-flight usage. No live call or
 deployment was made.
 
+Completed responses that trigger a budget overrun are retained in scrubbed
+failure logs, including late arrivals. Fake-worker tests verify persistence,
+the budget-exceeded classification, and that the failed review is not retried.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for

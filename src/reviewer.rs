@@ -3307,7 +3307,11 @@ impl Reviewer {
                     });
                     let retained_logs = e
                         .downcast_ref::<UsageUnavailableOutput>()
-                        .and_then(UsageUnavailableOutput::logs);
+                        .and_then(UsageUnavailableOutput::logs)
+                        .or_else(|| {
+                            e.downcast_ref::<BudgetExceededOutput>()
+                                .and_then(BudgetExceededOutput::logs)
+                        });
                     error!("Review execution failed for {}: {}", patchset_id, e);
                     let _ = ctx
                         .db
@@ -3468,9 +3472,6 @@ impl UsageRequiredProvider {
             None
         };
         if let Some(message) = exceeded {
-            let _ = self
-                .abort_tx
-                .try_send(ReviewError::BudgetExceeded(message.clone()).into());
             return Err(ReviewError::BudgetExceeded(message).into());
         }
         Ok(())
@@ -3536,7 +3537,7 @@ impl UsageAvailability {
         }
     }
 
-    fn record_response(&self, response: &crate::ai::AiResponse) {
+    fn record_response(&self, response: &crate::ai::AiResponse, budget_exceeded: bool) {
         let mut state = self
             .state
             .lock()
@@ -3544,7 +3545,7 @@ impl UsageAvailability {
         if response.usage.is_none() {
             self.unavailable.store(true, Ordering::SeqCst);
         }
-        if state.closed || self.unavailable.load(Ordering::SeqCst) {
+        if budget_exceeded || state.closed || self.unavailable.load(Ordering::SeqCst) {
             state.responses.push(response.clone());
         }
     }
@@ -3572,16 +3573,16 @@ impl UsageAvailability {
         (!state.responses.is_empty()).then(|| UsageUnavailableOutput(json!({})))
     }
 
-    fn retain_responses(&self, output: &mut UsageUnavailableOutput) {
+    fn retain_responses(&self, output: &mut Value) {
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.responses.is_empty()
-            && let Some(output) = output.0.as_object_mut()
+            && let Some(output) = output.as_object_mut()
         {
             output.insert(
-                "provider_responses_after_worker_exit_or_usage_unavailable".to_string(),
+                "retained_provider_responses".to_string(),
                 json!(&state.responses),
             );
         }
@@ -3619,14 +3620,45 @@ impl std::fmt::Display for UsageUnavailableOutput {
 
 impl std::error::Error for UsageUnavailableOutput {}
 
+#[derive(Debug)]
+struct BudgetExceededOutput {
+    output: Value,
+    message: String,
+}
+
+impl BudgetExceededOutput {
+    fn logs(&self) -> Option<String> {
+        UsageUnavailableOutput(self.output.clone()).logs()
+    }
+}
+
+impl std::fmt::Display for BudgetExceededOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BudgetExceededOutput {}
+
 #[async_trait::async_trait]
 impl AiProvider for UsageRequiredProvider {
     async fn generate_content(&self, request: AiRequest) -> Result<crate::ai::AiResponse> {
         let _active = self.availability.begin_call()?;
         let response = self.inner.generate_content(request).await?;
-        self.availability.record_response(&response);
-        if let Some(usage) = &response.usage {
-            self.account_usage(usage)?;
+        let accounting = response
+            .usage
+            .as_ref()
+            .map_or(Ok(()), |usage| self.account_usage(usage));
+        self.availability
+            .record_response(&response, accounting.is_err());
+        if let Err(error) = accounting {
+            if let Some(ReviewError::BudgetExceeded(message)) = error.downcast_ref::<ReviewError>()
+            {
+                let _ = self
+                    .abort_tx
+                    .try_send(ReviewError::BudgetExceeded(message.clone()).into());
+            }
+            return Err(error);
         }
         Ok(response)
     }
@@ -4224,7 +4256,17 @@ async fn run_review_tool_with_cmd_and_overrides(
         })
     });
     if !terminal_abort && let Ok(error) = abort_rx.try_recv() {
-        interaction_result = Err(error);
+        interaction_result = match interaction_result {
+            Ok(output)
+                if error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| matches!(error, ReviewError::BudgetExceeded(_))) =>
+            {
+                let message = error.to_string();
+                Err(error.context(BudgetExceededOutput { output, message }))
+            }
+            _ => Err(error),
+        };
     }
 
     let mut interaction_result = match interaction_result {
@@ -4248,13 +4290,27 @@ async fn run_review_tool_with_cmd_and_overrides(
                 Err(error)
             }
         }
+        Err(error)
+            if error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| matches!(error, ReviewError::BudgetExceeded(_)))
+                && error.downcast_ref::<BudgetExceededOutput>().is_none() =>
+        {
+            if let Some(UsageUnavailableOutput(output)) = usage_availability.fallback_output() {
+                let message = error.to_string();
+                Err(error.context(BudgetExceededOutput { output, message }))
+            } else {
+                Err(error)
+            }
+        }
         result => result,
     };
-    if usage_availability.unavailable.load(Ordering::SeqCst)
-        && let Err(error) = &mut interaction_result
-        && let Some(output) = error.downcast_mut::<UsageUnavailableOutput>()
-    {
-        usage_availability.retain_responses(output);
+    if let Err(error) = &mut interaction_result {
+        if let Some(output) = error.downcast_mut::<UsageUnavailableOutput>() {
+            usage_availability.retain_responses(&mut output.0);
+        } else if let Some(output) = error.downcast_mut::<BudgetExceededOutput>() {
+            usage_availability.retain_responses(&mut output.output);
+        }
     }
 
     // Abort all spawned AI request tasks to drop their stdin clones
@@ -6839,6 +6895,63 @@ echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"re
         assert_eq!(entries[0]["role"], "assistant");
         assert_eq!(entries[1]["role"], "diagnostic");
         assert!(rows.next().await?.is_none());
+
+        db.create_message(
+            "budget-patch",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let budget_patch_id = db
+            .create_patch(patchset_id, "budget-patch", 2, diff)
+            .await?;
+        let mut budget_ctx = ctx.clone();
+        budget_ctx.settings.review.max_total_tokens = 1;
+        budget_ctx.settings.review.max_total_output_tokens = 0;
+        budget_ctx.provider = Arc::new(MockProviderWithUsage {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            cached_tokens: 0,
+        });
+        let result = Reviewer::process_patch_review(
+            &budget_ctx,
+            patchset_id,
+            budget_patch_id,
+            2,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff,
+            None,
+        )
+        .await?;
+        assert!(matches!(result, PatchResult::ReviewFailed));
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status, result_description, logs FROM reviews WHERE patch_id = ?",
+                libsql::params![budget_patch_id],
+            )
+            .await?;
+        let row = rows.next().await?.unwrap();
+        let status: String = row.get(0)?;
+        let description: String = row.get(1)?;
+        let logs: String = row.get(2)?;
+        assert_eq!(status, "Failed");
+        assert!(description.contains("Token budget exceeded"));
+        assert!(logs.contains("Mocked AI response"));
+        assert!(rows.next().await?.is_none());
         Ok(())
     }
 
@@ -7086,6 +7199,8 @@ echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}],"error":"fatal
                         .downcast_ref::<ReviewError>()
                         .is_some_and(|error| { matches!(error, ReviewError::BudgetExceeded(_)) })
                 );
+                let output = error.downcast_ref::<BudgetExceededOutput>().unwrap();
+                assert!(output.logs().unwrap().contains("late response"));
             } else {
                 assert!(
                     error
@@ -7198,7 +7313,7 @@ read -r response || exit 1
     #[test]
     fn test_token_budget_accounting_saturates_and_counts_unknown_cache() {
         for (total_budget, output_budget) in [(1, 0), (0, 1)] {
-            let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel(1);
+            let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
             let guarded = UsageRequiredProvider::new(
                 Arc::new(MockProvider),
                 Arc::new(UsageAvailability::default()),
@@ -7219,7 +7334,6 @@ read -r response || exit 1
                     .downcast_ref::<ReviewError>()
                     .is_some_and(|error| { matches!(error, ReviewError::BudgetExceeded(_)) })
             );
-            assert!(abort_rx.try_recv().is_ok());
         }
 
         let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
