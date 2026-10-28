@@ -230,6 +230,11 @@ Installed runtime validation completed at 13:42 CET: all six Luna/Terra
 xhigh/MAX profiles passed explicit-config no-AI preparation at an idle queue
 boundary, and the daemon restarted. No hour-long model trial was run.
 
+An oversized harness timeout previously overflowed the monotonic deadline and
+panicked. Harness construction now rejects an unrepresentable deadline before
+any provider call; a fake-input regression covers the error path. This change
+has not been deployed or tested with a live provider.
+
 ### P0: Track Provider JSON Failures Without Inventing Results
 
 An offline fake-CLI regression found that an explicit turn.failed event after a

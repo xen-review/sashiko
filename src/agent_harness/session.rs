@@ -140,12 +140,15 @@ impl HarnessSession {
             crate::ai::claude_cli::tool_catalog(&declarations),
         );
         let started_at = tokio::time::Instant::now();
+        let deadline = started_at
+            .checked_add(Duration::from_secs(limits.timeout_seconds))
+            .context("harness deadline overflows")?;
         Ok(Self {
             system,
             declarations,
             limits: limits.clone(),
             started_at,
-            deadline: started_at + Duration::from_secs(limits.timeout_seconds),
+            deadline,
             stopped: false,
             progress: None,
             trace: HarnessTrace::default(),
@@ -460,6 +463,34 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    async fn overflowing_harness_deadline_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )
+        .unwrap();
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        let limits = AgentHarnessSettings {
+            strategy: Default::default(),
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 1,
+            max_tool_calls: 1,
+            max_input_tokens: 1,
+            max_output_tokens: 1,
+            timeout_seconds: u64::MAX,
+        };
+
+        let error = match HarnessSession::new(&tools, &instructions, &limits) {
+            Ok(_) => panic!("an overflowing deadline was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("deadline overflows"));
+    }
 
     #[tokio::test]
     async fn checkpoints_preserve_prefix_limits_deadline_and_terminal_state() {
