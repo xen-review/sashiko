@@ -184,6 +184,15 @@ preserve request identity, distinguish unavailable from empty and truncated
 observations, and validate the complete in-process and worker paths before
 reporting anything as durable.
 
+The session increment records available observations against the one-based
+session request that produced them, for both successful and failed calls.
+Keep at most 32 request records and at most 32 retry entries per record, with
+separate truncation indicators. A missing request record remains unknown; an
+empty retained record applies only to the observed backoff decorator. Keep
+these records separate from session-visible error retries, terminal failure
+usage, and successful response totals. This step does not yet persist stage or
+worker results.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

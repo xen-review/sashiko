@@ -18,8 +18,11 @@ use serde_json::Value;
 
 use super::{
     AiErrorClass, AiMessage, AiProvider, AiRequest, AiResponse, AiResponseFormat, AiRole, AiTool,
-    AiUsage, ReasoningEffort, ToolCall, classify_ai_error,
+    AiUsage, BackoffRetryObservations, ReasoningEffort, ToolCall, classify_ai_error,
 };
+
+const MAX_BACKOFF_REQUEST_RECORDS: usize = 32;
+const MAX_BACKOFF_RETRIES_PER_REQUEST: usize = 32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "RawSessionUsageCoverage")]
@@ -91,6 +94,40 @@ pub struct SessionRetryUsage {
     pub usage: AiUsage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionBackoffRequest {
+    pub request: usize,
+    pub observations: BackoffRetryObservations,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionBackoffObservations {
+    pub requests: Vec<SessionBackoffRequest>,
+    pub truncated: bool,
+}
+
+impl SessionBackoffObservations {
+    fn record(&mut self, request: usize, observations: Option<BackoffRetryObservations>) {
+        let Some(mut observations) = observations else {
+            return;
+        };
+        if self.requests.len() >= MAX_BACKOFF_REQUEST_RECORDS {
+            self.truncated = true;
+            return;
+        }
+        if observations.retries.len() > MAX_BACKOFF_RETRIES_PER_REQUEST {
+            observations
+                .retries
+                .truncate(MAX_BACKOFF_RETRIES_PER_REQUEST);
+            observations.truncated = true;
+        }
+        self.requests.push(SessionBackoffRequest {
+            request,
+            observations,
+        });
+    }
+}
+
 /// The unified result of executing an [`LlmSession`].
 pub struct SessionResult<T> {
     /// The validated output of the session.
@@ -101,6 +138,7 @@ pub struct SessionResult<T> {
     pub usage: AiUsage,
     pub usage_coverage: SessionUsageCoverage,
     pub reported_retry_usage: Vec<SessionRetryUsage>,
+    pub backoff_observations: SessionBackoffObservations,
 }
 
 /// Error returned when an [`LlmSession`] fails, preserving partial conversation
@@ -112,6 +150,7 @@ pub struct SessionFailure {
     pub usage: AiUsage,
     pub usage_coverage: SessionUsageCoverage,
     pub reported_retry_usage: Vec<SessionRetryUsage>,
+    pub backoff_observations: SessionBackoffObservations,
 }
 
 impl std::fmt::Display for SessionFailure {
@@ -346,28 +385,32 @@ impl<'a> SessionRunner<'a> {
         let mut total_cached_tokens = 0;
         let mut usage_coverage = SessionUsageCoverage::default();
         let mut reported_retry_usage = Vec::new();
+        let mut backoff_observations = SessionBackoffObservations::default();
 
-        let make_failure = |message: String,
-                            history: Vec<AiMessage>,
-                            prompt_tokens: usize,
-                            completion_tokens: usize,
-                            cached_tokens: usize,
-                            usage_coverage: SessionUsageCoverage,
-                            reported_retry_usage: Vec<SessionRetryUsage>|
-         -> anyhow::Error {
-            anyhow::Error::new(SessionFailure {
-                message,
-                history,
-                usage: AiUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens.saturating_add(completion_tokens),
-                    cached_tokens: Some(cached_tokens),
-                },
-                usage_coverage,
-                reported_retry_usage,
-            })
-        };
+        let make_failure =
+            |message: String,
+             history: Vec<AiMessage>,
+             prompt_tokens: usize,
+             completion_tokens: usize,
+             cached_tokens: usize,
+             usage_coverage: SessionUsageCoverage,
+             retry_observations: (Vec<SessionRetryUsage>, SessionBackoffObservations)|
+             -> anyhow::Error {
+                let (reported_retry_usage, backoff_observations) = retry_observations;
+                anyhow::Error::new(SessionFailure {
+                    message,
+                    history,
+                    usage: AiUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+                        cached_tokens: Some(cached_tokens),
+                    },
+                    usage_coverage,
+                    reported_retry_usage,
+                    backoff_observations,
+                })
+            };
 
         loop {
             turns = turns.saturating_add(1);
@@ -379,7 +422,7 @@ impl<'a> SessionRunner<'a> {
                     total_completion_tokens,
                     total_cached_tokens,
                     usage_coverage,
-                    reported_retry_usage,
+                    (reported_retry_usage, backoff_observations),
                 ));
             }
             if let Some(ref cb) = self.on_turn {
@@ -418,7 +461,12 @@ impl<'a> SessionRunner<'a> {
             // Kept so that a rejected answer can be forgotten below.
             let sent = request.clone();
             usage_coverage.requests = usage_coverage.requests.saturating_add(1);
-            let resp = match self.provider.generate_content(request).await {
+            let call = self
+                .provider
+                .generate_content_with_observations(request)
+                .await;
+            backoff_observations.record(usage_coverage.requests, call.backoff_retries);
+            let resp = match call.result {
                 Ok(r) => r,
                 Err(e) => match classify_ai_error(&e) {
                     AiErrorClass::RateLimit { retry_after }
@@ -436,7 +484,7 @@ impl<'a> SessionRunner<'a> {
                                     total_completion_tokens,
                                     total_cached_tokens,
                                     usage_coverage,
-                                    reported_retry_usage,
+                                    (reported_retry_usage, backoff_observations),
                                 ),
                                 &e,
                             ));
@@ -469,7 +517,7 @@ impl<'a> SessionRunner<'a> {
                                             total_completion_tokens,
                                             total_cached_tokens,
                                             usage_coverage,
-                                            reported_retry_usage,
+                                            (reported_retry_usage, backoff_observations),
                                         ),
                                         &e,
                                     ));
@@ -506,6 +554,7 @@ impl<'a> SessionRunner<'a> {
                                     },
                                     usage_coverage,
                                     reported_retry_usage,
+                                    backoff_observations,
                                 }));
                             }
                         }
@@ -545,7 +594,7 @@ impl<'a> SessionRunner<'a> {
                     total_completion_tokens,
                     total_cached_tokens,
                     usage_coverage,
-                    reported_retry_usage,
+                    (reported_retry_usage, backoff_observations),
                 ));
             }
 
@@ -585,6 +634,7 @@ impl<'a> SessionRunner<'a> {
                                 },
                                 usage_coverage,
                                 reported_retry_usage,
+                                backoff_observations,
                             }));
                         }
                     };
@@ -619,6 +669,7 @@ impl<'a> SessionRunner<'a> {
                         usage,
                         usage_coverage,
                         reported_retry_usage,
+                        backoff_observations,
                     });
                 }
                 Result::Err(ValidationError::FormatViolation(violation)) => {
@@ -640,7 +691,7 @@ impl<'a> SessionRunner<'a> {
                             total_completion_tokens,
                             total_cached_tokens,
                             usage_coverage,
-                            reported_retry_usage,
+                            (reported_retry_usage, backoff_observations),
                         ));
                     }
                     let feedback = session.format_validation_feedback(&violation);
@@ -664,7 +715,7 @@ impl<'a> SessionRunner<'a> {
                         total_completion_tokens,
                         total_cached_tokens,
                         usage_coverage,
-                        reported_retry_usage,
+                        (reported_retry_usage, backoff_observations),
                     ));
                 }
             }
@@ -808,6 +859,292 @@ mod tests {
                 .unwrap()
                 .contains("Tool execution failed")
         );
+    }
+
+    #[tokio::test]
+    async fn session_retains_backoff_observations_per_request() {
+        struct ObservedProvider(std::sync::atomic::AtomicUsize);
+
+        #[async_trait]
+        impl AiProvider for ObservedProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                anyhow::bail!("expected an observed provider call")
+            }
+
+            async fn generate_content_with_observations(
+                &self,
+                _request: AiRequest,
+            ) -> crate::ai::ObservedProviderCall {
+                let request = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let result = if request == 0 {
+                    Err(crate::ai::RemoteAiError {
+                        message: "temporary".into(),
+                        class: AiErrorClass::Transient {
+                            retry_after: std::time::Duration::ZERO,
+                        },
+                    }
+                    .into())
+                } else {
+                    Ok(AiResponse {
+                        content: Some("done".into()),
+                        thought: None,
+                        thought_signature: None,
+                        tool_calls: None,
+                        usage: None,
+                        truncated: false,
+                    })
+                };
+                crate::ai::ObservedProviderCall {
+                    result,
+                    backoff_retries: Some(crate::ai::BackoffRetryObservations {
+                        retries: vec![crate::ai::BackoffRetryObservation {
+                            attempt: 1,
+                            usage: if request == 0 {
+                                None
+                            } else {
+                                Some(AiUsage {
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                    total_tokens: 0,
+                                    cached_tokens: Some(0),
+                                })
+                            },
+                        }],
+                        truncated: false,
+                    }),
+                }
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        let provider = ObservedProvider(std::sync::atomic::AtomicUsize::new(0));
+        let result = SessionRunner::new(&provider)
+            .run(&mut DummySession)
+            .await
+            .unwrap();
+        assert_eq!(result.output, "done");
+        assert_eq!(result.backoff_observations.requests.len(), 2);
+        assert_eq!(result.backoff_observations.requests[0].request, 1);
+        assert!(
+            result.backoff_observations.requests[0].observations.retries[0]
+                .usage
+                .is_none()
+        );
+        assert_eq!(result.backoff_observations.requests[1].request, 2);
+        assert_eq!(
+            result.backoff_observations.requests[1].observations.retries[0]
+                .usage
+                .as_ref()
+                .unwrap()
+                .cached_tokens,
+            Some(0)
+        );
+        assert!(!result.backoff_observations.truncated);
+        assert!(result.reported_retry_usage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_retains_backoff_observations_on_terminal_errors() {
+        struct TerminalProvider(AiErrorClass);
+
+        #[async_trait]
+        impl AiProvider for TerminalProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                let error = crate::ai::RemoteAiError {
+                    message: "provider failure".into(),
+                    class: self.0,
+                }
+                .into();
+                Err(crate::ai::ProviderFailureUsage::attach(
+                    error,
+                    AiUsage {
+                        prompt_tokens: 9,
+                        completion_tokens: 1,
+                        total_tokens: 10,
+                        cached_tokens: Some(0),
+                    },
+                ))
+            }
+
+            async fn generate_content_with_observations(
+                &self,
+                request: AiRequest,
+            ) -> crate::ai::ObservedProviderCall {
+                crate::ai::ObservedProviderCall {
+                    result: self.generate_content(request).await,
+                    backoff_retries: Some(BackoffRetryObservations {
+                        retries: vec![crate::ai::BackoffRetryObservation {
+                            attempt: 1,
+                            usage: None,
+                        }],
+                        truncated: false,
+                    }),
+                }
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        for class in [
+            AiErrorClass::Fatal,
+            AiErrorClass::Transient {
+                retry_after: std::time::Duration::ZERO,
+            },
+        ] {
+            let provider = TerminalProvider(class);
+            let error = SessionRunner::new(&provider)
+                .with_max_transient_retries(0)
+                .run(&mut DummySession)
+                .await
+                .err()
+                .unwrap();
+            let terminal = error
+                .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                .unwrap();
+            assert_eq!(terminal.usage.prompt_tokens, 9);
+            assert_eq!(terminal.usage.cached_tokens, Some(0));
+            let failure = error.downcast_ref::<SessionFailure>().unwrap();
+            assert_eq!(failure.backoff_observations.requests.len(), 1);
+            assert_eq!(failure.backoff_observations.requests[0].request, 1);
+            assert!(
+                failure.backoff_observations.requests[0]
+                    .observations
+                    .retries[0]
+                    .usage
+                    .is_none()
+            );
+            assert!(failure.reported_retry_usage.is_empty());
+            assert_eq!(failure.usage.prompt_tokens, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_observes_real_backoff_without_adding_retry_usage() {
+        struct RateLimitedProvider(std::sync::atomic::AtomicUsize);
+
+        #[async_trait]
+        impl AiProvider for RateLimitedProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    let error =
+                        crate::ai::gemini::GeminiError::QuotaExceeded(std::time::Duration::ZERO)
+                            .into();
+                    return Err(crate::ai::ProviderFailureUsage::attach(
+                        error,
+                        AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens: Some(0),
+                        },
+                    ));
+                }
+                Ok(AiResponse {
+                    content: Some("done".into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        let inner =
+            std::sync::Arc::new(RateLimitedProvider(std::sync::atomic::AtomicUsize::new(0)));
+        let provider = crate::ai::backoff_provider::BackoffProvider::new(
+            inner.clone(),
+            std::sync::Arc::new(crate::ai::quota::QuotaManager::new()),
+            None,
+        );
+        let result = SessionRunner::new(&provider)
+            .run(&mut DummySession)
+            .await
+            .unwrap();
+        assert_eq!(inner.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(result.usage_coverage.requests, 1);
+        assert_eq!(result.usage.prompt_tokens, 7);
+        assert!(result.reported_retry_usage.is_empty());
+        assert_eq!(result.backoff_observations.requests.len(), 1);
+        let retry = &result.backoff_observations.requests[0].observations.retries[0];
+        assert_eq!(retry.attempt, 1);
+        let usage = retry.usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.cached_tokens, Some(0));
+    }
+
+    #[test]
+    fn session_backoff_observations_bound_requests_and_retries() {
+        let mut retained = SessionBackoffObservations::default();
+        retained.record(1, None);
+        assert!(retained.requests.is_empty());
+        assert!(!retained.truncated);
+
+        retained.record(
+            2,
+            Some(BackoffRetryObservations {
+                retries: vec![
+                    crate::ai::BackoffRetryObservation {
+                        attempt: 1,
+                        usage: None,
+                    };
+                    MAX_BACKOFF_RETRIES_PER_REQUEST + 1
+                ],
+                truncated: false,
+            }),
+        );
+        let first = &retained.requests[0];
+        assert_eq!(first.request, 2);
+        assert_eq!(
+            first.observations.retries.len(),
+            MAX_BACKOFF_RETRIES_PER_REQUEST
+        );
+        assert!(first.observations.truncated);
+
+        for request in 3..=MAX_BACKOFF_REQUEST_RECORDS + 1 {
+            retained.record(
+                request,
+                Some(BackoffRetryObservations {
+                    retries: Vec::new(),
+                    truncated: false,
+                }),
+            );
+        }
+        assert_eq!(retained.requests.len(), MAX_BACKOFF_REQUEST_RECORDS);
+        assert!(!retained.truncated);
+        retained.record(MAX_BACKOFF_REQUEST_RECORDS + 2, None);
+        assert!(!retained.truncated);
+        retained.record(
+            MAX_BACKOFF_REQUEST_RECORDS + 3,
+            Some(BackoffRetryObservations {
+                retries: Vec::new(),
+                truncated: false,
+            }),
+        );
+        assert!(retained.truncated);
     }
 
     #[test]

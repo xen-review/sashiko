@@ -186,6 +186,10 @@ An opt-in provider trait call now returns those observations separately from
 the original response or error. Providers that do not expose the decorator report
 observations unavailable, not an empty list. Fake cache tests cover both wrapper
 orders and prevent old retry observations from being replayed on a cache hit.
+In-process sessions now retain bounded, request-scoped decorator observations
+on success and failure without adding them to response totals or session-visible
+retry usage. Missing request records remain unknown; empty records describe only
+the observed decorator. Stage persistence and worker transport remain pending.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the
