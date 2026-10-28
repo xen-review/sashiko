@@ -307,7 +307,8 @@ cp docs/examples/Settings.goose-cli.toml Settings.toml
   the request instead of accumulating in the user's home directory, and
   concurrent reviews never share one session database
 - Token usage is taken from goose's own `session/prompt` accounting rather
-  than estimated
+  than estimated. Missing or inconsistent input/output counters leave usage
+  unavailable, and the agent harness stops without a measured total.
 
 **Pointing goose at a local model:**
 

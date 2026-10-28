@@ -95,6 +95,13 @@ authorize further harness calls. Older parser cache entries are separated. This
 passes focused tests and the full `make check-pr` gate, but is based on synthetic
 fixtures, not a live Claude CLI compatibility test.
 
+Goose's fake ACP fixture showed that missing usage was replaced with a
+character-based estimate and presented as measured. The provider now retains
+unknown usage, checks reported counters and sums, and separates old cache
+entries. The harness stops when required counters are unavailable. This was
+tested with fake ACP responses and the full `make check-pr` gate, not a live
+Goose backend.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for

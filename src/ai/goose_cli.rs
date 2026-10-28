@@ -47,7 +47,6 @@ use tracing::debug;
 
 use super::acp::AcpProcess;
 use super::claude_cli::{CLI_PROMPT_FORMAT_PROFILE, build_prompt, parse_inner_response};
-use super::token_budget::TokenBudget;
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
 pub struct GooseCliProvider {
@@ -163,11 +162,16 @@ fn build_env(
 /// Reads goose's own token accounting out of a `session/prompt` result.
 fn usage_from_result(result: &Value) -> Option<AiUsage> {
     let usage = result.get("usage")?;
-    let field = |name: &str| usage.get(name).and_then(Value::as_u64).map(|v| v as usize);
+    let field = |name: &str| usize::try_from(usage.get(name)?.as_u64()?).ok();
 
     let prompt_tokens = field("inputTokens")?;
     let completion_tokens = field("outputTokens")?;
-    let total_tokens = field("totalTokens").unwrap_or(prompt_tokens + completion_tokens);
+    let total_tokens = prompt_tokens.checked_add(completion_tokens)?;
+    if let Some(reported) = usage.get("totalTokens")
+        && usize::try_from(reported.as_u64()?).ok()? != total_tokens
+    {
+        return None;
+    }
 
     Some(AiUsage {
         prompt_tokens,
@@ -216,20 +220,7 @@ impl AiProvider for GooseCliProvider {
             anyhow::anyhow!("goose acp timed out after {} seconds", self.timeout_secs)
         })??;
 
-        // goose reports its own token counts; fall back to estimates when a
-        // build omits them.
-        let usage = usage_from_result(&result).or_else(|| {
-            let prompt_tokens = TokenBudget::approximate_tokens(&prompt);
-            let completion_tokens = TokenBudget::approximate_tokens(&text);
-            Some(AiUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-                cached_tokens: None,
-            })
-        });
-
-        parse_inner_response(&text, usage)
+        parse_inner_response(&text, usage_from_result(&result))
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -257,6 +248,7 @@ impl AiProvider for GooseCliProvider {
                 ("context_limit", Some(context_limit.as_str())),
                 ("env", env_digest.as_deref()),
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ("usage_profile", Some("measured-v1")),
             ],
         )
     }
@@ -407,6 +399,7 @@ mod tests {
                 ("provider", Some(&openai.goose_provider)),
                 ("context_limit", Some(&context_limit)),
                 ("env", None),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
             ],
         );
         assert_ne!(openai.cache_identity(), legacy);
@@ -470,6 +463,24 @@ mod tests {
     }
 
     #[test]
+    fn usage_rejects_invalid_inconsistent_or_overflowed_counts() {
+        for usage in [
+            serde_json::json!({"inputTokens": 1}),
+            serde_json::json!({"inputTokens": 1, "outputTokens": "unknown"}),
+            serde_json::json!({"inputTokens": 1, "outputTokens": 2, "totalTokens": null}),
+            serde_json::json!({"inputTokens": 1, "outputTokens": 2, "totalTokens": 4}),
+            serde_json::json!({"inputTokens": u64::MAX, "outputTokens": 1, "totalTokens": u64::MAX}),
+        ] {
+            assert!(usage_from_result(&serde_json::json!({"usage": usage})).is_none());
+        }
+        let zero = usage_from_result(&serde_json::json!({
+            "usage": {"inputTokens": 0, "outputTokens": 0}
+        }))
+        .unwrap();
+        assert_eq!(zero.total_tokens, 0);
+    }
+
+    #[test]
     fn factory_creates_provider() {
         let mut settings = Settings::new().expect("Failed to load settings");
         settings.ai.provider = "goose".to_string();
@@ -482,11 +493,14 @@ mod tests {
     }
 
     /// Fake ACP agent: replies to initialize, session/new and session/prompt.
-    fn fake_goose(dir: &std::path::Path) -> std::path::PathBuf {
+    fn fake_goose(dir: &std::path::Path, report_usage: bool) -> std::path::PathBuf {
         let fake = dir.join("fake-goose");
-        crate::test_support::write_executable_script(
-            &fake,
-            r#"#!/bin/sh
+        let result = if report_usage {
+            r#"{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn","usage":{"totalTokens":30,"inputTokens":20,"outputTokens":10}}}"#
+        } else {
+            r#"{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}"#
+        };
+        let script = r#"#!/bin/sh
 i=0
 while IFS= read -r line; do
   case "$i" in
@@ -494,21 +508,22 @@ while IFS= read -r line; do
     1) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"20260911_1"}}' ;;
     2)
       printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"20260911_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"content\":\"ok\"}"}}}}'
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn","usage":{"totalTokens":30,"inputTokens":20,"outputTokens":10}}}'
+    printf '%s\n' 'PROMPT_RESULT'
       exit 0
       ;;
   esac
   i=$((i + 1))
 done
-"#,
-        );
+"#
+    .replace("PROMPT_RESULT", result);
+        crate::test_support::write_executable_script(&fake, &script);
         fake
     }
 
     #[tokio::test]
     async fn generate_content_with_fake_acp_agent() {
         let tmp = tempfile::tempdir().unwrap();
-        let fake = fake_goose(tmp.path());
+        let fake = fake_goose(tmp.path(), true);
         let provider = test_provider(&fake.to_string_lossy(), "openai");
 
         let response = provider.generate_content(sample_request()).await.unwrap();
@@ -516,6 +531,17 @@ done
         let usage = response.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 20);
         assert_eq!(usage.completion_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn generate_content_keeps_unreported_usage_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = fake_goose(tmp.path(), false);
+        let provider = test_provider(&fake.to_string_lossy(), "openai");
+
+        let response = provider.generate_content(sample_request()).await.unwrap();
+        assert_eq!(response.content.as_deref(), Some("ok"));
+        assert!(response.usage.is_none());
     }
 
     #[tokio::test]
