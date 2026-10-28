@@ -111,6 +111,9 @@ Known positive partial totals remain useful but must be labeled incomplete;
 unknown cached usage must not be relabeled measured zero. No scheduling or
 billing policy changes are implied. Start with fake-provider discrimination of
 missing versus measured-zero responses, then propagate the proven contract.
+Reject coverage whose response counts exceed requests, whose cached-usage gaps
+exceed reported responses, or whose counters overflow. Missing responses remain
+valid partial coverage rather than becoming measured zeros.
 
 Incremental failed-call observation contract: carry optional provider-reported
 failure counters across the typed daemon/worker error protocol without changing

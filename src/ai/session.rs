@@ -22,7 +22,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawSessionUsageCoverage")]
 pub struct SessionUsageCoverage {
     pub requests: usize,
     pub responses_with_usage: usize,
@@ -30,9 +30,43 @@ pub struct SessionUsageCoverage {
     pub responses_without_cached_usage: usize,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSessionUsageCoverage {
+    requests: usize,
+    responses_with_usage: usize,
+    responses_without_usage: usize,
+    responses_without_cached_usage: usize,
+}
+
+impl TryFrom<RawSessionUsageCoverage> for SessionUsageCoverage {
+    type Error = &'static str;
+
+    fn try_from(raw: RawSessionUsageCoverage) -> Result<Self, Self::Error> {
+        let coverage = Self {
+            requests: raw.requests,
+            responses_with_usage: raw.responses_with_usage,
+            responses_without_usage: raw.responses_without_usage,
+            responses_without_cached_usage: raw.responses_without_cached_usage,
+        };
+        if !coverage.is_valid() {
+            return Err("Inconsistent session usage coverage counts");
+        }
+        Ok(coverage)
+    }
+}
+
 impl SessionUsageCoverage {
+    fn is_valid(self) -> bool {
+        self.responses_with_usage
+            .checked_add(self.responses_without_usage)
+            .is_some_and(|responses| responses <= self.requests)
+            && self.responses_without_cached_usage <= self.responses_with_usage
+    }
+
     pub fn is_complete(self) -> bool {
-        self.requests > 0
+        self.is_valid()
+            && self.requests > 0
             && self.responses_with_usage == self.requests
             && self.responses_without_usage == 0
     }
@@ -743,6 +777,11 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({"requests": 1, "responses_with_usage": 1}),
             serde_json::json!({"requests": 1, "responses_with_usage": 1, "responses_without_usage": 0}),
+            serde_json::json!({"requests": 1, "responses_with_usage": 1, "responses_without_usage": 1, "responses_without_cached_usage": 0}),
+            serde_json::json!({"requests": 1, "responses_with_usage": 1, "responses_without_usage": 0, "responses_without_cached_usage": 2}),
+            serde_json::json!({"requests": 0, "responses_with_usage": 0, "responses_without_usage": 1, "responses_without_cached_usage": 0}),
+            serde_json::json!({"requests": usize::MAX, "responses_with_usage": usize::MAX, "responses_without_usage": 1, "responses_without_cached_usage": 0}),
+            serde_json::json!({"requests": 0, "responses_with_usage": 0, "responses_without_usage": 0, "responses_without_cached_usage": 0, "extra": 1}),
         ] {
             assert!(serde_json::from_value::<SessionUsageCoverage>(incomplete).is_err());
         }
@@ -751,6 +790,20 @@ mod tests {
             serde_json::from_value(serde_json::to_value(empty).unwrap()).unwrap();
         assert_eq!(restored, empty);
         assert!(!restored.is_complete());
+        for partial in [
+            serde_json::json!({"requests": 2, "responses_with_usage": 1, "responses_without_usage": 0, "responses_without_cached_usage": 0}),
+            serde_json::json!({"requests": 2, "responses_with_usage": 1, "responses_without_usage": 1, "responses_without_cached_usage": 1}),
+        ] {
+            let restored: SessionUsageCoverage = serde_json::from_value(partial).unwrap();
+            assert!(!restored.is_complete());
+        }
+        let invalid = SessionUsageCoverage {
+            requests: 1,
+            responses_with_usage: 1,
+            responses_without_cached_usage: 2,
+            ..Default::default()
+        };
+        assert!(!invalid.is_complete());
     }
 
     #[tokio::test]

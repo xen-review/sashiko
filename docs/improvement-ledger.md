@@ -1009,6 +1009,12 @@ with measured calls retain their existing presentation; zero-call claims need
 consistent checkpoint and coverage evidence. This does not recover missing
 usage or establish complete backend billing.
 
+The shared coverage decoder now rejects impossible response and cache counts,
+matching the web renderer's validation. Valid partial counts remain readable,
+and invalid in-memory coverage cannot be classified complete. Focused tests
+cover missing fields, overflow, partial records, malformed data and explicit
+zero; historical malformed records are not rewritten.
+
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing

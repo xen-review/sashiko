@@ -4403,6 +4403,21 @@ mod tests {
             assert!(output.contains(required), "{output}");
             assert!(!output.contains(forbidden), "{output}");
         }
+        let malformed = serde_json::json!({
+            "review": {"findings": []},
+            "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0,
+            "usage_coverage": {
+                "requests": 1,
+                "responses_with_usage": 1,
+                "responses_without_usage": 0,
+                "responses_without_cached_usage": 2,
+            },
+        });
+        let mut buffer = Buffer::no_color();
+        write_review_result(&mut buffer, &malformed, "HEAD", false).unwrap();
+        let output = String::from_utf8(buffer.into_inner()).unwrap();
+        assert!(output.contains("Token usage: unavailable"), "{output}");
+        assert!(output.contains("Usage coverage: unknown"), "{output}");
     }
 
     #[test]
