@@ -118,13 +118,15 @@ error classification or retry decisions. Old error payloads remain valid, and
 explicit cached zero remains distinct from an absent cache count. On a terminal
 workflow failure, retain observations separately in diagnostics, not in
 successful-call totals or as proof of complete usage. Observed local workflow
-attempts are labeled and retained even when a later attempt succeeds. Internal
-provider retries, parallel calls, hidden backend calls, cancellation, and missing
-counters remain unknown unless independently observed. No historical backfill,
-database migration, or provider call is required. The budgeted parent retains
-its own observation rather than forwarding a duplicate. Fake protocol and
-worker tests must check round trips, missing and zero counts, persisted
-diagnostics, and unchanged retry behavior.
+attempts are labeled and retained even when a later attempt succeeds or setup
+fails. Earlier attempts' measured successful-response counters are retained
+separately; the final failed attempt already contributes to existing totals and
+is not duplicated. Internal provider retries, parallel calls, hidden backend
+calls, cancellation, and missing counters remain unknown unless independently
+observed. No historical backfill, database migration, or provider call is
+required. The budgeted parent retains its own observation rather than forwarding
+a duplicate. Fake protocol and worker tests must check round trips, missing and
+zero counts, persisted diagnostics, and unchanged retry behavior.
 
 ## Acceptance Checks
 

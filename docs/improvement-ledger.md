@@ -157,9 +157,11 @@ daemon/worker protocol into diagnostic history. The budgeted parent retains its
 own observation without forwarding a duplicate. Fake protocol, worker, local
 CLI and persistence checks cover missing and zero cache counts and unchanged
 retry behavior. Local workflow attempts now retain each terminal observed
-failure, including when a later attempt succeeds. Internal provider retries and
-other parallel calls may still be missing; no live provider or deployment test
-has been made.
+failure, including when a later attempt succeeds or setup fails. They also retain
+measured successful-response counters from earlier failed attempts separately;
+the final failed attempt is not duplicated. Internal provider retries and other
+parallel calls may still be missing; no live provider or deployment test has
+been made.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

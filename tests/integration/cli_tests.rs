@@ -204,6 +204,7 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
             .current_dir(&repo)
             .env("SASHIKO_CONFIG", &settings)
             .env("PATH", &path)
+            .env("XDG_DATA_HOME", temp.path().join("data"))
             .args(["--project", "xen", "review", "HEAD~2..HEAD"])
             .args(extra)
             .output()
@@ -486,4 +487,175 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         std::fs::read_to_string(bin.join("calls")).unwrap(),
         "call\ncall\ncall\ncall\n"
     );
+
+    std::fs::write(
+        &source,
+        "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\ncase $number in 2|6) cat \"$fixture/response.fail\" ;; *) cat \"$fixture/response.ok\" ;; esac\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(bin.join("calls"), "").unwrap();
+    let completed = run(&[
+        "--format",
+        "json",
+        "--prompts",
+        prompts.to_str().unwrap(),
+        "--stages",
+        "implementation,security",
+    ]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let diagnostics: Vec<_> = result["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "diagnostic")
+        .map(|entry| {
+            serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let attempts = diagnostic["reported_failed_workflow_usage"]
+            .as_array()
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["patch_index"], index + 1);
+        assert_eq!(attempts[0]["attempt"], 1);
+        assert_eq!(attempts[0]["tokens_in"], 30);
+        assert_eq!(attempts[0]["tokens_out"], 10);
+        assert_eq!(attempts[0]["tokens_cached"], 20);
+        assert_eq!(attempts[0]["usage_coverage"]["requests"], 2);
+        assert_eq!(attempts[0]["usage_coverage"]["responses_with_usage"], 1);
+    }
+    assert_eq!(result["tokens_in"], 120);
+    assert!(result["usage_coverage"].is_null());
+
+    std::fs::write(
+        &source,
+        "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\ncase $((number % 2)) in 0) cat \"$fixture/response.fail\" ;; *) cat \"$fixture/response.ok\" ;; esac\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(bin.join("calls"), "").unwrap();
+    let failed = run(&[
+        "--format",
+        "json",
+        "--prompts",
+        prompts.to_str().unwrap(),
+        "--stages",
+        "implementation,security",
+    ]);
+    assert_eq!(failed.status.code(), Some(3));
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    let diagnostics: Vec<_> = result["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "diagnostic")
+        .map(|entry| {
+            serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let attempts = diagnostic["reported_failed_workflow_usage"]
+            .as_array()
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        for (attempt, observation) in attempts.iter().enumerate() {
+            assert_eq!(observation["patch_index"], index + 1);
+            assert_eq!(observation["attempt"], attempt + 1);
+            assert_eq!(observation["tokens_in"], 30);
+            assert_eq!(observation["tokens_cached"], 20);
+        }
+        assert_eq!(
+            diagnostic["reported_failed_provider_usage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+    assert_eq!(result["tokens_in"], 60);
+    assert!(result["usage_coverage"].is_null());
+
+    #[cfg(feature = "cache")]
+    {
+        std::fs::write(&settings, "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\nresponse_cache = true\n[ai.codex_cli]\neffort = 'low'\n[review]\nconcurrency = 1\nmode = 'workflow'\n").unwrap();
+        std::fs::write(
+            &source,
+            "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\nnumber=$(wc -l < \"$fixture/calls\")\ncat > \"$fixture/input.$number\"\nif [ \"$number\" -eq 2 ]; then rm -f \"$XDG_DATA_HOME/sashiko/response_cache.db\"; mkdir \"$XDG_DATA_HOME/sashiko/response_cache.db\"; cat \"$fixture/response.fail\"; else cat \"$fixture/response.ok\"; fi\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("install")
+                .args(["-m", "755"])
+                .arg(&source)
+                .arg(bin.join("codex"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(bin.join("calls"), "").unwrap();
+        let failed = run(&[
+            "--format",
+            "json",
+            "--prompts",
+            prompts.to_str().unwrap(),
+            "--stages",
+            "implementation,security",
+        ]);
+        assert_eq!(failed.status.code(), Some(3));
+        let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to create AI provider")
+        );
+        let diagnostics: Vec<_> = result["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["role"] == "diagnostic")
+            .map(|entry| {
+                serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0]["reported_failed_workflow_usage"][0]["tokens_in"],
+            30
+        );
+        assert_eq!(
+            diagnostics[0]["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
+            12
+        );
+        assert_eq!(
+            std::fs::read_to_string(bin.join("calls")).unwrap(),
+            "call\ncall\n"
+        );
+    }
 }

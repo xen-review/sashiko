@@ -415,9 +415,11 @@ workflow reviews to continue without usage and retry transient and rate-limit
 errors, but disables both token budgets. A terminal workflow error carrying
 reported usage can retain those observations in diagnostic history. Locally
 reported failures from each workflow attempt are kept even when a later attempt
-succeeds; internal retries and other parallel calls may still be missing. These
-budgets are checked after responses arrive and can be overshot by calls already
-in progress; they are not hard per-generation limits.
+succeeds or provider setup fails. Earlier failed attempts' measured successful
+responses are listed separately from the successful or final-attempt totals;
+internal retries and other parallel calls may still be missing. These budgets
+are checked after responses arrive and can be overshot by calls already in
+progress; they are not hard per-generation limits.
 
 #### Agent Harness
 
