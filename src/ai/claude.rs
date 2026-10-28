@@ -711,29 +711,14 @@ impl Default for StdioClaudeClient {
 #[async_trait]
 impl AiProvider for StdioClaudeClient {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
-        crate::ai::ensure_stdin_reader();
+        crate::ai::ipc_generate_content(request).await.result
+    }
 
-        let registry = crate::ai::ipc_registry();
-        let tx_id = registry.next_id();
-        let envelope = serde_json::json!({
-            "type": "ai_request",
-            "tx_id": tx_id,
-            "payload": request
-        });
-
-        let line = serde_json::to_string(&envelope)?;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        registry.register(tx_id, tx).await?;
-
-        crate::ai::ipc_writer().write_line(&line).await?;
-
-        match rx.await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(remote_err)) => Err(remote_err.into_error()),
-            Err(_) => Err(anyhow::anyhow!(
-                "IPC channel disconnected waiting for response"
-            )),
-        }
+    async fn generate_content_with_observations(
+        &self,
+        request: AiRequest,
+    ) -> crate::ai::ObservedProviderCall {
+        crate::ai::ipc_generate_content(request).await
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {

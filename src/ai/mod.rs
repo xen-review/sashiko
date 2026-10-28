@@ -975,6 +975,32 @@ pub(crate) struct IpcEnvelope {
     pub msg_type: String,
     pub tx_id: u64,
     pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_retries: Option<serde_json::Value>,
+}
+
+impl IpcEnvelope {
+    fn take_backoff_observations(&mut self) -> Option<BackoffRetryObservations> {
+        let value = self.backoff_retries.take()?;
+        let retries = value.get("retries")?.as_array()?;
+        if retries.len() > backoff_provider::MAX_RETRY_OBSERVATIONS {
+            return None;
+        }
+        let observations: BackoffRetryObservations = serde_json::from_value(value).ok()?;
+        let mut previous = 0;
+        for retry in &observations.retries {
+            if retry.attempt <= previous {
+                return None;
+            }
+            previous = retry.attempt;
+        }
+        Some(observations)
+    }
+}
+
+pub(crate) struct IpcReply {
+    result: Result<AiResponse, RemoteAiErrorPayload>,
+    backoff_retries: Option<BackoffRetryObservations>,
 }
 
 pub(crate) struct IpcRegistry {
@@ -985,12 +1011,8 @@ pub(crate) struct IpcRegistry {
     // observes the flag and fails instead of waiting for a reply that can no
     // longer arrive.
     closed: std::sync::atomic::AtomicBool,
-    pending: tokio::sync::Mutex<
-        std::collections::HashMap<
-            u64,
-            tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiErrorPayload>>,
-        >,
-    >,
+    pending:
+        tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<IpcReply>>>,
 }
 
 impl IpcRegistry {
@@ -1016,7 +1038,7 @@ impl IpcRegistry {
     pub async fn register(
         &self,
         tx_id: u64,
-        tx: tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiErrorPayload>>,
+        tx: tokio::sync::oneshot::Sender<IpcReply>,
     ) -> Result<(), RemoteAiError> {
         let mut map = self.pending.lock().await;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1035,10 +1057,10 @@ impl IpcRegistry {
         Ok(())
     }
 
-    pub async fn dispatch(&self, tx_id: u64, result: Result<AiResponse, RemoteAiErrorPayload>) {
+    pub async fn dispatch(&self, tx_id: u64, reply: IpcReply) {
         let mut map = self.pending.lock().await;
         if let Some(sender) = map.remove(&tx_id) {
-            let _ = sender.send(result);
+            let _ = sender.send(reply);
         } else {
             eprintln!(
                 "CRITICAL PROTOCOL ERROR: Unsolicited response received for tx_id: {}!",
@@ -1053,7 +1075,10 @@ impl IpcRegistry {
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let payload = RemoteAiErrorPayload::new(err.message, err.class);
         for (_tx_id, sender) in map.drain() {
-            let _ = sender.send(Err(payload.clone()));
+            let _ = sender.send(IpcReply {
+                result: Err(payload.clone()),
+                backoff_retries: None,
+            });
         }
     }
 }
@@ -1116,6 +1141,38 @@ pub(crate) fn ipc_writer() -> Arc<AtomicWriter> {
         .clone()
 }
 
+pub(crate) async fn ipc_generate_content(request: AiRequest) -> ObservedProviderCall {
+    match ipc_generate_content_inner(request).await {
+        Ok(call) => call,
+        Err(error) => ObservedProviderCall {
+            result: Err(error),
+            backoff_retries: None,
+        },
+    }
+}
+
+async fn ipc_generate_content_inner(request: AiRequest) -> Result<ObservedProviderCall> {
+    ensure_stdin_reader();
+    let registry = ipc_registry();
+    let tx_id = registry.next_id();
+    let envelope = serde_json::json!({
+        "type": "ai_request",
+        "tx_id": tx_id,
+        "payload": request,
+    });
+    let line = serde_json::to_string(&envelope)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    registry.register(tx_id, tx).await?;
+    ipc_writer().write_line(&line).await?;
+    let reply = rx
+        .await
+        .map_err(|_| anyhow::anyhow!("IPC channel disconnected waiting for response"))?;
+    Ok(ObservedProviderCall {
+        result: reply.result.map_err(RemoteAiErrorPayload::into_error),
+        backoff_retries: reply.backoff_retries,
+    })
+}
+
 /// The message a worker sends to ask the daemon to forget a request.
 pub(crate) fn forget_envelope(request: &AiRequest) -> serde_json::Value {
     serde_json::json!({ "type": "ai_forget", "payload": request })
@@ -1161,12 +1218,21 @@ pub(crate) fn start_stdin_reader(registry: Arc<IpcRegistry>) -> tokio::task::Joi
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(&line) {
+            if let Ok(mut envelope) = serde_json::from_str::<IpcEnvelope>(&line) {
+                let backoff_retries = envelope.take_backoff_observations();
                 match envelope.msg_type.as_str() {
                     "ai_response" => {
                         if let Ok(payload) = serde_json::from_value::<AiResponse>(envelope.payload)
                         {
-                            registry.dispatch(envelope.tx_id, Ok(payload)).await;
+                            registry
+                                .dispatch(
+                                    envelope.tx_id,
+                                    IpcReply {
+                                        result: Ok(payload),
+                                        backoff_retries,
+                                    },
+                                )
+                                .await;
                         } else {
                             eprintln!(
                                 "CRITICAL PROTOCOL ERROR: Failed to parse payload as AiResponse for tx_id {}",
@@ -1179,7 +1245,15 @@ pub(crate) fn start_stdin_reader(registry: Arc<IpcRegistry>) -> tokio::task::Joi
                         if let Ok(payload) =
                             serde_json::from_value::<RemoteAiErrorPayload>(envelope.payload)
                         {
-                            registry.dispatch(envelope.tx_id, Err(payload)).await;
+                            registry
+                                .dispatch(
+                                    envelope.tx_id,
+                                    IpcReply {
+                                        result: Err(payload),
+                                        backoff_retries,
+                                    },
+                                )
+                                .await;
                         } else {
                             eprintln!(
                                 "CRITICAL PROTOCOL ERROR: Failed to parse payload as RemoteAiErrorPayload for tx_id {}",
@@ -1579,6 +1653,292 @@ mod tests {
         assert!(Arc::ptr_eq(&ipc_writer(), &ipc_writer()));
     }
 
+    #[test]
+    fn ipc_retry_metadata_is_bounded_and_optional() {
+        let envelope = |metadata: serde_json::Value| -> IpcEnvelope {
+            serde_json::from_value(json!({
+                "type": "ai_response",
+                "tx_id": 17,
+                "payload": {},
+                "backoff_retries": metadata,
+            }))
+            .unwrap()
+        };
+        let valid = json!({
+            "retries": [{"attempt": 1, "usage": null}, {"attempt": 3, "usage": null}],
+            "truncated": true,
+        });
+        let mut parsed = envelope(valid);
+        let observations = parsed.take_backoff_observations().unwrap();
+        assert_eq!(observations.retries.len(), 2);
+        assert!(observations.truncated);
+
+        for invalid in [
+            serde_json::Value::Null,
+            json!("invalid"),
+            json!({"retries": [{"attempt": 0, "usage": null}], "truncated": false}),
+            json!({"retries": [{"attempt": 2, "usage": null}, {"attempt": 2, "usage": null}], "truncated": false}),
+            json!({"retries": [{"attempt": 2, "usage": null}, {"attempt": 1, "usage": null}], "truncated": false}),
+            json!({"retries": vec![json!({"attempt": 1, "usage": null}); 33], "truncated": false}),
+        ] {
+            assert!(envelope(invalid).take_backoff_observations().is_none());
+        }
+        let mut legacy: IpcEnvelope = serde_json::from_value(json!({
+            "type": "error", "tx_id": 18, "payload": {}
+        }))
+        .unwrap();
+        assert!(legacy.take_backoff_observations().is_none());
+    }
+
+    #[tokio::test]
+    async fn ipc_registry_keeps_retry_metadata_with_its_transaction() {
+        let registry = IpcRegistry::new();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        registry.register(1, first_tx).await.unwrap();
+        registry.register(2, second_tx).await.unwrap();
+
+        for (tx_id, attempt) in [(2, 4), (1, 1)] {
+            let mut envelope: IpcEnvelope = serde_json::from_value(json!({
+                "type": "error",
+                "tx_id": tx_id,
+                "payload": {},
+                "backoff_retries": {
+                    "retries": [{"attempt": attempt, "usage": null}],
+                    "truncated": false,
+                },
+            }))
+            .unwrap();
+            let observations = envelope.take_backoff_observations();
+            registry
+                .dispatch(
+                    envelope.tx_id,
+                    IpcReply {
+                        result: Err(RemoteAiErrorPayload::new(
+                            "failure".into(),
+                            AiErrorClass::Fatal,
+                        )),
+                        backoff_retries: observations,
+                    },
+                )
+                .await;
+        }
+        let first = first_rx.await.unwrap();
+        let second = second_rx.await.unwrap();
+        assert_eq!(first.backoff_retries.unwrap().retries[0].attempt, 1);
+        assert_eq!(second.backoff_retries.unwrap().retries[0].attempt, 4);
+        assert!(first.result.is_err());
+        assert!(second.result.is_err());
+    }
+
+    #[test]
+    fn ipc_observation_child_fixture() {
+        if std::env::var_os("SASHIKO_TEST_IPC_CHILD").is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            struct ProbeSession;
+
+            #[async_trait]
+            impl LlmSession for ProbeSession {
+                type Output = String;
+
+                fn system_prompt(&self) -> String {
+                    "session".into()
+                }
+
+                fn initial_user_prompt(&self) -> String {
+                    "probe".into()
+                }
+
+                fn validate(
+                    &mut self,
+                    response: &AiResponse,
+                ) -> std::result::Result<Self::Output, ValidationError> {
+                    Ok(response.content.clone().unwrap_or_default())
+                }
+            }
+
+            let claude = claude::StdioClaudeClient::new();
+            let gemini = gemini::StdioGeminiClient::new();
+            let claude_request = AiRequest {
+                system: Some("claude".into()),
+                ..Default::default()
+            };
+            let gemini_request = AiRequest {
+                system: Some("gemini".into()),
+                ..Default::default()
+            };
+            let (claude_call, gemini_call) = tokio::join!(
+                claude.generate_content_with_observations(claude_request),
+                gemini.generate_content_with_observations(gemini_request),
+            );
+            let invalid_call = claude
+                .generate_content_with_observations(AiRequest {
+                    system: Some("invalid".into()),
+                    ..Default::default()
+                })
+                .await;
+            let session_result = SessionRunner::new(&claude)
+                .run(&mut ProbeSession)
+                .await
+                .unwrap();
+            let response = claude_call.result.unwrap();
+            let error = gemini_call.result.unwrap_err();
+            let usage = error.downcast_ref::<ProviderFailureUsage>().unwrap();
+            println!(
+                "IPC_RESULT:{}",
+                json!({
+                    "content": response.content,
+                    "claude_retries": claude_call.backoff_retries,
+                    "gemini_retries": gemini_call.backoff_retries,
+                    "error_class": classify_ai_error(&error),
+                    "failure_usage": usage.usage,
+                    "invalid_content": invalid_call.result.unwrap().content,
+                    "invalid_retries": invalid_call.backoff_retries,
+                    "session_output": session_result.output,
+                    "session_usage": session_result.usage,
+                    "session_observations": session_result.backoff_observations,
+                })
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn ipc_stdio_providers_receive_transaction_scoped_observations() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ai::tests::ipc_observation_child_fixture",
+                "--nocapture",
+            ])
+            .env("SASHIKO_TEST_IPC_CHILD", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut writer = child.stdin.take().unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let interaction = async {
+            let mut transactions = Vec::new();
+            while transactions.len() < 2 {
+                let line = lines.next_line().await.unwrap().unwrap();
+                if let Some(start) = line.find('{')
+                    && let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&line[start..])
+                    && envelope["type"] == "ai_request"
+                {
+                    transactions.push((
+                        envelope["tx_id"].as_u64().unwrap(),
+                        envelope["payload"]["system"].as_str().unwrap().to_string(),
+                    ));
+                }
+            }
+            for (tx_id, provider) in transactions.into_iter().rev() {
+                let reply = if provider == "claude" {
+                    json!({
+                        "type": "ai_response", "tx_id": tx_id,
+                        "payload": {"content": "done", "usage": null},
+                        "backoff_retries": {
+                            "retries": [{"attempt": 1, "usage": null}], "truncated": false
+                        }
+                    })
+                } else {
+                    json!({
+                        "type": "error", "tx_id": tx_id,
+                        "payload": {
+                            "message": "terminal", "class": "fatal",
+                            "reported_failure_usage": {
+                                "prompt_tokens": 9, "completion_tokens": 1,
+                                "total_tokens": 10, "cached_tokens": 0
+                            }
+                        },
+                        "backoff_retries": {
+                            "retries": [{"attempt": 3, "usage": null}], "truncated": true
+                        }
+                    })
+                };
+                writer
+                    .write_all(reply.to_string().as_bytes())
+                    .await
+                    .unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.flush().await.unwrap();
+            }
+            loop {
+                let line = lines.next_line().await.unwrap().unwrap();
+                if let Some((_, result)) = line.split_once("IPC_RESULT:") {
+                    break serde_json::from_str::<serde_json::Value>(result).unwrap();
+                }
+                if let Some(start) = line.find('{')
+                    && let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&line[start..])
+                    && envelope["type"] == "ai_request"
+                {
+                    let reply = match envelope["payload"]["system"].as_str() {
+                        Some("invalid") => json!({
+                            "type": "ai_response", "tx_id": envelope["tx_id"],
+                            "payload": {"content": "still valid", "usage": null},
+                            "backoff_retries": {
+                                "retries": [{"attempt": 0, "usage": null}], "truncated": false
+                            }
+                        }),
+                        Some("session") => json!({
+                            "type": "ai_response", "tx_id": envelope["tx_id"],
+                            "payload": {
+                                "content": "session done", "usage": {
+                                    "prompt_tokens": 7, "completion_tokens": 2,
+                                    "total_tokens": 9, "cached_tokens": 0
+                                }
+                            },
+                            "backoff_retries": {
+                                "retries": [{"attempt": 1, "usage": {
+                                    "prompt_tokens": 12, "completion_tokens": 3,
+                                    "total_tokens": 15, "cached_tokens": 0
+                                }}],
+                                "truncated": false
+                            }
+                        }),
+                        other => panic!("unexpected request: {other:?}"),
+                    };
+                    writer
+                        .write_all(reply.to_string().as_bytes())
+                        .await
+                        .unwrap();
+                    writer.write_all(b"\n").await.unwrap();
+                    writer.flush().await.unwrap();
+                }
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), interaction)
+            .await
+            .unwrap();
+        assert_eq!(result["content"], "done");
+        assert_eq!(result["claude_retries"]["retries"][0]["attempt"], 1);
+        assert_eq!(result["gemini_retries"]["retries"][0]["attempt"], 3);
+        assert_eq!(result["gemini_retries"]["truncated"], true);
+        assert_eq!(result["error_class"]["class"], "fatal");
+        assert_eq!(result["failure_usage"]["cached_tokens"], 0);
+        assert_eq!(result["invalid_content"], "still valid");
+        assert!(result["invalid_retries"].is_null());
+        assert_eq!(result["session_output"], "session done");
+        assert_eq!(result["session_usage"]["prompt_tokens"], 7);
+        assert_eq!(result["session_observations"]["requests"][0]["request"], 1);
+        assert_eq!(
+            result["session_observations"]["requests"][0]["observations"]["retries"][0]["usage"]["prompt_tokens"],
+            12
+        );
+        drop(writer);
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
+    }
+
     // A request issued after the reader stopped fails instead of waiting for
     // a reply that can no longer arrive.  Uses its own registry so the
     // process-wide one is not closed for every other test in the binary.
@@ -1599,7 +1959,9 @@ mod tests {
             })
             .await;
 
-        let disconnected = rx.await.unwrap().unwrap_err().into_error();
+        let reply = rx.await.unwrap();
+        assert!(reply.backoff_retries.is_none());
+        let disconnected = reply.result.unwrap_err().into_error();
         assert_eq!(classify_ai_error(&disconnected), AiErrorClass::Fatal);
         assert!(
             disconnected

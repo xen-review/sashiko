@@ -4163,11 +4163,12 @@ async fn run_review_tool_with_cmd_and_overrides(
                                             }
 
                                             let ctx_tag = req.context_tag.clone().unwrap_or_default();
-                                            let resp_payload = crate::ai::LOG_CONTEXT
-                                                .scope(ctx_tag, provider_clone.generate_content(req.clone()))
+                                            let call = crate::ai::LOG_CONTEXT
+                                                .scope(ctx_tag, provider_clone.generate_content_with_observations(req.clone()))
                                                 .await;
+                                            let backoff_retries = call.backoff_retries;
 
-                                            let reply = match resp_payload {
+                                            let reply = match call.result {
                                                 Ok(p) => {
                                                     if let Some(tool_calls) = &p.tool_calls {
                                                         for call in tool_calls {
@@ -4189,7 +4190,8 @@ async fn run_review_tool_with_cmd_and_overrides(
                                                     Some(json!({
                                                         "type": "ai_response",
                                                         "tx_id": tx_id,
-                                                        "payload": p
+                                                        "payload": p,
+                                                        "backoff_retries": backoff_retries,
                                                     }))
                                                 }
                                                 Err(e) => {
@@ -4204,7 +4206,8 @@ async fn run_review_tool_with_cmd_and_overrides(
                                                     let reply = json!({
                                                         "type": "error",
                                                         "tx_id": tx_id,
-                                                        "payload": payload
+                                                        "payload": payload,
+                                                        "backoff_retries": backoff_retries,
                                                     });
 
                                                     let mut reply_str = serde_json::to_string(&reply).unwrap();
@@ -6201,6 +6204,100 @@ fi
             1
         );
         assert_eq!(provider.0.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_worker_reply_carries_backoff_observations_without_weakening_budget() -> Result<()>
+    {
+        struct RetryProvider {
+            calls: AtomicUsize,
+            terminal: bool,
+        }
+
+        #[async_trait]
+        impl AiProvider for RetryProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let error =
+                        crate::ai::gemini::GeminiError::QuotaExceeded(std::time::Duration::ZERO)
+                            .into();
+                    return Err(crate::ai::ProviderFailureUsage::attach(
+                        error,
+                        crate::ai::AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens: Some(0),
+                        },
+                    ));
+                }
+                if self.terminal {
+                    anyhow::bail!("terminal failure");
+                }
+                Ok(AiResponse {
+                    content: Some("done".into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","tx_id":41,"payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+if [[ "$ai_response" == *'"backoff_retries"'* && "$ai_response" == *'"attempt":1'* && "$ai_response" == *'"prompt_tokens":12'* && "$ai_response" == *'"cached_tokens":0'* && "$ai_response" == *'"tx_id":41'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"observed"}]}'
+elif [[ "$ai_response" == *'"class":"fatal"'* && "$ai_response" != *'"reported_failure_usage"'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"budgeted"}]}'
+else
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"unexpected"}]}'
+fi
+"#;
+        for terminal in [false, true] {
+            let provider = Arc::new(RetryProvider {
+                calls: AtomicUsize::new(0),
+                terminal,
+            });
+            let result = run_single_ai_request_mock_with_budget(
+                mock_script,
+                provider.clone(),
+                None,
+                5,
+                false,
+            )
+            .await?;
+            assert_eq!(result["patches"][0]["status"], "observed");
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        }
+
+        let provider = Arc::new(RetryProvider {
+            calls: AtomicUsize::new(0),
+            terminal: false,
+        });
+        let error =
+            run_single_ai_request_mock_with_budget(mock_script, provider.clone(), None, 5, true)
+                .await
+                .unwrap_err();
+        let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+        assert_eq!(retained.0["patches"][0]["status"], "budgeted");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

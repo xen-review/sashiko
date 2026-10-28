@@ -206,6 +206,16 @@ optional turn logger wraps a worker's stdio provider and must preserve the
 per-call result on success and error. This does not change cache replay or the
 daemon's budget admission decisions.
 
+For daemon workers, transport the current call's optional backoff observations
+as envelope metadata alongside the existing transaction ID, not inside the
+cached response or terminal error usage. Old envelopes remain readable. Reject
+malformed, oversized, zero-numbered, or non-increasing retry metadata as unknown
+without discarding an otherwise valid response or error. Route metadata through
+the same transaction registry as the response, including concurrent calls;
+disconnects have unknown observations. The parent keeps the existing usage
+guard inside backoff, and its budgeted failure diagnostics remain authoritative.
+No retry policy, model call, or budget enforcement changes are permitted here.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

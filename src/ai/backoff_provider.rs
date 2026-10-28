@@ -51,7 +51,7 @@ use crate::ai::{
 /// outage cannot hang a review indefinitely; transient blips resolve well
 /// within this.
 const MAX_ATTEMPTS: u32 = 6;
-const MAX_RETRY_OBSERVATIONS: usize = 32;
+pub(crate) const MAX_RETRY_OBSERVATIONS: usize = 32;
 
 #[derive(Debug)]
 pub(crate) struct BackoffObservedSuccess {
