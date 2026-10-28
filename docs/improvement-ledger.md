@@ -173,6 +173,11 @@ with the error, including managed-profile rejections, without treating the call
 as successful or adding them to successful totals. Malformed counters and events
 after a failed turn are not recovered. Fake CLI and local harness checks pass;
 this is not evidence that multiple native turns or billing are fully accounted.
+Fail-fast parallel workflows now mark aggregate usage coverage unknown when a
+sibling has no retained outcome, including a cancelled in-flight provider call.
+Completed and failed sibling counters and histories remain available; no usage
+or stage record is invented for the cancelled sibling. Calls hidden inside
+provider retries and other missing backend usage remain unaccounted for.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

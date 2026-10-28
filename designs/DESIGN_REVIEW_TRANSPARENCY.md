@@ -131,7 +131,10 @@ exhausts provider retries, preserve the terminal error's reported counters while
 keeping its existing retry classification. Earlier internal attempts may still
 be missing. For a failed Codex invocation, retain only the last validated
 completed-turn counters preceding an explicit failure, not a reconstructed total
-for multiple backend turns.
+for multiple backend turns. A fail-fast parallel batch with a missing sibling
+outcome has unknown aggregate coverage, even when retained sibling responses
+report complete usage. Retain the observed sibling counters and histories, but
+do not infer usage or invent a stage record for a cancelled call.
 
 ## Acceptance Checks
 

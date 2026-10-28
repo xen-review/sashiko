@@ -342,8 +342,11 @@ async fn execute_parallel_batch<S: Send + Sync + 'static>(
                 }
                 Err(err) => {
                     for (stage, slot) in stages.iter().zip(completed_outcomes) {
-                        if let Ok(Some(stage_outcome)) = slot.into_inner() {
-                            record_stage_outcome(outcome, stage.name(), stage_outcome);
+                        match slot.into_inner() {
+                            Ok(Some(stage_outcome)) => {
+                                record_stage_outcome(outcome, stage.name(), stage_outcome);
+                            }
+                            _ => outcome.usage_coverage = None,
                         }
                     }
                     return Err(err);
@@ -907,7 +910,114 @@ mod tests {
         assert_eq!(wf.outcome.stage_runs[1].name, "stage_fail");
         assert_eq!(wf.outcome.tokens_in, 40);
         assert_eq!(wf.outcome.tokens_out, 20);
-        assert_eq!(wf.outcome.usage_coverage.unwrap().requests, 4);
+        let coverage = wf.outcome.usage_coverage.unwrap();
+        assert_eq!(coverage.requests, 4);
+        assert!(coverage.is_complete());
+    }
+
+    #[tokio::test]
+    async fn fail_fast_in_flight_sibling_makes_usage_coverage_unknown() {
+        struct InFlightProvider {
+            started: AtomicUsize,
+            ready: tokio::sync::Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl AiProvider for InFlightProvider {
+            async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+                let prompt = request.messages[0].content.as_deref().unwrap_or_default();
+                if prompt == "Wait" {
+                    self.started.fetch_add(1, Ordering::SeqCst);
+                    self.ready.notify_one();
+                    return std::future::pending().await;
+                }
+                if prompt == "Fail" {
+                    self.ready.notified().await;
+                }
+                Ok(AiResponse {
+                    content: Some(r#"{"items":[]}"#.to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: prompt == "Fail",
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        let provider = Arc::new(InFlightProvider {
+            started: AtomicUsize::new(0),
+            ready: tokio::sync::Notify::new(),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let env = WorkflowEnv {
+            provider: provider.clone(),
+            tools: Arc::new(ToolBox::new(tmp.path().to_path_buf(), None)),
+            base_dir: tmp.path(),
+            context_tag: None,
+        };
+        let stage = |name, prompt| {
+            Box::new(
+                Stage::builder(name)
+                    .user_prompt(PromptTemplate::new(prompt))
+                    .output_format(OutputFormat::json())
+                    .reduce(|_: &mut DummyState, _: DummyConcernsOutput| {})
+                    .build(),
+            ) as Box<dyn ExecutableStage<DummyState>>
+        };
+        let workflow = Workflow::builder("in_flight_failure")
+            .parallel(
+                vec![
+                    stage("ok", "Ok"),
+                    stage("wait", "Wait"),
+                    stage("fail", "Fail"),
+                ],
+                ParallelPolicy::FailFast,
+            )
+            .build();
+        let mut state = DummyState::default();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            WorkflowEngine::execute(&workflow, &env, &mut state, None),
+        )
+        .await
+        .expect("the failing stage should stop its in-flight sibling")
+        .unwrap_err();
+        let failure = error.downcast_ref::<WorkflowFailure>().unwrap();
+        assert_eq!(provider.started.load(Ordering::SeqCst), 1);
+        assert_eq!(failure.outcome.stage_runs.len(), 2);
+        assert_eq!(failure.outcome.stage_runs[0].name, "ok");
+        assert_eq!(failure.outcome.stage_runs[1].name, "fail");
+        assert_eq!(failure.outcome.tokens_in, 20);
+        assert_eq!(failure.outcome.tokens_out, 10);
+        for stage in &failure.outcome.stage_runs {
+            assert_eq!(stage.tokens_in, 10);
+            assert_eq!(stage.tokens_out, 5);
+            assert!(stage.usage_coverage.unwrap().is_complete());
+            assert!(stage.history_end > stage.history_start);
+        }
+        assert_eq!(failure.outcome.stage_runs[0].history_start, 0);
+        assert_eq!(
+            failure.outcome.stage_runs[0].history_end,
+            failure.outcome.stage_runs[1].history_start
+        );
+        assert_eq!(
+            failure.outcome.stage_runs[1].history_end,
+            failure.outcome.history.len()
+        );
+        assert!(failure.outcome.usage_coverage.is_none());
     }
 
     #[test]
