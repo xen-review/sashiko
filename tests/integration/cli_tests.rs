@@ -683,8 +683,28 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         let terminal = diagnostic["reported_failed_provider_usage"]
             .as_array()
             .unwrap();
+        let backoff = &diagnostic["reported_backoff_observations"];
+        let stages = backoff["stages"].as_array().unwrap();
         assert_eq!(retries.len(), 3);
         assert_eq!(terminal.len(), 3);
+        assert_eq!(stages.len(), 3);
+        assert_eq!(backoff["truncated"], false);
+        for (attempt, stage) in stages.iter().enumerate() {
+            assert_eq!(stage["patch_index"], index + 1);
+            assert_eq!(stage["attempt"], attempt + 1);
+            assert_eq!(stage["stage"], "implementation");
+            assert_eq!(stage["stage_run"], 1);
+            let requests = stage["observations"]["requests"].as_array().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["request"], 1);
+            assert_eq!(requests[1]["request"], 2);
+            assert!(requests.iter().all(|request| {
+                request["observations"]["retries"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            }));
+        }
         for (attempt, retry) in retries.iter().enumerate() {
             assert_eq!(retry["patch_index"], index + 1);
             assert_eq!(retry["attempt"], attempt + 1);

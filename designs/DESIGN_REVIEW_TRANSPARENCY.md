@@ -229,6 +229,14 @@ retain both truncation flags and missing-versus-measured usage. This map field
 alone does not establish complete native or billed usage and does not change
 the UI or failed-review diagnostics.
 
+For failed workflow attempts, preserve stage-scoped backoff records in a
+separate diagnostic labeled by patch, workflow attempt, stage name, and
+one-based stage-run position. Bound retained stage records per patch and mark
+truncation explicitly; preserve the inner session and retry truncation markers.
+Do not duplicate them into session-visible retry usage, terminal provider
+usage, or successful totals. Skipped and unavailable stages remain unknown.
+Post-processing failures without stage records remain outside this increment.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

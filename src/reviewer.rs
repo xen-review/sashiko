@@ -7478,7 +7478,7 @@ read -r input || exit 1
 echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"first"}]}}'
 read -r response || exit 1
 if [[ "$response" == *'"reported_failure_usage"'* && "$response" == *'"prompt_tokens":12'* ]]; then
-    echo '{"patchset_id":1,"patches":[{"index":5,"status":"applied"}],"history":[{"role":"diagnostic","content":"{\"reported_failed_provider_usage\":[{\"patch_index\":5,\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cached_tokens\":0}}],\"reported_session_retry_usage\":[{\"patch_index\":5,\"attempt\":1,\"stage\":\"analysis\",\"stage_run\":1,\"request\":1,\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11,\"cached_tokens\":0}}]}"}],"error":"no agent message","tokens_in":0,"tokens_out":0,"tokens_cached":0}'
+    echo '{"patchset_id":1,"patches":[{"index":5,"status":"applied"}],"history":[{"role":"diagnostic","content":"{\"reported_failed_provider_usage\":[{\"patch_index\":5,\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cached_tokens\":0}}],\"reported_session_retry_usage\":[{\"patch_index\":5,\"attempt\":1,\"stage\":\"analysis\",\"stage_run\":1,\"request\":1,\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11,\"cached_tokens\":0}}],\"reported_backoff_observations\":{\"stages\":[{\"patch_index\":5,\"attempt\":1,\"stage\":\"analysis\",\"stage_run\":1,\"observations\":{\"requests\":[{\"request\":1,\"observations\":{\"retries\":[{\"attempt\":1,\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5,\"cached_tokens\":0}}],\"truncated\":false}}],\"truncated\":false}}],\"truncated\":false}}"}],"error":"no agent message","tokens_in":0,"tokens_out":0,"tokens_cached":0}'
 else
     echo '{"patchset_id":1,"patches":[{"index":5,"status":"unexpected"}]}'
 fi
@@ -7555,6 +7555,11 @@ fi
             assert_eq!(
                 diagnostic["reported_session_retry_usage"][0]["usage"]["prompt_tokens"],
                 9
+            );
+            assert_eq!(
+                diagnostic["reported_backoff_observations"]["stages"][0]["observations"]["requests"]
+                    [0]["observations"]["retries"][0]["usage"]["prompt_tokens"],
+                4
             );
         }
         assert!(rows.next().await?.is_none());

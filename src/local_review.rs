@@ -527,6 +527,7 @@ async fn review_single_patch(
     let mut reported_failed_attempts = Vec::new();
     let mut failed_workflow_usage = Vec::new();
     let mut session_retry_usage = Vec::new();
+    let mut backoff_observations = FailedBackoffObservations::default();
     for attempt in 1..=max_attempts {
         emit(
             progress,
@@ -750,6 +751,7 @@ async fn review_single_patch(
                     &reported_failed_attempts,
                     &failed_workflow_usage,
                     &session_retry_usage,
+                    &backoff_observations,
                 ) && let Some(history) = output["history"].as_array_mut()
                 {
                     history.push(diagnostic);
@@ -765,6 +767,12 @@ async fn review_single_patch(
                     reported_failed_attempts.push((attempt, reported.usage.clone()));
                 }
                 if let Some(failure) = e.downcast_ref::<crate::workflow::WorkflowFailure>() {
+                    retain_failed_backoff_observations(
+                        &mut backoff_observations,
+                        p.index,
+                        attempt,
+                        &failure.outcome,
+                    );
                     session_retry_usage.extend(reported_session_retry_usage(
                         p.index,
                         attempt,
@@ -809,6 +817,7 @@ async fn review_single_patch(
     if reported_failed_attempts.is_empty()
         && failed_workflow_usage.is_empty()
         && session_retry_usage.is_empty()
+        && backoff_observations.is_empty()
     {
         Err(error)
     } else {
@@ -818,6 +827,7 @@ async fn review_single_patch(
             reported_usage: reported_failed_attempts,
             workflow_usage: failed_workflow_usage,
             session_retry_usage,
+            backoff_observations,
         }))
     }
 }
@@ -851,6 +861,7 @@ struct FailedAttemptObservations {
     reported_usage: Vec<(usize, crate::ai::AiUsage)>,
     workflow_usage: Vec<FailedWorkflowUsage>,
     session_retry_usage: Vec<ReportedSessionRetryUsage>,
+    backoff_observations: FailedBackoffObservations,
 }
 
 impl std::fmt::Display for FailedAttemptObservations {
@@ -934,6 +945,56 @@ struct ReportedSessionRetryUsage {
     usage: crate::ai::AiUsage,
 }
 
+const MAX_FAILED_BACKOFF_STAGES: usize = 32;
+
+#[derive(Debug, Default, serde::Serialize)]
+struct FailedBackoffObservations {
+    stages: Vec<ReportedStageBackoffObservations>,
+    truncated: bool,
+}
+
+impl FailedBackoffObservations {
+    fn is_empty(&self) -> bool {
+        self.stages.is_empty() && !self.truncated
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReportedStageBackoffObservations {
+    patch_index: i64,
+    attempt: usize,
+    stage: String,
+    stage_run: usize,
+    observations: crate::ai::session::SessionBackoffObservations,
+}
+
+fn retain_failed_backoff_observations(
+    retained: &mut FailedBackoffObservations,
+    patch_index: i64,
+    attempt: usize,
+    outcome: &crate::workflow::WorkflowOutcome,
+) {
+    for (index, stage) in outcome.stage_runs.iter().enumerate() {
+        if stage.skipped {
+            continue;
+        }
+        let Some(observations) = &stage.backoff_observations else {
+            continue;
+        };
+        if retained.stages.len() >= MAX_FAILED_BACKOFF_STAGES {
+            retained.truncated = true;
+            break;
+        }
+        retained.stages.push(ReportedStageBackoffObservations {
+            patch_index,
+            attempt,
+            stage: stage.name.clone(),
+            stage_run: index.saturating_add(1),
+            observations: observations.clone(),
+        });
+    }
+}
+
 fn reported_session_retry_usage(
     patch_index: i64,
     attempt: usize,
@@ -965,8 +1026,13 @@ fn reported_failure_usage_diagnostic(
     reported_usage: &[(usize, crate::ai::AiUsage)],
     workflow_usage: &[FailedWorkflowUsage],
     session_retry_usage: &[ReportedSessionRetryUsage],
+    backoff_observations: &FailedBackoffObservations,
 ) -> Option<Value> {
-    if reported_usage.is_empty() && workflow_usage.is_empty() && session_retry_usage.is_empty() {
+    if reported_usage.is_empty()
+        && workflow_usage.is_empty()
+        && session_retry_usage.is_empty()
+        && backoff_observations.is_empty()
+    {
         return None;
     }
     let observations: Vec<_> = reported_usage
@@ -985,6 +1051,7 @@ fn reported_failure_usage_diagnostic(
             "reported_failed_provider_usage": observations,
             "reported_failed_workflow_usage": workflow_usage,
             "reported_session_retry_usage": session_retry_usage,
+            "reported_backoff_observations": backoff_observations,
         }).to_string(),
     }))
 }
@@ -1449,6 +1516,7 @@ async fn run_worker_in_worktree(
                         &attempts.reported_usage,
                         &attempts.workflow_usage,
                         &attempts.session_retry_usage,
+                        &attempts.backoff_observations,
                     )
                 {
                     failure_diagnostics.push((patch_index, diagnostic));
@@ -2903,7 +2971,14 @@ mod tests {
                 },
             ),
         ];
-        let diagnostic = reported_failure_usage_diagnostic(7, &reported_usage, &[], &[]).unwrap();
+        let diagnostic = reported_failure_usage_diagnostic(
+            7,
+            &reported_usage,
+            &[],
+            &[],
+            &FailedBackoffObservations::default(),
+        )
+        .unwrap();
         assert_eq!(diagnostic["role"], "diagnostic");
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
@@ -2925,7 +3000,16 @@ mod tests {
                 .get("cached_tokens")
                 .is_none()
         );
-        assert!(reported_failure_usage_diagnostic(7, &[], &[], &[]).is_none());
+        assert!(
+            reported_failure_usage_diagnostic(
+                7,
+                &[],
+                &[],
+                &[],
+                &FailedBackoffObservations::default()
+            )
+            .is_none()
+        );
         let original = crate::ai::ProviderFailureUsage::attach(anyhow!("no agent message"), usage);
         let message = original.to_string();
         let wrapped = original.context(FailedAttemptObservations {
@@ -2933,6 +3017,7 @@ mod tests {
             reported_usage,
             workflow_usage: Vec::new(),
             session_retry_usage: Vec::new(),
+            backoff_observations: FailedBackoffObservations::default(),
         });
         assert_eq!(wrapped.to_string(), message);
         assert!(
@@ -2982,8 +3067,14 @@ mod tests {
         };
         let observations = reported_session_retry_usage(7, 3, &outcome);
         let terminal = vec![(3, retry.usage.clone())];
-        let diagnostic =
-            reported_failure_usage_diagnostic(7, &terminal, &[], &observations).unwrap();
+        let diagnostic = reported_failure_usage_diagnostic(
+            7,
+            &terminal,
+            &[],
+            &observations,
+            &FailedBackoffObservations::default(),
+        )
+        .unwrap();
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
             content["reported_session_retry_usage"]
@@ -3011,6 +3102,120 @@ mod tests {
         assert_eq!(second["stage"], "analysis");
         assert_eq!(second["stage_run"], 3);
         assert!(second["usage"].get("cached_tokens").is_none());
+    }
+
+    #[test]
+    fn failed_workflow_backoff_observations_keep_stage_and_attempt_identity() {
+        let observations = crate::ai::session::SessionBackoffObservations {
+            requests: vec![crate::ai::session::SessionBackoffRequest {
+                request: 2,
+                observations: crate::ai::BackoffRetryObservations {
+                    retries: vec![crate::ai::BackoffRetryObservation {
+                        attempt: 3,
+                        usage: Some(crate::ai::AiUsage {
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            cached_tokens: Some(0),
+                        }),
+                    }],
+                    truncated: true,
+                },
+            }],
+            truncated: true,
+        };
+        let outcome = crate::workflow::WorkflowOutcome {
+            stage_runs: vec![
+                crate::workflow::StageRunRecord {
+                    name: "analysis".into(),
+                    backoff_observations: Some(observations.clone()),
+                    ..Default::default()
+                },
+                crate::workflow::StageRunRecord {
+                    name: "skipped".into(),
+                    skipped: true,
+                    backoff_observations: Some(observations.clone()),
+                    ..Default::default()
+                },
+                crate::workflow::StageRunRecord {
+                    name: "analysis".into(),
+                    backoff_observations: Some(observations),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut retained = FailedBackoffObservations::default();
+        retain_failed_backoff_observations(&mut retained, 7, 3, &outcome);
+        let diagnostic = reported_failure_usage_diagnostic(7, &[], &[], &[], &retained).unwrap();
+        let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
+        let records = content["reported_backoff_observations"]["stages"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["patch_index"], 7);
+        assert_eq!(records[0]["attempt"], 3);
+        assert_eq!(records[0]["stage"], "analysis");
+        assert_eq!(records[0]["stage_run"], 1);
+        assert_eq!(records[1]["stage_run"], 3);
+        let observation = &records[0]["observations"];
+        assert_eq!(observation["requests"][0]["request"], 2);
+        assert_eq!(
+            observation["requests"][0]["observations"]["retries"][0]["attempt"],
+            3
+        );
+        assert_eq!(
+            observation["requests"][0]["observations"]["retries"][0]["usage"]["cached_tokens"],
+            0
+        );
+        assert_eq!(
+            observation["requests"][0]["observations"]["truncated"],
+            true
+        );
+        assert_eq!(observation["truncated"], true);
+        assert_eq!(content["reported_backoff_observations"]["truncated"], false);
+        assert!(
+            content["reported_session_retry_usage"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            content["reported_failed_provider_usage"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_workflow_backoff_observations_are_bounded_across_attempts() {
+        let stage = crate::workflow::StageRunRecord {
+            name: "analysis".into(),
+            backoff_observations: Some(crate::ai::session::SessionBackoffObservations {
+                requests: vec![crate::ai::session::SessionBackoffRequest {
+                    request: 1,
+                    observations: crate::ai::BackoffRetryObservations {
+                        retries: Vec::new(),
+                        truncated: false,
+                    },
+                }],
+                truncated: false,
+            }),
+            ..Default::default()
+        };
+        let outcome = crate::workflow::WorkflowOutcome {
+            stage_runs: vec![stage; MAX_FAILED_BACKOFF_STAGES],
+            ..Default::default()
+        };
+        let mut retained = FailedBackoffObservations::default();
+        retain_failed_backoff_observations(&mut retained, 7, 1, &outcome);
+        assert_eq!(retained.stages.len(), MAX_FAILED_BACKOFF_STAGES);
+        assert!(!retained.truncated);
+        retain_failed_backoff_observations(&mut retained, 7, 2, &outcome);
+        assert_eq!(retained.stages.len(), MAX_FAILED_BACKOFF_STAGES);
+        assert!(retained.truncated);
+        assert!(retained.stages.iter().all(|stage| stage.attempt == 1));
     }
 
     #[test]
@@ -3060,7 +3265,14 @@ mod tests {
         assert_eq!(usage.tokens_out, 0);
         assert_eq!(usage.tokens_cached, Some(0));
         assert!(usage.usage_coverage.is_none());
-        let diagnostic = reported_failure_usage_diagnostic(1, &[], &[usage], &[]).unwrap();
+        let diagnostic = reported_failure_usage_diagnostic(
+            1,
+            &[],
+            &[usage],
+            &[],
+            &FailedBackoffObservations::default(),
+        )
+        .unwrap();
         let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
         assert_eq!(
             content["reported_failed_workflow_usage"][0]["tokens_cached"],
