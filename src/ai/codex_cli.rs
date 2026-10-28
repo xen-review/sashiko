@@ -26,7 +26,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use super::claude_cli::{build_prompt, log_and_redact_stderr, parse_inner_response};
+use super::claude_cli::{
+    build_prompt, collect_cli_output, log_and_redact_stderr, parse_inner_response,
+};
 use crate::ai::{
     AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, cache_identity_with,
 };
@@ -112,7 +114,7 @@ impl CodexCliProvider {
             "Act only as a text completion backend. Follow the supplied review prompt and its response format. Tool names inside that prompt describe JSON requests for the caller, not native tools to discover or execute. Do not inspect the host, load local instructions, or delegate work. Return exactly one response.\n",
         )
         .await?;
-        let mut child = Command::new(binary)
+        let child = Command::new(binary)
             .args(build_codex_args(
                 &self.model,
                 self.effort.as_deref(),
@@ -126,19 +128,13 @@ impl CodexCliProvider {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn codex CLI: {}. Is it installed?", e))?;
 
-        let execution = async move {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(prompt.as_bytes()).await?;
-                stdin.flush().await?;
-            }
-            child.wait_with_output().await
-        };
-        let output = timeout(Duration::from_secs(self.timeout_seconds), execution)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("codex CLI timed out after {} seconds", self.timeout_seconds)
-            })?
-            .map_err(|e| anyhow::anyhow!("codex CLI wait error: {}", e))?;
+        let output = timeout(
+            Duration::from_secs(self.timeout_seconds),
+            collect_cli_output(child, &prompt),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("codex CLI timed out after {} seconds", self.timeout_seconds))?
+        .map_err(|e| anyhow::anyhow!("codex CLI wait error: {}", e))?;
 
         let stderr = log_and_redact_stderr("codex-cli", &output.stderr);
 
@@ -1353,6 +1349,133 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
                 ]
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_drains_output_while_sending_prompt() {
+        for redirect in ["", ">&2"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("codex");
+            let script = r#"#!/bin/sh
+fixture_dir=${0%/*}
+head -c 262144 /dev/zero | tr '\000' ' ' REDIRECT
+printf '\n'
+cat > "$fixture_dir/stdin"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"content\":\"OK\"}"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
+"#
+            .replace("REDIRECT", redirect);
+            crate::test_support::write_executable_script(&executable, &script);
+            let provider = CodexCliProvider {
+                model: "test-model".to_string(),
+                effort: None,
+                timeout_seconds: 5,
+            };
+            let request = AiRequest {
+                system: Some("x".repeat(1024 * 1024)),
+                ..Default::default()
+            };
+            let expected_prompt = build_prompt(&request);
+            let response = provider
+                .generate_content_with_binary(request, executable.as_os_str())
+                .await
+                .unwrap();
+            assert_eq!(response.content.as_deref(), Some("OK"));
+            assert_eq!(
+                std::fs::read_to_string(fixture.path().join("stdin")).unwrap(),
+                expected_prompt
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn early_exit_preserves_failure_and_rejects_incomplete_prompt() {
+        for (exit_code, expected) in [
+            (0, "failed to write prompt"),
+            (1, "provider rejected token=[REDACTED]"),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let executable = fixture.path().join("codex");
+            crate::test_support::write_executable_script(
+                &executable,
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"provider rejected token=tok-123\"}}}}'\nexit {exit_code}\n"
+                ),
+            );
+            let provider = CodexCliProvider {
+                model: "test-model".to_string(),
+                effort: None,
+                timeout_seconds: 5,
+            };
+            let error = provider
+                .generate_content_with_binary(
+                    AiRequest {
+                        system: Some("x".repeat(1024 * 1024)),
+                        ..Default::default()
+                    },
+                    executable.as_os_str(),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("tok-123"), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn completion_cancellation_terminates_child_during_prompt_transfer() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let executable = fixture.path().join("codex");
+        let pid_file = fixture.path().join("pid");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+fixture_dir=${0%/*}
+printf '%s\n' "$$" > "$fixture_dir/pid"
+while :; do :; done
+"#,
+        );
+        let task = tokio::spawn(async move {
+            CodexCliProvider {
+                model: "test-model".to_string(),
+                effort: None,
+                timeout_seconds: 20,
+            }
+            .generate_content_with_binary(
+                AiRequest {
+                    system: Some("x".repeat(1024 * 1024)),
+                    ..Default::default()
+                },
+                executable.as_os_str(),
+            )
+            .await
+        });
+        let pid = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && pid.trim().parse::<u32>().is_ok()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let process = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+        assert!(process.exists());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        timeout(Duration::from_secs(2), async {
+            while process.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
     }
 
     #[tokio::test]

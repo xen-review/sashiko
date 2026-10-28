@@ -177,6 +177,13 @@ the event name, but no live failure was induced or replayed. This does not
 classify subscription exhaustion or enable retries. Focused provider tests and
 the full `make check-pr` gate passed.
 
+An offline fake CLI also reproduced a prompt-transfer stall when startup output
+filled a pipe before the CLI read a large prompt. Codex now uses the existing
+concurrent stdin/output collector, preserving nonzero-exit diagnostics and
+rejecting incomplete prompt delivery on a zero exit. Fake-process checks cover
+stdout and stderr backpressure, timeout, redaction, and cancellation cleanup;
+the full `make check-pr` gate passes. No equivalent live stall was established.
+
 Update at 13:22 CET: the operator authorized raising Luna effort progressively
 and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
 model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
