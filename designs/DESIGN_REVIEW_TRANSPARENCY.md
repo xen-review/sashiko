@@ -216,6 +216,12 @@ disconnects have unknown observations. The parent keeps the existing usage
 guard inside backoff, and its budgeted failure diagnostics remain authoritative.
 No retry policy, model call, or budget enforcement changes are permitted here.
 
+A response cache outside a provider must forward observations from the current
+cache miss or failure, while storing only AiResponse and returning unavailable
+observations on a cache hit. A cache hit must never replay the original miss's
+retry evidence. Preserve existing cache identity, invalidation, and error
+behavior; this changes neither a budget decision nor response token totals.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

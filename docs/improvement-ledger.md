@@ -196,8 +196,9 @@ The optional turn logger now forwards per-call observations on success and error
 without treating unavailable data as empty or changing terminal classification.
 Daemon replies now carry bounded retry metadata by transaction through both stdio
 worker providers. Invalid metadata becomes unknown without dropping the response;
-budgeted provider errors still fail closed. An outer response cache can still hide
-observations on misses, and cancellation or backend-internal work remains unknown.
+budgeted provider errors still fail closed. An outer response cache now forwards
+current miss or failure observations but never replays them on hits. Cancellation
+or backend-internal work remains unknown.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the

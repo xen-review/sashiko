@@ -574,7 +574,7 @@ mod tests {
                 assert_eq!(first.backoff_retries.unwrap().retries.len(), 1);
                 assert!(second.backoff_retries.unwrap().retries.is_empty());
             } else {
-                assert!(first.backoff_retries.is_none());
+                assert_eq!(first.backoff_retries.unwrap().retries.len(), 1);
                 assert!(second.backoff_retries.is_none());
             }
         }

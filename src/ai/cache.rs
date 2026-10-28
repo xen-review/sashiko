@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
-use super::{AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities, get_log_prefix};
+use super::{
+    AiProvider, AiRequest, AiResponse, CacheStats, ObservedProviderCall, ProviderCapabilities,
+    get_log_prefix,
+};
 
 pub struct CachingAiProvider {
     inner: Arc<dyn AiProvider>,
@@ -108,6 +111,14 @@ impl CachingAiProvider {
 #[async_trait]
 impl AiProvider for CachingAiProvider {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_observations(request)
+            .await
+            .result
+    }
+
+    async fn generate_content_with_observations(&self, request: AiRequest) -> ObservedProviderCall {
+        let mut backoff_retries = None;
+        let result = async {
         let hash = self.compute_cache_key(&request);
         let hash_prefix = &hash[..12];
 
@@ -157,7 +168,12 @@ impl AiProvider for CachingAiProvider {
 
         debug!("Cache miss [{}]", hash_prefix);
 
-        let resp = self.inner.generate_content(request.clone()).await?;
+        let call = self
+            .inner
+            .generate_content_with_observations(request.clone())
+            .await;
+        backoff_retries = call.backoff_retries;
+        let resp = call.result?;
 
         let response_json = serde_json::to_string(&resp)?;
         let request_json = serde_json::to_string(&request)?;
@@ -189,6 +205,12 @@ impl AiProvider for CachingAiProvider {
             .await;
 
         Ok(resp)
+        }
+        .await;
+        ObservedProviderCall {
+            result,
+            backoff_retries,
+        }
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -310,6 +332,82 @@ mod tests {
             }
             assert_eq!(calls.load(Ordering::SeqCst), 2, "{decorator}");
         }
+    }
+
+    #[tokio::test]
+    async fn cache_miss_preserves_observed_failures_without_caching_them() {
+        struct FailingProvider(AtomicU64);
+
+        #[async_trait]
+        impl AiProvider for FailingProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                anyhow::bail!("unobserved call")
+            }
+
+            async fn generate_content_with_observations(
+                &self,
+                _request: AiRequest,
+            ) -> ObservedProviderCall {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let error = crate::ai::RemoteAiError {
+                    message: "terminal".into(),
+                    class: crate::ai::AiErrorClass::Fatal,
+                }
+                .into();
+                ObservedProviderCall {
+                    result: Err(crate::ai::ProviderFailureUsage::attach(
+                        error,
+                        crate::ai::AiUsage {
+                            prompt_tokens: 9,
+                            completion_tokens: 1,
+                            total_tokens: 10,
+                            cached_tokens: Some(0),
+                        },
+                    )),
+                    backoff_retries: Some(crate::ai::BackoffRetryObservations {
+                        retries: vec![crate::ai::BackoffRetryObservation {
+                            attempt: 1,
+                            usage: None,
+                        }],
+                        truncated: false,
+                    }),
+                }
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("response_cache.db");
+        let inner = Arc::new(FailingProvider(AtomicU64::new(0)));
+        let cache = CachingAiProvider::new(inner.clone(), path.to_str().unwrap(), 30)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let call = cache
+                .generate_content_with_observations(AiRequest::default())
+                .await;
+            let error = call.result.unwrap_err();
+            assert_eq!(
+                crate::ai::classify_ai_error(&error),
+                crate::ai::AiErrorClass::Fatal
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                    .unwrap()
+                    .usage
+                    .cached_tokens,
+                Some(0)
+            );
+            assert_eq!(call.backoff_retries.unwrap().retries.len(), 1);
+        }
+        assert_eq!(inner.0.load(Ordering::SeqCst), 2);
     }
 
     /// Answers every request with text the session below rejects, and counts
