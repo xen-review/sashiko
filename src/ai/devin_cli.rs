@@ -36,9 +36,7 @@ use tracing::{debug, warn};
 use super::claude_cli::{
     CLI_PROMPT_FORMAT_PROFILE, build_prompt, log_and_redact_stderr, parse_inner_response,
 };
-use crate::ai::{
-    AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, token_budget::TokenBudget,
-};
+use crate::ai::{AiProvider, AiRequest, AiResponse, ProviderCapabilities};
 
 pub struct DevinCliProvider {
     pub model: Option<String>,
@@ -79,9 +77,12 @@ pub fn build_devin_args(
     args
 }
 
-#[async_trait]
-impl AiProvider for DevinCliProvider {
-    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+impl DevinCliProvider {
+    async fn generate_content_with_binary(
+        &self,
+        request: AiRequest,
+        binary: &std::ffi::OsStr,
+    ) -> Result<AiResponse> {
         let prompt = build_prompt(&request);
 
         debug!("devin-cli prompt length: {} chars", prompt.len());
@@ -109,7 +110,7 @@ impl AiProvider for DevinCliProvider {
             self.config.as_deref(),
         );
 
-        let child = Command::new("devin")
+        let child = Command::new(binary)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -139,18 +140,15 @@ impl AiProvider for DevinCliProvider {
             warn!("devin-cli produced empty stdout");
         }
 
-        // devin does not print usage statistics, so estimate prompt and
-        // completion tokens from their sizes, as kiro-cli does.
-        let prompt_tokens = TokenBudget::approximate_tokens(&prompt);
-        let completion_tokens = TokenBudget::approximate_tokens(&raw);
-        let usage = Some(AiUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-            cached_tokens: None,
-        });
+        parse_inner_response(&raw, None)
+    }
+}
 
-        parse_inner_response(&raw, usage)
+#[async_trait]
+impl AiProvider for DevinCliProvider {
+    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        self.generate_content_with_binary(request, std::ffi::OsStr::new("devin"))
+            .await
     }
 
     fn get_capabilities(&self) -> ProviderCapabilities {
@@ -170,6 +168,7 @@ impl AiProvider for DevinCliProvider {
                 ("agent_config", self.agent_config.as_deref()),
                 ("config", self.config.as_deref()),
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ("usage_profile", Some("unavailable-v1")),
             ],
         )
     }
@@ -178,6 +177,24 @@ impl AiProvider for DevinCliProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreported_usage_is_unknown() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("devin");
+        crate::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '{\"content\":\"OK\"}'\n",
+        );
+        let provider = test_provider(None, None);
+        let response = provider
+            .generate_content_with_binary(AiRequest::default(), executable.as_os_str())
+            .await
+            .unwrap();
+        assert_eq!(response.content.as_deref(), Some("OK"));
+        assert!(response.usage.is_none());
+    }
 
     fn test_provider(agent_config: Option<&str>, config: Option<&str>) -> DevinCliProvider {
         DevinCliProvider {
@@ -191,6 +208,17 @@ mod tests {
     fn cache_identity_tracks_the_config_files() {
         let base = test_provider(None, None);
         assert_ne!(base.cache_identity(), base.get_capabilities().model_name);
+        assert_ne!(
+            base.cache_identity(),
+            crate::ai::cache_identity_with(
+                &base.get_capabilities().model_name,
+                &[
+                    ("agent_config", base.agent_config.as_deref()),
+                    ("config", base.config.as_deref()),
+                    ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ],
+            )
+        );
 
         let no_tools = test_provider(Some("/etc/sashiko/no-tools.json"), None);
         assert_ne!(base.cache_identity(), no_tools.cache_identity());

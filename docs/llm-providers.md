@@ -406,8 +406,7 @@ effort from the ignored Codex configuration file.
 #### Devin CLI Setup
 
 Sashiko can use a local [Devin for Terminal](https://cli.devin.ai/) install as
-a completion backend. This path uses your Devin subscription, so there is no
-per-token API charge and no API key to configure.
+a completion backend. Billing and usage limits depend on the account and plan.
 
 **Prerequisites**:
 - `devin` CLI installed and on `$PATH`
@@ -421,6 +420,9 @@ Copy `examples/Settings.devin-cli.toml` to your `Settings.toml` and adjust as ne
   `swe`, `gpt`, `codex`). Leave it empty in `[ai]` to use the Devin default.
 - Sashiko invokes `devin --print --prompt-file <tmp>`
   per request. The prompt is written to a temp file which is passed to `devin`.
+- Usage is unavailable because this adapter does not receive measured token
+  counts. The agent harness stops rather than continuing without a measured
+  total.
 - Each review may spawn many `devin` processes. Lower `review.concurrency`
   if you hit subscription rate limits.
 

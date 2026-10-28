@@ -108,6 +108,12 @@ The agent harness stops without measured counts; replies remain available to
 workflow callers. Focused tests and the full `make check-pr` gate pass. This
 change has not been tested with a live Kiro account.
 
+Devin also returned character-based estimates as provider usage. A fake CLI
+now verifies that the reply is retained with usage unknown, and its cache
+identity separates earlier estimates. The agent harness stops without measured
+counts. Focused tests and the full `make check-pr` gate pass. No live Devin call
+was made.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for
