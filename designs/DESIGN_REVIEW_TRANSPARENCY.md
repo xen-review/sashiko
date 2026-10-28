@@ -154,6 +154,24 @@ cancelled calls, retries hidden inside provider decorators, and native model
 generations remain unknown. Fake-provider tests cover eventual success,
 exhaustion, fatal errors, missing usage and explicit cached zero.
 
+Incremental decorator-retry observation contract: BackoffProvider can retry an
+inner request before returning one response to SessionRunner, so the session's
+request count alone cannot establish complete inner-call usage. Expose actual
+attempt observations separately from AiResponse's successful usage, with a
+bounded list and an explicit truncation marker. Record unreported attempts as
+unknown, not zero. A quota-admission rejection that did not call the provider
+must not be counted as an attempt. Preserve terminal error classification and
+its existing usage observation without double counting it.
+
+The first increment may expose an internal typed result for deterministic tests,
+without changing the public provider interface or runtime accounting. Later
+propagation must cover both in-process and daemon/worker protocol paths, avoid
+replaying prior retry observations from response-cache hits, and preserve the
+budgeted daemon's fail-closed behavior. Do not treat these attempts as native
+model-generation counts or complete billing; backend-internal work and cancelled
+calls may remain unobserved. No model call, scheduling, or retry-policy change
+is authorized by this accounting work.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

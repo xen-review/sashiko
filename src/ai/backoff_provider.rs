@@ -41,7 +41,7 @@ use tracing::warn;
 
 use crate::ai::quota::QuotaManager;
 use crate::ai::{
-    AiErrorClass, AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities,
+    AiErrorClass, AiProvider, AiRequest, AiResponse, AiUsage, CacheStats, ProviderCapabilities,
     classify_ai_error, classify_provider_ai_error, get_log_prefix,
 };
 
@@ -50,6 +50,40 @@ use crate::ai::{
 /// outage cannot hang a review indefinitely; transient blips resolve well
 /// within this.
 const MAX_ATTEMPTS: u32 = 6;
+const MAX_RETRY_OBSERVATIONS: usize = 32;
+
+#[derive(Debug)]
+pub(crate) struct BackoffRetryObservation {
+    pub attempt: u32,
+    pub usage: Option<AiUsage>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BackoffObservedSuccess {
+    pub response: AiResponse,
+    pub retries: Vec<BackoffRetryObservation>,
+    pub truncated: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct BackoffObservedFailure {
+    pub error: anyhow::Error,
+    pub retries: Vec<BackoffRetryObservation>,
+    pub truncated: bool,
+}
+
+fn log_retry_observations(retries: &[BackoffRetryObservation], truncated: bool) {
+    for retry in retries {
+        tracing::debug!(
+            attempt = retry.attempt,
+            usage = ?retry.usage,
+            "Provider retry usage observation"
+        );
+    }
+    if truncated {
+        tracing::debug!("Provider retry usage observations truncated");
+    }
+}
 
 /// Lets a caller account for the time spent waiting on the shared quota gate
 /// and stop the retry loop early.
@@ -268,30 +302,48 @@ impl BackoffProvider {
             budget,
         }
     }
-}
 
-#[async_trait]
-impl AiProvider for BackoffProvider {
-    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+    pub(crate) async fn generate_content_observed(
+        &self,
+        request: AiRequest,
+    ) -> std::result::Result<BackoffObservedSuccess, BackoffObservedFailure> {
         let mut attempt: u32 = 0;
         let mut transient_streak: i32 = 0;
+        let mut retries = Vec::new();
+        let mut truncated = false;
         loop {
             // Honour any active global rate-limit window before trying. The
             // wait is reported so a caller can keep it off its own deadline.
-            if let Some(budget) = &self.budget {
-                budget.check()?;
+            if let Some(budget) = &self.budget
+                && let Err(error) = budget.check()
+            {
+                return Err(BackoffObservedFailure {
+                    error,
+                    retries,
+                    truncated,
+                });
             }
             let mut wait = BudgetWait::new(self.budget.as_deref());
             let slept = self.quota.wait_for_access_with(|| wait.start()).await;
             wait.finish(slept);
-            if let Some(budget) = &self.budget {
-                budget.check()?;
+            if let Some(budget) = &self.budget
+                && let Err(error) = budget.check()
+            {
+                return Err(BackoffObservedFailure {
+                    error,
+                    retries,
+                    truncated,
+                });
             }
 
             match self.inner.generate_content(request.clone()).await {
                 Ok(response) => {
                     self.quota.report_success().await;
-                    return Ok(response);
+                    return Ok(BackoffObservedSuccess {
+                        response,
+                        retries,
+                        truncated,
+                    });
                 }
                 Err(e) => {
                     if e.is::<crate::ai::concurrency_limited_provider::QuotaAdmissionBlocked>() {
@@ -306,7 +358,23 @@ impl AiProvider for BackoffProvider {
                     if let Some(max) = self.max_attempts
                         && attempt >= max
                     {
-                        return Err(e);
+                        return Err(BackoffObservedFailure {
+                            error: e,
+                            retries,
+                            truncated,
+                        });
+                    }
+                    if !matches!(classification, AiErrorClass::Fatal) {
+                        if retries.len() < MAX_RETRY_OBSERVATIONS {
+                            retries.push(BackoffRetryObservation {
+                                attempt,
+                                usage: e
+                                    .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                                    .map(|reported| reported.usage.clone()),
+                            });
+                        } else {
+                            truncated = true;
+                        }
                     }
                     match classification {
                         AiErrorClass::RateLimit { .. } => {}
@@ -332,9 +400,31 @@ impl AiProvider for BackoffProvider {
                             );
                             sleep(jittered).await;
                         }
-                        AiErrorClass::Fatal => return Err(e),
+                        AiErrorClass::Fatal => {
+                            return Err(BackoffObservedFailure {
+                                error: e,
+                                retries,
+                                truncated,
+                            });
+                        }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl AiProvider for BackoffProvider {
+    async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+        match self.generate_content_observed(request).await {
+            Ok(outcome) => {
+                log_retry_observations(&outcome.retries, outcome.truncated);
+                Ok(outcome.response)
+            }
+            Err(failure) => {
+                log_retry_observations(&failure.retries, failure.truncated);
+                Err(failure.error)
             }
         }
     }
@@ -362,6 +452,155 @@ mod tests {
     use crate::ai::gemini::GeminiError;
     use crate::ai::{AiMessage, AiRole};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test]
+    async fn observed_backoff_retains_reported_and_unknown_retry_usage() {
+        struct RetryProvider {
+            calls: AtomicU32,
+            reported: Option<crate::ai::AiUsage>,
+        }
+
+        #[async_trait]
+        impl AiProvider for RetryProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let error = GeminiError::TransientError(Duration::ZERO, "temporary".into());
+                    let error = anyhow::Error::new(error);
+                    return Err(match &self.reported {
+                        Some(usage) => {
+                            crate::ai::ProviderFailureUsage::attach(error, usage.clone())
+                        }
+                        None => error,
+                    });
+                }
+                Ok(AiResponse {
+                    content: Some("success".into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        for cached in [None, Some(None), Some(Some(0))] {
+            let inner = Arc::new(RetryProvider {
+                calls: AtomicU32::new(0),
+                reported: cached.map(|cached_tokens| crate::ai::AiUsage {
+                    prompt_tokens: 12,
+                    completion_tokens: 3,
+                    total_tokens: 15,
+                    cached_tokens,
+                }),
+            });
+            let mut provider = BackoffProvider::new(inner, Arc::new(QuotaManager::new()), None);
+            provider.base_delay = Duration::ZERO;
+            let outcome = provider
+                .generate_content_observed(AiRequest::default())
+                .await
+                .unwrap();
+            assert_eq!(outcome.response.usage.unwrap().prompt_tokens, 7);
+            assert_eq!(outcome.retries.len(), 1);
+            assert_eq!(outcome.retries[0].attempt, 1);
+            assert_eq!(
+                outcome.retries[0]
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.cached_tokens),
+                cached
+            );
+            assert!(!outcome.truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_backoff_bounds_retries_and_preserves_terminal_errors() {
+        let inner = mock(Behaviour::Transient, 2, Duration::ZERO);
+        let mut provider = BackoffProvider::new(inner.clone(), Arc::new(QuotaManager::new()), None);
+        provider.base_delay = Duration::ZERO;
+        provider.max_attempts = Some(2);
+        let failure = provider
+            .generate_content_observed(AiRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            classify_ai_error(&failure.error),
+            AiErrorClass::Transient { .. }
+        ));
+        assert_eq!(failure.retries.len(), 1);
+        assert_eq!(failure.retries[0].attempt, 1);
+        assert!(failure.retries[0].usage.is_none());
+        assert!(!failure.truncated);
+
+        let inner = mock(Behaviour::Transient, 34, Duration::ZERO);
+        let mut provider = BackoffProvider::new(inner.clone(), Arc::new(QuotaManager::new()), None);
+        provider.base_delay = Duration::ZERO;
+        provider.max_attempts = Some(40);
+        let outcome = provider
+            .generate_content_observed(AiRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 35);
+        assert_eq!(outcome.retries.len(), MAX_RETRY_OBSERVATIONS);
+        assert_eq!(outcome.retries.last().unwrap().attempt, 32);
+        assert!(outcome.truncated);
+
+        let inner = mock(Behaviour::QuotaAdmissionBlocked, 1, Duration::ZERO);
+        let provider = BackoffProvider::new(inner.clone(), Arc::new(QuotaManager::new()), None);
+        let outcome = provider
+            .generate_content_observed(AiRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(outcome.retries.is_empty());
+        assert!(!outcome.truncated);
+    }
+
+    #[tokio::test]
+    async fn observed_backoff_retains_retries_when_budget_expires() {
+        struct StopAfterRetry(AtomicU32);
+
+        impl RetryBudget for StopAfterRetry {
+            fn credit_wait(&self, _slept: Duration) {}
+
+            fn check(&self) -> Result<()> {
+                if self.0.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    anyhow::bail!("test budget expired");
+                }
+                Ok(())
+            }
+        }
+
+        let inner = mock(Behaviour::Transient, 2, Duration::ZERO);
+        let budget = Arc::new(StopAfterRetry(AtomicU32::new(0)));
+        let mut provider =
+            BackoffProvider::new(inner.clone(), Arc::new(QuotaManager::new()), Some(budget));
+        provider.base_delay = Duration::ZERO;
+        let failure = provider
+            .generate_content_observed(AiRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(failure.error.to_string(), "test budget expired");
+        assert_eq!(failure.retries.len(), 1);
+        assert_eq!(failure.retries[0].attempt, 1);
+        assert!(failure.retries[0].usage.is_none());
+        assert!(!failure.truncated);
+    }
 
     enum Behaviour {
         Transient,

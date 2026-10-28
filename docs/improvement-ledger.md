@@ -177,6 +177,11 @@ request-scoped retry diagnostics. A fake CLI covers exhausted attempts for two
 patches, and a fake worker verifies persistence in failed-review logs. Retry
 observations from post-processing failures, provider decorators, cancelled work
 and missing counters remain unknown.
+BackoffProvider now records a bounded internal list of retry observations and
+emits numeric-only debug diagnostics, including an explicit truncation marker.
+Fake tests cover missing and measured counters, terminal errors, budget expiry,
+admission rejections and the 32-observation bound. These observations are not
+yet carried to session or daemon review results; no retry or budget rule changed.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the
