@@ -1030,6 +1030,11 @@ Both deadlines are now rechecked after a request acquires a concurrency permit,
 so a queued call cannot start after its budget expires. Focused tests also cover
 an active quota wait and the independent wall limit.
 
+Quota wait credits now cover each continuous shared wait once, even when
+overlapping requests finish out of order. Waits that start after an expired
+active deadline cannot revive it. These cases are covered by clock-controlled
+tests; this change has not been deployed or tested with a live provider.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model

@@ -135,8 +135,10 @@ impl DeadlineBudget {
             // concurrent tasks waking from the same rate-limit window.
             if uncredited >= Duration::from_millis(1) {
                 let mut d = self.deadline.lock().unwrap();
-                *d += uncredited;
-                *last_end = Some(now);
+                if effective_start < *d {
+                    *d += uncredited;
+                    *last_end = Some(now);
+                }
             }
         }
     }
@@ -154,6 +156,19 @@ impl DeadlineBudget {
             ));
         }
         Ok(())
+    }
+
+    fn wait_finished_at(&self, now: tokio::time::Instant) {
+        let mut waits = self.active_waits.lock().unwrap();
+        if let Some(started_at) = waits.started_at {
+            self.credit_wait_at(now.saturating_duration_since(started_at), now);
+        }
+        waits.count -= 1;
+        if waits.count == 0 {
+            waits.started_at = None;
+        }
+        drop(waits);
+        self.wait_changes.send_replace(());
     }
 }
 
@@ -176,15 +191,8 @@ impl RetryBudget for DeadlineBudget {
         self.wait_changes.send_replace(());
     }
 
-    fn wait_finished(&self, slept: Duration) {
-        self.credit_wait(slept);
-        let mut waits = self.active_waits.lock().unwrap();
-        waits.count -= 1;
-        if waits.count == 0 {
-            waits.started_at = None;
-        }
-        drop(waits);
-        self.wait_changes.send_replace(());
+    fn wait_finished(&self, _slept: Duration) {
+        self.wait_finished_at(tokio::time::Instant::now());
     }
 }
 
@@ -626,6 +634,47 @@ mod tests {
         wait.start();
         assert!(!budget.quota_wait_is_active());
         assert!(budget.check().is_err());
+    }
+
+    #[test]
+    fn overlapping_late_quota_waits_do_not_revive_expired_budget() {
+        let now = tokio::time::Instant::now();
+        let deadline = Arc::new(std::sync::Mutex::new(now + Duration::from_secs(5)));
+        let budget = DeadlineBudget::new(deadline.clone());
+        {
+            let mut waits = budget.active_waits.lock().unwrap();
+            waits.count = 2;
+            waits.started_at = Some(now + Duration::from_secs(10));
+        }
+
+        budget.wait_finished_at(now + Duration::from_secs(30));
+
+        assert_eq!(*deadline.lock().unwrap(), now + Duration::from_secs(5));
+        assert!(!budget.quota_wait_is_active());
+        let error = budget.check_at(now + Duration::from_secs(30)).unwrap_err();
+        assert!(error.to_string().contains("active time exceeded"));
+        budget.wait_finished_at(now + Duration::from_secs(35));
+        assert_eq!(*deadline.lock().unwrap(), now + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn overlapping_quota_waits_credit_the_full_interval_when_finished_out_of_order() {
+        let now = tokio::time::Instant::now();
+        let deadline = Arc::new(std::sync::Mutex::new(now + Duration::from_secs(5)));
+        let budget = DeadlineBudget::new(deadline.clone());
+        {
+            let mut waits = budget.active_waits.lock().unwrap();
+            waits.count = 2;
+            waits.started_at = Some(now);
+        }
+
+        budget.wait_finished_at(now + Duration::from_secs(10));
+        assert_eq!(*deadline.lock().unwrap(), now + Duration::from_secs(15));
+        assert!(budget.check_at(now + Duration::from_secs(10)).is_ok());
+        budget.wait_finished_at(now + Duration::from_secs(11));
+
+        assert_eq!(*deadline.lock().unwrap(), now + Duration::from_secs(16));
+        assert_eq!(budget.active_waits.lock().unwrap().count, 0);
     }
 
     #[cfg(feature = "server")]
