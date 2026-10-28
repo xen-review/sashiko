@@ -1011,6 +1011,10 @@ A concurrent successful request no longer clears an unexpired shared backoff.
 Deterministic tests cover both active deadlines and expired-deadline cleanup.
 This does not add durable subscription deferral or enable a quota controller.
 
+A final rate-limited attempt now records the shared backoff even when that
+request has exhausted its attempts. A fake-provider test verifies that it does
+not retry and that other requests remain blocked.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model

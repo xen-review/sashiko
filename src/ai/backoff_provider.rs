@@ -171,18 +171,17 @@ impl AiProvider for BackoffProvider {
                 }
                 Err(e) => {
                     attempt += 1;
+                    let classification = classify_ai_error(&e);
+                    if let AiErrorClass::RateLimit { retry_after } = &classification {
+                        self.quota.report_quota_error(*retry_after).await;
+                    }
                     if let Some(max) = self.max_attempts
                         && attempt >= max
                     {
                         return Err(e);
                     }
-                    match classify_ai_error(&e) {
-                        AiErrorClass::RateLimit { retry_after } => {
-                            // Account-wide: block every concurrent request
-                            // until it clears. The next iteration's
-                            // wait_for_access() performs the sleep.
-                            self.quota.report_quota_error(retry_after).await;
-                        }
+                    match classification {
+                        AiErrorClass::RateLimit { .. } => {}
                         AiErrorClass::Transient { retry_after } => {
                             // Server-side blip. Exponential backoff with
                             // jitter, floored by any server-suggested delay.
@@ -382,6 +381,27 @@ mod tests {
             .unwrap();
         assert_eq!(resp.content.as_deref(), Some("ok"));
         assert_eq!(m.calls.load(Ordering::SeqCst), 3); // 2 rate-limit failures + success
+    }
+
+    #[tokio::test]
+    async fn terminal_rate_limit_blocks_other_requests() {
+        let inner = mock(Behaviour::RateLimit, 1, Duration::from_secs(60));
+        let quota = Arc::new(QuotaManager::new());
+        let provider = BackoffProvider {
+            inner: inner.clone(),
+            quota: quota.clone(),
+            base_delay: Duration::from_millis(1),
+            max_attempts: Some(1),
+            budget: None,
+        };
+
+        assert!(provider.generate_content(dummy_request()).await.is_err());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), quota.wait_for_access())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
