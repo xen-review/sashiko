@@ -412,9 +412,11 @@ counters do not establish complete usage for the failed call. A reported rate
 limit still starts shared backoff for other reviews. Cancellation and the
 deadline can interrupt in-progress calls. Setting both limits to zero allows
 workflow reviews to continue without usage and retry transient and rate-limit
-errors, but disables both token budgets. These budgets are checked after
-responses arrive and can be overshot by calls already in progress; they are not
-hard per-generation limits.
+errors, but disables both token budgets. A terminal workflow error carrying
+reported usage can retain those observations in diagnostic history; earlier
+retry attempts may still be missing. These budgets are checked after responses
+arrive and can be overshot by calls already in progress; they are not hard
+per-generation limits.
 
 #### Agent Harness
 

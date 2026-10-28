@@ -150,8 +150,14 @@ those observed counters, which the budgeted workflow guard retains in failure
 diagnostics without treating total usage as complete. Local and daemon harness
 failure traces retain them separately from successful-call totals, including
 after a sequential checkpoint. They are not yet added to durable usage totals
-or retained by the unbudgeted workflow error path; hidden calls and missing
-counters remain unknown.
+and hidden calls and missing counters remain unknown.
+
+Terminal unbudgeted workflow errors now carry observed usage over the typed
+daemon/worker protocol into diagnostic history. The budgeted parent retains its
+own observation without forwarding a duplicate. Fake protocol, worker, local
+CLI and persistence checks cover missing and zero cache counts and unchanged
+retry behavior. Earlier attempts consumed by retries may still be missing; no
+live provider or deployment test has been made.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

@@ -274,6 +274,27 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
         std::fs::read_to_string(bin.join("calls")).unwrap(),
         "call\ncall\n"
     );
+    let missing_answer = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"item.completed", "item":{"type":"reasoning", "text":"internal reasoning"}}),
+        serde_json::json!({"type":"turn.completed", "usage":{"input_tokens":12, "output_tokens":3, "cached_input_tokens":0}})
+    );
+    std::fs::write(bin.join("response"), &missing_answer).unwrap();
+    let failed = run(&["--format", "json"]);
+    assert_eq!(failed.status.code(), Some(3));
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(
+        result["harness"]["trace"]["reported_failed_call_usage"]["usage"]["prompt_tokens"],
+        12
+    );
+    assert_eq!(
+        result["harness"]["trace"]["reported_failed_call_usage"]["usage"]["cached_tokens"],
+        0
+    );
+    assert_eq!(
+        result["harness"]["trace"]["call_usage"],
+        serde_json::json!([])
+    );
     let configuration = std::fs::read_to_string(&settings).unwrap();
     std::fs::write(
         &settings,
@@ -355,4 +376,55 @@ fn test_agent_harness_reviews_series_without_workflow_fallback() {
             assert!(second_prompt.contains("sequential-series-context-v1"));
         }
     }
+
+    std::fs::write(
+        &settings,
+        "[ai]\nprovider = 'codex-cli'\nmodel = 'gpt-6-luna'\n[ai.codex_cli]\neffort = 'low'\n[review]\nconcurrency = 1\nmode = 'workflow'\n",
+    )
+    .unwrap();
+    std::fs::write(&source, "#!/bin/sh\nfixture=${0%/*}\nprintf 'call\\n' >> \"$fixture/calls\"\ncat > \"$fixture/input\"\ncat \"$fixture/response\"\n").unwrap();
+    assert!(
+        Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin.join("codex"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(bin.join("calls"), "").unwrap();
+    let prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projects/xen/prompts");
+    let failed = run(&["--format", "json", "--prompts", prompts.to_str().unwrap()]);
+    assert_eq!(
+        failed.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    let diagnostics: Vec<_> = result["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "diagnostic")
+        .map(|entry| {
+            serde_json::from_str::<serde_json::Value>(entry["content"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        assert_eq!(
+            diagnostic["reported_failed_provider_usage"][0]["patch_index"],
+            index + 1
+        );
+        assert_eq!(
+            diagnostic["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
+            12
+        );
+        assert_eq!(
+            diagnostic["reported_failed_provider_usage"][0]["usage"]["cached_tokens"],
+            0
+        );
+    }
+    assert!(result["usage_coverage"].is_null());
 }

@@ -336,18 +336,28 @@ pub(crate) struct RemoteAiErrorPayload {
     pub message: String,
     #[serde(flatten)]
     pub class: AiErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_failure_usage: Option<AiUsage>,
 }
 
 impl RemoteAiErrorPayload {
-    #[cfg(any(feature = "server", test))]
     pub fn new(message: String, class: AiErrorClass) -> Self {
-        Self { message, class }
+        Self {
+            message,
+            class,
+            reported_failure_usage: None,
+        }
     }
 
-    pub fn into_error(self) -> RemoteAiError {
-        RemoteAiError {
+    pub fn into_error(self) -> anyhow::Error {
+        let error = RemoteAiError {
             message: self.message,
             class: self.class,
+        }
+        .into();
+        match self.reported_failure_usage {
+            Some(usage) => ProviderFailureUsage::attach(error, usage),
+            None => error,
         }
     }
 }
@@ -428,7 +438,7 @@ pub(crate) fn classify_provider_ai_error(error: &anyhow::Error) -> AiErrorClass 
 }
 
 /// Token usage statistics for an AI interaction.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiUsage {
     /// Number of tokens in the input prompt.
     pub prompt_tokens: usize,
@@ -953,7 +963,7 @@ pub(crate) struct IpcRegistry {
     pending: tokio::sync::Mutex<
         std::collections::HashMap<
             u64,
-            tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiError>>,
+            tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiErrorPayload>>,
         >,
     >,
 }
@@ -981,7 +991,7 @@ impl IpcRegistry {
     pub async fn register(
         &self,
         tx_id: u64,
-        tx: tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiError>>,
+        tx: tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiErrorPayload>>,
     ) -> Result<(), RemoteAiError> {
         let mut map = self.pending.lock().await;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1000,7 +1010,7 @@ impl IpcRegistry {
         Ok(())
     }
 
-    pub async fn dispatch(&self, tx_id: u64, result: Result<AiResponse, RemoteAiError>) {
+    pub async fn dispatch(&self, tx_id: u64, result: Result<AiResponse, RemoteAiErrorPayload>) {
         let mut map = self.pending.lock().await;
         if let Some(sender) = map.remove(&tx_id) {
             let _ = sender.send(result);
@@ -1016,8 +1026,9 @@ impl IpcRegistry {
     pub async fn abort_all(&self, err: RemoteAiError) {
         let mut map = self.pending.lock().await;
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let payload = RemoteAiErrorPayload::new(err.message, err.class);
         for (_tx_id, sender) in map.drain() {
-            let _ = sender.send(Err(err.clone()));
+            let _ = sender.send(Err(payload.clone()));
         }
     }
 }
@@ -1143,9 +1154,7 @@ pub(crate) fn start_stdin_reader(registry: Arc<IpcRegistry>) -> tokio::task::Joi
                         if let Ok(payload) =
                             serde_json::from_value::<RemoteAiErrorPayload>(envelope.payload)
                         {
-                            registry
-                                .dispatch(envelope.tx_id, Err(payload.into_error()))
-                                .await;
+                            registry.dispatch(envelope.tx_id, Err(payload)).await;
                         } else {
                             eprintln!(
                                 "CRITICAL PROTOCOL ERROR: Failed to parse payload as RemoteAiErrorPayload for tx_id {}",
@@ -1388,6 +1397,35 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("retry_after_secs"));
 
+        for cached_tokens in [None, Some(0), Some(4)] {
+            let mut payload = RemoteAiErrorPayload::new(
+                "failed completion".to_string(),
+                AiErrorClass::Transient {
+                    retry_after: Duration::from_secs(5),
+                },
+            );
+            payload.reported_failure_usage = Some(AiUsage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+                total_tokens: 15,
+                cached_tokens,
+            });
+            let encoded = serde_json::to_value(&payload)?;
+            let decoded: RemoteAiErrorPayload = serde_json::from_value(encoded)?;
+            assert_eq!(decoded, payload);
+            let error = decoded.into_error();
+            assert_eq!(
+                classify_ai_error(&error),
+                AiErrorClass::Transient {
+                    retry_after: Duration::from_secs(5),
+                }
+            );
+            let usage = &error.downcast_ref::<ProviderFailureUsage>().unwrap().usage;
+            assert_eq!(usage.prompt_tokens, 12);
+            assert_eq!(usage.completion_tokens, 3);
+            assert_eq!(usage.cached_tokens, cached_tokens);
+        }
+
         Ok(())
     }
 
@@ -1523,7 +1561,7 @@ mod tests {
     async fn test_register_after_disconnect_fails() {
         let registry = IpcRegistry::new();
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         registry
             .register(1, tx)
             .await
@@ -1536,6 +1574,13 @@ mod tests {
             })
             .await;
 
+        let disconnected = rx.await.unwrap().unwrap_err().into_error();
+        assert_eq!(classify_ai_error(&disconnected), AiErrorClass::Fatal);
+        assert!(
+            disconnected
+                .downcast_ref::<ProviderFailureUsage>()
+                .is_none()
+        );
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let err = registry
             .register(2, tx)

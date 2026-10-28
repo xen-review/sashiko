@@ -4195,7 +4195,12 @@ async fn run_review_tool_with_cmd_and_overrides(
                                                 Err(e) => {
                                                     let class = classify_ai_error(&e);
                                                     let message = e.to_string();
-                                                    let payload = RemoteAiErrorPayload::new(message, class);
+                                                    let mut payload = RemoteAiErrorPayload::new(message, class);
+                                                    if !require_usage {
+                                                        payload.reported_failure_usage = e
+                                                            .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                                                            .map(|reported| reported.usage.clone());
+                                                    }
                                                     let reply = json!({
                                                         "type": "error",
                                                         "tx_id": tx_id,
@@ -6138,6 +6143,68 @@ fi
     }
 
     #[tokio::test]
+    async fn test_run_review_tool_sends_observed_failure_usage() -> Result<()> {
+        struct MeasuredFailureProvider(AtomicUsize);
+
+        #[async_trait]
+        impl AiProvider for MeasuredFailureProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(crate::ai::ProviderFailureUsage::attach(
+                    anyhow::anyhow!("fatal provider failure"),
+                    crate::ai::AiUsage {
+                        prompt_tokens: 12,
+                        completion_tokens: 3,
+                        total_tokens: 15,
+                        cached_tokens: Some(0),
+                    },
+                ))
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+if [[ "$ai_response" == *'"class":"fatal"'* && "$ai_response" == *'"reported_failure_usage"'* && "$ai_response" == *'"prompt_tokens":12'* && "$ai_response" == *'"cached_tokens":0'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"observed"}]}'
+elif [[ "$ai_response" == *'"class":"fatal"'* && "$ai_response" != *'"reported_failure_usage"'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"parent_only"}]}'
+else
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"unexpected"}]}'
+fi
+"#;
+        let provider = Arc::new(MeasuredFailureProvider(AtomicUsize::new(0)));
+        let result =
+            run_single_ai_request_mock_with_budget(mock_script, provider.clone(), None, 5, false)
+                .await?;
+        assert_eq!(result["patches"][0]["status"], "observed");
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        let error =
+            run_single_ai_request_mock_with_budget(mock_script, provider.clone(), None, 5, true)
+                .await
+                .unwrap_err();
+        let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+        assert_eq!(retained.0["patches"][0]["status"], "parent_only");
+        assert_eq!(
+            retained.0["reported_failed_provider_usage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_run_review_tool_timeout_reaps_stuck_child() -> Result<()> {
         let temp_dir = tempdir()?;
         let bin_path = temp_dir.path().join("mock_review");
@@ -7306,6 +7373,86 @@ echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"re
             }
             assert!(rows.next().await?.is_none());
         }
+
+        crate::test_support::write_executable_script(
+            ctx.worker_overrides.test_program.as_ref().unwrap(),
+            r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"first"}]}}'
+read -r response || exit 1
+if [[ "$response" == *'"reported_failure_usage"'* && "$response" == *'"prompt_tokens":12'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":5,"status":"applied"}],"history":[{"role":"diagnostic","content":"{\"reported_failed_provider_usage\":[{\"patch_index\":5,\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cached_tokens\":0}}]}"}],"error":"no agent message","tokens_in":0,"tokens_out":0,"tokens_cached":0}'
+else
+    echo '{"patchset_id":1,"patches":[{"index":5,"status":"unexpected"}]}'
+fi
+"#,
+        );
+        db.create_message(
+            "unbudgeted-error-patch",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let patch_id = db
+            .create_patch(patchset_id, "unbudgeted-error-patch", 5, diff)
+            .await?;
+        let error_provider = Arc::new(ErrorProvider {
+            calls: AtomicUsize::new(0),
+            usage: Some(crate::ai::AiUsage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+                total_tokens: 15,
+                cached_tokens: Some(0),
+            }),
+        });
+        let mut unbudgeted_ctx = ctx.clone();
+        unbudgeted_ctx.settings.review.max_total_tokens = 0;
+        unbudgeted_ctx.settings.review.max_total_output_tokens = 0;
+        unbudgeted_ctx.settings.review.max_retries = 1;
+        unbudgeted_ctx.provider = error_provider.clone();
+        let result = Reviewer::process_patch_review(
+            &unbudgeted_ctx,
+            patchset_id,
+            patch_id,
+            5,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff,
+            None,
+        )
+        .await?;
+        assert!(matches!(result, PatchResult::ReviewFailed));
+        assert_eq!(error_provider.calls.load(Ordering::SeqCst), 2);
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status, logs FROM reviews WHERE patch_id = ? ORDER BY id",
+                libsql::params![patch_id],
+            )
+            .await?;
+        for _attempt in 0..2 {
+            let row = rows.next().await?.unwrap();
+            assert_eq!(row.get::<String>(0)?, "Failed");
+            let logs: Vec<Value> = serde_json::from_str(&row.get::<String>(1)?)?;
+            let diagnostic: Value = serde_json::from_str(logs[0]["content"].as_str().unwrap())?;
+            assert_eq!(
+                diagnostic["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
+                12
+            );
+        }
+        assert!(rows.next().await?.is_none());
         Ok(())
     }
 

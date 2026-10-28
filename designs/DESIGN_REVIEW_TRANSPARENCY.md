@@ -112,6 +112,18 @@ unknown cached usage must not be relabeled measured zero. No scheduling or
 billing policy changes are implied. Start with fake-provider discrimination of
 missing versus measured-zero responses, then propagate the proven contract.
 
+Incremental failed-call observation contract: carry optional provider-reported
+failure counters across the typed daemon/worker error protocol without changing
+error classification or retry decisions. Old error payloads remain valid, and
+explicit cached zero remains distinct from an absent cache count. On a terminal
+workflow failure, retain observations separately in diagnostics, not in
+successful-call totals or as proof of complete usage. Earlier retry attempts,
+hidden backend calls, cancellation, and missing counters remain unknown unless
+independently observed. No historical backfill, database migration, or provider
+call is required. The budgeted parent retains its own observation rather than
+forwarding a duplicate. Fake protocol and worker tests must check round trips,
+missing and zero counts, persisted diagnostics, and unchanged retry behavior.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

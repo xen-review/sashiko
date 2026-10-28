@@ -772,6 +772,19 @@ fn mark_patch_review_incomplete(patches: &mut [Value], patch_index: i64, error: 
     }
 }
 
+fn reported_failure_usage_diagnostic(patch_index: i64, error: &anyhow::Error) -> Option<Value> {
+    let reported = error.downcast_ref::<crate::ai::ProviderFailureUsage>()?;
+    Some(json!({
+        "role": "diagnostic",
+        "content": json!({
+            "reported_failed_provider_usage": [{
+                "patch_index": patch_index,
+                "usage": &reported.usage,
+            }],
+        }).to_string(),
+    }))
+}
+
 /// Offsets `log_start` and `log_end` on each stage in `review_map` by
 /// `history_offset` so stage transcript bounds align with `combined_history`.
 fn offset_review_map_log_bounds(map: &Value, history_offset: usize) -> Value {
@@ -1218,12 +1231,16 @@ async fn run_worker_in_worktree(
     let mut results = Vec::new();
     let mut review_errors = Vec::new();
     let mut failed_outcomes = Vec::new();
+    let mut failure_diagnostics = Vec::new();
     while let Some((patch_index, result)) = buffered.next().await {
         match result {
             Ok(res) => results.push(res),
             Err(err) => {
                 if let Some(wf) = err.downcast_ref::<crate::workflow::WorkflowFailure>() {
                     failed_outcomes.push((patch_index, wf.outcome.clone()));
+                }
+                if let Some(diagnostic) = reported_failure_usage_diagnostic(patch_index, &err) {
+                    failure_diagnostics.push((patch_index, diagnostic));
                 }
                 let err = format!("{:?}", err);
                 mark_patch_review_incomplete(&mut patch_results, patch_index, &err);
@@ -1375,6 +1392,12 @@ async fn run_worker_in_worktree(
         single_review_map,
     );
     review_output["usage_coverage"] = json!(usage_coverage);
+    failure_diagnostics.sort_by_key(|(patch_index, _)| *patch_index);
+    combined_history.extend(
+        failure_diagnostics
+            .into_iter()
+            .map(|(_, diagnostic)| diagnostic),
+    );
 
     let mut combined_result = json!({
         "patchset_id": patchset_id,
@@ -2649,6 +2672,34 @@ mod tests {
             combined_review_error(errors),
             "patch 2: output truncated; patch 10: timed out"
         );
+    }
+
+    #[test]
+    fn failed_provider_usage_is_recorded_separately_from_totals() {
+        let usage = crate::ai::AiUsage {
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            total_tokens: 15,
+            cached_tokens: Some(0),
+        };
+        let error = crate::ai::ProviderFailureUsage::attach(anyhow!("no agent message"), usage)
+            .context("workflow failed");
+        let diagnostic = reported_failure_usage_diagnostic(7, &error).unwrap();
+        assert_eq!(diagnostic["role"], "diagnostic");
+        let content: Value = serde_json::from_str(diagnostic["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            content["reported_failed_provider_usage"][0]["patch_index"],
+            7
+        );
+        assert_eq!(
+            content["reported_failed_provider_usage"][0]["usage"]["prompt_tokens"],
+            12
+        );
+        assert_eq!(
+            content["reported_failed_provider_usage"][0]["usage"]["cached_tokens"],
+            0
+        );
+        assert!(reported_failure_usage_diagnostic(7, &anyhow!("unknown")).is_none());
     }
 
     #[test]
