@@ -145,6 +145,11 @@ call or historical backfill was used. The completion stream does not supply a
 trustworthy effective-effort field, so the UI must retain Unknown rather than
 promoting configured effort into backend confirmation.
 
+The optional per-turn logger also rendered an unavailable cached-token count as
+zero. It now logs unknown separately from measured zero and positive counts,
+without changing the provider response. A fake-provider log capture covers all
+three cases; no live provider call was made.
+
 ### P1: Budget-Gated Premium Model Comparisons
 
 Status: agent policy updated in 02453527 with the operator's authorization.

@@ -107,7 +107,9 @@ impl AiProvider for LoggingProvider {
                 "{tag}← Turn {turn} tokens: in={} out={} cached={}",
                 usage.prompt_tokens,
                 usage.completion_tokens,
-                usage.cached_tokens.unwrap_or(0)
+                usage
+                    .cached_tokens
+                    .map_or_else(|| "unknown".to_string(), |cached| cached.to_string())
             );
         }
 
@@ -124,5 +126,89 @@ impl AiProvider for LoggingProvider {
 
     async fn forget(&self, request: &AiRequest) {
         self.inner.forget(request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::AiUsage;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferWriter(Arc::clone(&self.0))
+        }
+    }
+
+    struct FakeProvider(AiUsage);
+
+    #[async_trait]
+    impl AiProvider for FakeProvider {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            Ok(AiResponse {
+                content: None,
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: Some(self.0.clone()),
+                truncated: false,
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "fake".to_string(),
+                context_window_size: 4096,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_unknown_cached_tokens_separately_from_measured_zero() {
+        for (cached, expected) in [(None, "unknown"), (Some(0), "0"), (Some(7), "7")] {
+            let buffer = LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+            let provider = LoggingProvider::new(Arc::new(FakeProvider(AiUsage {
+                prompt_tokens: 11,
+                completion_tokens: 2,
+                total_tokens: 13,
+                cached_tokens: cached,
+            })));
+            let response = provider
+                .generate_content(AiRequest::default())
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+            assert_eq!(response.usage.unwrap().cached_tokens, cached);
+            let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                logs.contains(&format!("tokens: in=11 out=2 cached={expected}")),
+                "{logs}"
+            );
+        }
     }
 }
