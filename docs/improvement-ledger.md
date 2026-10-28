@@ -890,6 +890,12 @@ gate: 1,169 library tests (two ignored), 49 main, seven CLI, 28 integration,
 formatting and all Clippy profiles. Native live progress and complete accounting
 for unreported in-flight calls remain separate open work.
 
+The review token renderer now also treats cached and uncached totals as unknown
+or partial when some recorded requests have no usage response. A standalone Node
+regression covers missing responses, partial cached totals, and measured zero.
+The full `make check-pr` gate passes; the integrated browser remains unavailable
+for this increment.
+
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing
