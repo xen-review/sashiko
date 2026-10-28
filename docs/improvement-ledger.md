@@ -1026,6 +1026,10 @@ active timeout bounds the worker and blocks new provider calls; cleanup can take
 longer. The existing bounded drain after worker exit remains unchanged. This
 change has not been deployed or tested with a live provider.
 
+Both deadlines are now rechecked after a request acquires a concurrency permit,
+so a queued call cannot start after its budget expires. Focused tests also cover
+an active quota wait and the independent wall limit.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model

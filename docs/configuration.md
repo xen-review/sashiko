@@ -394,8 +394,9 @@ pass.
 For daemon workflow jobs, the resolved review timeout limits active worker time;
 shared quota backoff is excluded. A separate wall-clock limit of twice that
 timeout stops the worker and prevents new provider calls even during backoff.
-Process cleanup can take additional time. A matching Codex timeout profile sets
-the active timeout used for both limits. Local and agent-harness deadlines retain
+Both limits are rechecked after a request acquires a concurrency permit. Process
+cleanup can take additional time. A matching Codex timeout profile sets the
+active timeout used for both limits. Local and agent-harness deadlines retain
 their existing behavior.
 
 For daemon workflow reviews, either enabled token budget requires provider

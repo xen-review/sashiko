@@ -3750,16 +3750,6 @@ async fn run_review_tool_with_cmd_and_overrides(
     } else {
         provider
     };
-    // Cap concurrent model calls with the shared limiter instead of taking the
-    // semaphore by hand around each call. This also releases the permit as soon
-    // as the call returns, so a request that is backing off no longer occupies
-    // a slot while it sleeps.
-    let provider: Arc<dyn AiProvider> = Arc::new(
-        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
-            provider,
-            llm_semaphore.clone(),
-        ),
-    );
     // Always, in practice: the daemon is required to name one. Without the flag
     // a worker puts its worktree under the system temporary directory.
     if !settings.git.repository_path.trim().is_empty() {
@@ -3950,6 +3940,17 @@ async fn run_review_tool_with_cmd_and_overrides(
         ),
     );
     let mut quota_wait_changes = retry_budget.subscribe_quota_waits();
+    // Cap concurrent model calls with the shared limiter instead of taking the
+    // semaphore by hand around each call. This also releases the permit as soon
+    // as the call returns, so a request that is backing off no longer occupies
+    // a slot while it sleeps.
+    let provider: Arc<dyn AiProvider> = Arc::new(
+        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_retry_budget(
+            provider,
+            llm_semaphore.clone(),
+            retry_budget.clone(),
+        ),
+    );
     let provider: Arc<dyn AiProvider> =
         Arc::new(crate::ai::backoff_provider::BackoffProvider::new(
             provider,

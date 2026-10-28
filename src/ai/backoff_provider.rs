@@ -113,7 +113,6 @@ impl DeadlineBudget {
         self.wait_changes.subscribe()
     }
 
-    #[cfg(feature = "server")]
     pub(crate) fn quota_wait_is_active(&self) -> bool {
         let waits = self.active_waits.lock().unwrap();
         let deadline = *self.deadline.lock().unwrap();
@@ -141,6 +140,21 @@ impl DeadlineBudget {
             }
         }
     }
+
+    fn check_at(&self, now: tokio::time::Instant) -> Result<()> {
+        if self.wall_deadline.is_some_and(|deadline| now >= deadline) {
+            return Err(anyhow::anyhow!(
+                "Review tool timed out (wall time exceeded)"
+            ));
+        }
+        let current = *self.deadline.lock().unwrap();
+        if now > current && !self.quota_wait_is_active() && now > *self.deadline.lock().unwrap() {
+            return Err(anyhow::anyhow!(
+                "Review tool timed out (active time exceeded)"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RetryBudget for DeadlineBudget {
@@ -149,19 +163,7 @@ impl RetryBudget for DeadlineBudget {
     }
 
     fn check(&self) -> Result<()> {
-        let current = { *self.deadline.lock().unwrap() };
-        let now = tokio::time::Instant::now();
-        if self.wall_deadline.is_some_and(|deadline| now >= deadline) {
-            return Err(anyhow::anyhow!(
-                "Review tool timed out (wall time exceeded)"
-            ));
-        }
-        if now > current {
-            return Err(anyhow::anyhow!(
-                "Review tool timed out (active time exceeded)"
-            ));
-        }
-        Ok(())
+        self.check_at(tokio::time::Instant::now())
     }
 
     fn wait_started(&self) {
@@ -500,6 +502,66 @@ mod tests {
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "server")]
+    async fn queued_call_stops_after_budget_expires(message: &'static str) {
+        struct SignalBudget {
+            checked: tokio::sync::Notify,
+            expired: std::sync::atomic::AtomicBool,
+            message: &'static str,
+        }
+        impl RetryBudget for SignalBudget {
+            fn credit_wait(&self, _slept: Duration) {}
+            fn check(&self) -> Result<()> {
+                if self.expired.load(Ordering::SeqCst) {
+                    return Err(anyhow::anyhow!(self.message));
+                }
+                self.checked.notify_one();
+                Ok(())
+            }
+        }
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.acquire().await.unwrap();
+        let inner = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let budget = Arc::new(SignalBudget {
+            checked: tokio::sync::Notify::new(),
+            expired: std::sync::atomic::AtomicBool::new(false),
+            message,
+        });
+        let limited = Arc::new(
+            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_retry_budget(
+                inner.clone(),
+                semaphore.clone(),
+                budget.clone(),
+            ),
+        );
+        let provider =
+            BackoffProvider::new(limited, Arc::new(QuotaManager::new()), Some(budget.clone()));
+        let call = tokio::spawn(async move { provider.generate_content(dummy_request()).await });
+        tokio::time::timeout(Duration::from_secs(2), budget.checked.notified())
+            .await
+            .unwrap();
+        budget.expired.store(true, Ordering::SeqCst);
+        drop(permit);
+
+        let error = call.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), message);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn queued_call_does_not_start_after_wall_deadline() {
+        queued_call_stops_after_budget_expires("Review tool timed out (wall time exceeded)").await;
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn queued_call_does_not_start_after_active_deadline() {
+        queued_call_stops_after_budget_expires("Review tool timed out (active time exceeded)")
+            .await;
+    }
+
     #[tokio::test]
     async fn rate_limit_waits_then_succeeds() {
         // QuotaManager uses std::Instant, so use a tiny real delay here.
@@ -563,6 +625,26 @@ mod tests {
 
         wait.start();
         assert!(!budget.quota_wait_is_active());
+        assert!(budget.check().is_err());
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn active_quota_wait_pauses_active_deadline_but_not_wall_deadline() {
+        let now = tokio::time::Instant::now();
+        let deadline = Arc::new(std::sync::Mutex::new(now + Duration::from_secs(60)));
+        let wall_deadline = now + Duration::from_secs(180);
+        let budget = DeadlineBudget::with_wall_deadline(deadline, wall_deadline);
+        let mut wait = BudgetWait::new(Some(&budget));
+
+        wait.start();
+        assert!(budget.check_at(now + Duration::from_secs(120)).is_ok());
+        let error = budget.check_at(wall_deadline).unwrap_err();
+        assert!(error.to_string().contains("wall time exceeded"));
+
+        drop(wait);
+        let error = budget.check_at(now + Duration::from_secs(120)).unwrap_err();
+        assert!(error.to_string().contains("active time exceeded"));
     }
 
     #[tokio::test]

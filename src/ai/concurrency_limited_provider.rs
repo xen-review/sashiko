@@ -28,6 +28,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
+use crate::ai::backoff_provider::RetryBudget;
 use crate::ai::{AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities};
 
 /// How many concurrent model calls a review `concurrency` allows.
@@ -51,13 +52,31 @@ pub fn llm_permits(concurrency: usize) -> usize {
 pub struct ConcurrencyLimitedProvider {
     inner: Arc<dyn AiProvider>,
     semaphore: Arc<Semaphore>,
+    retry_budget: Option<Arc<dyn RetryBudget>>,
 }
 
 impl ConcurrencyLimitedProvider {
     /// The semaphore is shared, so every provider built from it draws on the
     /// same pool of permits.
     pub fn new(inner: Arc<dyn AiProvider>, semaphore: Arc<Semaphore>) -> Self {
-        Self { inner, semaphore }
+        Self {
+            inner,
+            semaphore,
+            retry_budget: None,
+        }
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn with_retry_budget(
+        inner: Arc<dyn AiProvider>,
+        semaphore: Arc<Semaphore>,
+        retry_budget: Arc<dyn RetryBudget>,
+    ) -> Self {
+        Self {
+            inner,
+            semaphore,
+            retry_budget: Some(retry_budget),
+        }
     }
 }
 
@@ -69,6 +88,9 @@ impl AiProvider for ConcurrencyLimitedProvider {
             .acquire()
             .await
             .map_err(|e| anyhow::anyhow!("concurrency semaphore closed: {e}"))?;
+        if let Some(budget) = &self.retry_budget {
+            budget.check()?;
+        }
         self.inner.generate_content(request).await
     }
 
