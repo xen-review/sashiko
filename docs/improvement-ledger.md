@@ -162,6 +162,11 @@ measured successful-response counters from earlier failed attempts separately;
 the final failed attempt is not duplicated. Internal provider retries and other
 parallel calls may still be missing; no live provider or deployment test has
 been made.
+Session retry exhaustion now retains the terminal provider error's reported
+counters separately from successful responses, without changing its existing
+fatal classification or retry count. Fake-provider checks cover transient,
+rate-limit and feedback retries, absent counters, explicit zero, and preceding
+successful tool usage. Earlier internal attempts remain unaccounted for.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

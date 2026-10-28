@@ -126,7 +126,10 @@ calls, cancellation, and missing counters remain unknown unless independently
 observed. No historical backfill, database migration, or provider call is
 required. The budgeted parent retains its own observation rather than forwarding
 a duplicate. Fake protocol and worker tests must check round trips, missing and
-zero counts, persisted diagnostics, and unchanged retry behavior.
+zero counts, persisted diagnostics, and unchanged retry behavior. When a session
+exhausts provider retries, preserve the terminal error's reported counters while
+keeping its existing retry classification. Earlier internal attempts may still
+be missing.
 
 ## Acceptance Checks
 
