@@ -405,11 +405,14 @@ responses to report usage. If usage is unavailable, or the worker exits while
 calls remain unaccounted, the review fails without an automatic retry or another
 provider call. Calls already in progress may finish within the existing review
 deadline; available responses and worker history are retained in the failed
-review's diagnostic log. Cancellation and the deadline can interrupt
+review's diagnostic log. Nonterminal provider errors without usage, including
+rate-limit errors, also stop a budgeted review; the first redacted provider
+error is kept in its diagnostic log. A reported rate limit still starts shared
+backoff for other reviews. Cancellation and the deadline can interrupt
 in-progress calls. Setting both limits to zero allows workflow reviews to
-continue without usage, but disables both token budgets. These budgets are
-checked after responses arrive and can be overshot by calls already in progress;
-they are not hard per-generation limits.
+continue without usage and retry transient and rate-limit errors, but disables
+both token budgets. These budgets are checked after responses arrive and can be
+overshot by calls already in progress; they are not hard per-generation limits.
 
 #### Agent Harness
 

@@ -3490,6 +3490,7 @@ struct UsageAvailabilityState {
     active: usize,
     closed: bool,
     responses: Vec<crate::ai::AiResponse>,
+    first_provider_error: Option<String>,
 }
 
 struct ActiveUsageCall(Arc<UsageAvailability>);
@@ -3550,6 +3551,17 @@ impl UsageAvailability {
         }
     }
 
+    fn record_provider_error(&self, error: &anyhow::Error) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.unavailable.store(true, Ordering::SeqCst);
+        state
+            .first_provider_error
+            .get_or_insert_with(|| crate::utils::redact_secret(&error.to_string()));
+    }
+
     async fn wait_for_active(&self) {
         loop {
             let notified = self.active_finished.notified();
@@ -3570,10 +3582,11 @@ impl UsageAvailability {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (!state.responses.is_empty()).then(|| UsageUnavailableOutput(json!({})))
+        (!state.responses.is_empty() || state.first_provider_error.is_some())
+            .then(|| UsageUnavailableOutput(json!({})))
     }
 
-    fn retain_responses(&self, output: &mut Value) {
+    fn retain_diagnostics(&self, output: &mut Value) {
         let state = self
             .state
             .lock()
@@ -3585,6 +3598,11 @@ impl UsageAvailability {
                 "retained_provider_responses".to_string(),
                 json!(&state.responses),
             );
+        }
+        if let Some(error) = &state.first_provider_error
+            && let Some(output) = output.as_object_mut()
+        {
+            output.insert("first_provider_error".to_string(), json!(error));
         }
     }
 }
@@ -3644,7 +3662,28 @@ impl std::error::Error for BudgetExceededOutput {}
 impl AiProvider for UsageRequiredProvider {
     async fn generate_content(&self, request: AiRequest) -> Result<crate::ai::AiResponse> {
         let _active = self.availability.begin_call()?;
-        let response = self.inner.generate_content(request).await?;
+        let response = match self.inner.generate_content(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.availability.record_provider_error(&error);
+                if error.downcast_ref::<ReviewError>().is_some_and(|error| {
+                    matches!(
+                        error,
+                        ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
+                    )
+                }) {
+                    return Err(error);
+                }
+                let message = format!(
+                    "{}: {}",
+                    ReviewError::UsageUnavailable,
+                    crate::utils::redact_secret(&error.to_string())
+                );
+                return Err(error
+                    .context(ReviewError::UsageUnavailable)
+                    .context(message));
+            }
+        };
         let accounting = response
             .usage
             .as_ref()
@@ -4333,9 +4372,9 @@ async fn run_review_tool_with_cmd_and_overrides(
     };
     if let Err(error) = &mut interaction_result {
         if let Some(output) = error.downcast_mut::<UsageUnavailableOutput>() {
-            usage_availability.retain_responses(&mut output.0);
+            usage_availability.retain_diagnostics(&mut output.0);
         } else if let Some(output) = error.downcast_mut::<BudgetExceededOutput>() {
-            usage_availability.retain_responses(&mut output.output);
+            usage_availability.retain_diagnostics(&mut output.output);
         }
     }
 
@@ -5806,6 +5845,23 @@ mod tests {
         state_sender: Option<tokio::sync::oneshot::Sender<(Arc<Database>, i64)>>,
         timeout_seconds: u64,
     ) -> Result<Value> {
+        run_single_ai_request_mock_with_budget(
+            mock_script,
+            provider,
+            state_sender,
+            timeout_seconds,
+            true,
+        )
+        .await
+    }
+
+    async fn run_single_ai_request_mock_with_budget(
+        mock_script: &str,
+        provider: Arc<dyn AiProvider>,
+        state_sender: Option<tokio::sync::oneshot::Sender<(Arc<Database>, i64)>>,
+        timeout_seconds: u64,
+        budget_enabled: bool,
+    ) -> Result<Value> {
         let temp_dir = tempdir()?;
         let bin_path = temp_dir.path().join("mock_review");
 
@@ -5814,6 +5870,10 @@ mod tests {
         let mut settings = Settings::new()?;
         settings.database.url = ":memory:".to_string();
         settings.review.timeout_seconds = timeout_seconds;
+        if !budget_enabled {
+            settings.review.max_total_tokens = 0;
+            settings.review.max_total_output_tokens = 0;
+        }
 
         let db = Arc::new(Database::new(&settings.database).await?);
         db.migrate().await?;
@@ -6050,7 +6110,14 @@ else
 fi
 "#;
 
-        let result = run_single_ai_request_mock(mock_script, Arc::new(FailingProvider)).await?;
+        let result = run_single_ai_request_mock_with_budget(
+            mock_script,
+            Arc::new(FailingProvider),
+            None,
+            5,
+            false,
+        )
+        .await?;
 
         assert_eq!(result["patches"][0]["status"], "typed_fatal");
         Ok(())
@@ -6162,7 +6229,9 @@ fi
         });
         let provider_for_tool: Arc<dyn AiProvider> = provider.clone();
 
-        let result = run_single_ai_request_mock(mock_script, provider_for_tool).await?;
+        let result =
+            run_single_ai_request_mock_with_budget(mock_script, provider_for_tool, None, 5, false)
+                .await?;
 
         assert_eq!(result["patches"][0]["status"], "applied");
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
@@ -6185,7 +6254,13 @@ echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}]}'
             });
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(4),
-                run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+                run_single_ai_request_mock_with_budget(
+                    mock_script,
+                    provider.clone(),
+                    None,
+                    1,
+                    false,
+                ),
             )
             .await??;
             assert_eq!(result["patches"][0]["status"], "applied");
@@ -6209,7 +6284,7 @@ echo '{"patchset_id":1,"patches":[]}'
         });
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(4),
-            run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+            run_single_ai_request_mock_with_budget(mock_script, provider.clone(), None, 1, false),
         )
         .await?
         .expect_err("active provider time must still count toward the deadline");
@@ -6238,11 +6313,12 @@ echo '{"patchset_id":1,"patches":[]}'
         let mut review = tokio::spawn({
             let provider = provider.clone();
             async move {
-                run_single_ai_request_mock_with_timeout(
+                run_single_ai_request_mock_with_budget(
                     mock_script,
                     provider,
                     Some(state_sender),
                     2,
+                    false,
                 )
                 .await
             }
@@ -6282,7 +6358,7 @@ echo '{"patchset_id":1,"patches":[]}'
         });
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+            run_single_ai_request_mock_with_budget(mock_script, provider.clone(), None, 1, false),
         )
         .await?
         .expect_err("quota waits must have a wall-clock limit");
@@ -7115,6 +7191,79 @@ echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"re
         assert!(description.contains("Token budget exceeded"));
         assert!(logs.contains("Mocked AI response"));
         assert!(rows.next().await?.is_none());
+
+        struct ErrorProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AiProvider for ErrorProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("provider failure token=tok-456"))
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        db.create_message(
+            "error-patch",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let error_patch_id = db.create_patch(patchset_id, "error-patch", 3, diff).await?;
+        let error_provider = Arc::new(ErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let mut error_ctx = ctx.clone();
+        error_ctx.provider = error_provider.clone();
+        let result = Reviewer::process_patch_review(
+            &error_ctx,
+            patchset_id,
+            error_patch_id,
+            3,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff,
+            None,
+        )
+        .await?;
+        assert!(matches!(result, PatchResult::ReviewFailed));
+        assert_eq!(error_provider.calls.load(Ordering::SeqCst), 1);
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status, result_description, logs FROM reviews WHERE patch_id = ?",
+                libsql::params![error_patch_id],
+            )
+            .await?;
+        let row = rows.next().await?.unwrap();
+        let status: String = row.get(0)?;
+        let description: String = row.get(1)?;
+        let logs: String = row.get(2)?;
+        assert_eq!(status, "Failed");
+        assert!(description.contains("Token usage unavailable"));
+        assert!(logs.contains("provider failure"));
+        assert!(!logs.contains("tok-456"));
+        assert!(rows.next().await?.is_none());
         Ok(())
     }
 
@@ -7436,6 +7585,196 @@ echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}],"error":"fatal
         );
         assert_eq!(inner.inner.calls.load(Ordering::SeqCst), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_provider_errors_without_usage_block_further_calls() -> Result<()> {
+        struct UnmeasuredFailureProvider {
+            calls: AtomicUsize,
+            class: crate::ai::AiErrorClass,
+        }
+
+        #[async_trait]
+        impl AiProvider for UnmeasuredFailureProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(crate::ai::RemoteAiError {
+                    message: "provider failed after an unmeasured call token=tok-123".to_string(),
+                    class: self.class,
+                }
+                .into())
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        for class in [
+            crate::ai::AiErrorClass::Fatal,
+            crate::ai::AiErrorClass::Transient {
+                retry_after: Duration::ZERO,
+            },
+            crate::ai::AiErrorClass::RateLimit {
+                retry_after: Duration::from_secs(60),
+            },
+        ] {
+            let inner = Arc::new(UnmeasuredFailureProvider {
+                calls: AtomicUsize::new(0),
+                class,
+            });
+            let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
+            let guarded = Arc::new(UsageRequiredProvider::new(
+                inner.clone(),
+                Arc::new(UsageAvailability::default()),
+                1000,
+                1000,
+                abort_tx,
+            ));
+            let quota = Arc::new(QuotaManager::new());
+            let provider = crate::ai::backoff_provider::BackoffProvider::new(
+                guarded.clone(),
+                quota.clone(),
+                None,
+            );
+
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                provider.generate_content(AiRequest::default()),
+            )
+            .await?
+            .unwrap_err();
+            assert!(error.downcast_ref::<crate::ai::RemoteAiError>().is_some());
+            assert!(
+                error
+                    .to_string()
+                    .contains("provider failed after an unmeasured call")
+            );
+            assert!(!error.to_string().contains("tok-123"));
+            assert!(
+                error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+            );
+            assert_eq!(
+                crate::ai::classify_ai_error(&error),
+                crate::ai::AiErrorClass::Fatal
+            );
+            if matches!(class, crate::ai::AiErrorClass::RateLimit { .. }) {
+                assert!(quota.is_blocked().await);
+            }
+
+            let error = guarded
+                .generate_content(AiRequest::default())
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+            );
+            assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        }
+
+        let inner = Arc::new(UnmeasuredFailureProvider {
+            calls: AtomicUsize::new(0),
+            class: crate::ai::AiErrorClass::Transient {
+                retry_after: Duration::ZERO,
+            },
+        });
+        let worker = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","payload":{"messages":[]}}'
+read -r first || exit 1
+case "$first" in *'provider failed after an unmeasured call'*) ;; *) exit 2 ;; esac
+case "$first" in *'"class":"fatal"'*) ;; *) exit 3 ;; esac
+case "$first" in *'tok-123'*) exit 4 ;; esac
+echo '{"type":"ai_request","payload":{"messages":[]}}'
+read -r second || exit 1
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let error = run_single_ai_request_mock(worker, inner.clone())
+            .await
+            .expect_err("unmeasured provider failures must fail the review");
+        assert!(
+            error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+        );
+        let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+        let logs = retained.logs().unwrap();
+        assert!(logs.contains("provider failed after an unmeasured call"));
+        assert!(!logs.contains("tok-123"));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_terminal_provider_errors_preserve_their_outcome() {
+        struct TerminalProvider {
+            cancelled: bool,
+        }
+
+        #[async_trait]
+        impl AiProvider for TerminalProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                let source = anyhow::Error::new(crate::ai::RemoteAiError {
+                    message: "retryable provider error".to_string(),
+                    class: crate::ai::AiErrorClass::Transient {
+                        retry_after: Duration::ZERO,
+                    },
+                });
+                if self.cancelled {
+                    Err(source.context(ReviewError::Cancelled))
+                } else {
+                    Err(source.context(ReviewError::BudgetExceeded("measured limit".to_string())))
+                }
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        for cancelled in [true, false] {
+            let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(1);
+            let guarded = UsageRequiredProvider::new(
+                Arc::new(TerminalProvider { cancelled }),
+                Arc::new(UsageAvailability::default()),
+                1000,
+                1000,
+                abort_tx,
+            );
+            let error = guarded
+                .generate_content(AiRequest::default())
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<ReviewError>().is_some_and(|error| {
+                matches!(
+                    (cancelled, error),
+                    (true, ReviewError::Cancelled) | (false, ReviewError::BudgetExceeded(_))
+                )
+            }));
+            assert_eq!(
+                crate::ai::classify_ai_error(&error),
+                crate::ai::AiErrorClass::Fatal
+            );
+            let next_error = guarded
+                .generate_content(AiRequest::default())
+                .await
+                .unwrap_err();
+            assert!(
+                next_error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+            );
+        }
     }
 
     #[tokio::test]

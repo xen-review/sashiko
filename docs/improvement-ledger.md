@@ -138,6 +138,17 @@ Completed responses that trigger a budget overrun are retained in scrubbed
 failure logs, including late arrivals. Fake-worker tests verify persistence,
 the budget-exceeded classification, and that the failed review is not retried.
 
+The budget guard also stops after nonterminal provider errors that carry no
+usage, including transient and rate-limit errors. It retains the first
+redacted provider error, keeps cancellation and budget failures terminal, and
+records a reported rate limit in the shared backoff for other reviews.
+Unbudgeted retries are unchanged.
+Fake-provider and worker checks pass; this is not durable quota deferral and has
+not been deployed or tested with a live model.
+Codex may report usage in a completed turn with no answer, but the provider
+error does not yet carry those counters to the guard; that accounting remains
+unavailable rather than being estimated.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for
@@ -1014,9 +1025,11 @@ controller. Keep account subscription exhaustion distinct from configured
 per-review token/tool/call limits; a reset must not bypass those safety limits.
 
 Current evidence: QuotaManager provides in-memory shared backoff capped at five
-minutes. BackoffProvider retries typed rate-limit errors, with an attempt ceiling
-on paths without a deadline budget. Untyped Codex CLI errors currently fall back
-to Fatal classification. This is not durable reset-aware queue deferral, and
+minutes. BackoffProvider retries typed rate-limit errors unless the daemon
+workflow's token guard marks usage unavailable; paths without a deadline budget
+have an attempt ceiling. Budgeted workflow calls stop when an error carries no
+usage, while preserving the shared barrier. Untyped Codex CLI errors currently
+fall back to Fatal classification. This is not durable reset-aware deferral, and
 subscription exhaustion is not guaranteed to avoid a Failed review today.
 
 A concurrent successful request no longer clears an unexpired shared backoff.
@@ -1031,12 +1044,13 @@ The wait-credit regression now uses explicit instants after a real-clock
 assertion failed under scheduler delay. It covers duplicate, overlapping and
 separate waits without changing runtime clock behavior.
 
-Fake-worker tests reproduced quota backoff consuming the daemon workflow's
-active timeout. Active waits now pause that timer, completed credits refresh
-it, and cancellation remains effective. A wall limit of twice the resolved
-active timeout bounds the worker and blocks new provider calls; cleanup can take
-longer. The existing bounded drain after worker exit remains unchanged. This
-change has not been deployed or tested with a live provider.
+Fake-worker tests with token budgets disabled reproduced quota backoff consuming
+the daemon workflow's active timeout. Active waits now pause that timer,
+completed credits refresh it, and cancellation remains effective. A wall limit
+of twice the resolved active timeout bounds the worker and blocks new provider
+calls; cleanup can take longer. The existing bounded drain after worker exit
+remains unchanged. This change has not been deployed or tested with a live
+provider.
 
 Both deadlines are now rechecked after a request acquires a concurrency permit,
 so a queued call cannot start after its budget expires. Focused tests also cover

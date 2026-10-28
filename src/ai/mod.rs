@@ -396,6 +396,13 @@ pub(crate) fn is_permanent_transport_error(e: &reqwest::Error) -> bool {
 
 /// Classifies AI errors through typed provider and stdio error downcasts.
 pub fn classify_ai_error(error: &anyhow::Error) -> AiErrorClass {
+    if let Some(e) = error.downcast_ref::<crate::worker::prompts::ReviewError>() {
+        return e.ai_error_class();
+    }
+    classify_provider_ai_error(error)
+}
+
+pub(crate) fn classify_provider_ai_error(error: &anyhow::Error) -> AiErrorClass {
     if let Some(e) = error.downcast_ref::<RemoteAiError>() {
         return e.ai_error_class();
     }
@@ -409,9 +416,6 @@ pub fn classify_ai_error(error: &anyhow::Error) -> AiErrorClass {
         return e.ai_error_class();
     }
     if let Some(e) = error.downcast_ref::<gemini::GeminiError>() {
-        return e.ai_error_class();
-    }
-    if let Some(e) = error.downcast_ref::<crate::worker::prompts::ReviewError>() {
         return e.ai_error_class();
     }
     if let Some(e) = error.downcast_ref::<ollama::OllamaError>() {

@@ -42,7 +42,7 @@ use tracing::warn;
 use crate::ai::quota::QuotaManager;
 use crate::ai::{
     AiErrorClass, AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities,
-    classify_ai_error, get_log_prefix,
+    classify_ai_error, classify_provider_ai_error, get_log_prefix,
 };
 
 /// Maximum number of attempts (initial try plus retries) for a single call
@@ -299,8 +299,9 @@ impl AiProvider for BackoffProvider {
                     }
                     attempt += 1;
                     let classification = classify_ai_error(&e);
-                    if let AiErrorClass::RateLimit { retry_after } = &classification {
-                        self.quota.report_quota_error(*retry_after).await;
+                    if let AiErrorClass::RateLimit { retry_after } = classify_provider_ai_error(&e)
+                    {
+                        self.quota.report_quota_error(retry_after).await;
                     }
                     if let Some(max) = self.max_attempts
                         && attempt >= max
