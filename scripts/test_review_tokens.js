@@ -8,10 +8,31 @@ const start = html.indexOf('function renderReviewTokens(');
 const end = html.indexOf('function renderActiveHarnessUsage(', start);
 assert(start >= 0 && end > start, 'review token renderer not found');
 
-const render = vm.runInNewContext(
-    `(function() { ${html.slice(start, end)}; return renderReviewTokens; })()`,
+const { render, renderRetries } = vm.runInNewContext(
+    `(function() { ${html.slice(start, end)}; return { render: renderReviewTokens, renderRetries: renderStageRetryUsage }; })()`,
     { formatTokenCount: value => String(value) },
 );
+
+assert.equal(renderRetries(undefined), '');
+assert.equal(renderRetries([]), '');
+const retries = renderRetries([
+    { request: 1, usage: { prompt_tokens: 12, completion_tokens: 3, cached_tokens: 0 } },
+    { request: 2, usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    { request: '<img src=x>', usage: { prompt_tokens: '<script>', completion_tokens: 1, cached_tokens: 0 } },
+]);
+assert.match(retries, /Session request 1: Input 12.*Cached 0.*Output 3/);
+assert.match(retries, /Session request 2: Input 7.*Cached Unknown.*Output 2/);
+assert.match(retries, /Session request Unknown: Input Unknown/);
+assert.doesNotMatch(retries, /<img|<script>/);
+assert.match(retries, /separate from stage totals/i);
+assert.match(renderRetries(Array(33).fill({ request: 1, usage: {} })), /truncated/i);
+assert.equal(renderRetries({ request: 1 }), '');
+const invalidRetry = renderRetries([
+    { request: 0, usage: { prompt_tokens: 5, completion_tokens: -1, cached_tokens: 6 } },
+    { request: Number.MAX_SAFE_INTEGER + 1, usage: { prompt_tokens: 1.5, completion_tokens: 0 } },
+]);
+assert.match(invalidRetry, /Session request Unknown: Input 5.*Cached Unknown.*Output Unknown/);
+assert.match(invalidRetry, /Session request Unknown: Input Unknown.*Cached Unknown.*Output 0/);
 
 const record = { tokens_in: 100, tokens_cached: 0, tokens_out: 4 };
 const coverage = {

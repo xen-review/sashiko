@@ -177,6 +177,10 @@ request-scoped retry diagnostics. A fake CLI covers exhausted attempts for two
 patches, and a fake worker verifies persistence in failed-review logs. Retry
 observations from post-processing failures, provider decorators, cancelled work
 and missing counters remain unknown.
+The review-map stage table now displays bounded, validated retry observations
+separately from stage totals, preserving measured zero versus unknown cache
+counts. Standalone renderer checks cover malformed and hostile values; the
+integrated browser connection remains unavailable for a visual layout check.
 Synthetic Codex streams also show completed-turn counters can precede a failed
 turn or nonzero CLI exit. The last validated pre-failure counters are now retained
 with the error, including managed-profile rejections, without treating the call
