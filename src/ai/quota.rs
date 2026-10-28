@@ -69,7 +69,7 @@ impl QuotaManager {
 
     pub async fn report_success(&self) {
         let mut guard = self.blocked_until.lock().await;
-        if guard.is_some() {
+        if guard.is_some_and(|until| until <= Instant::now()) {
             *guard = None;
             info!("AI request succeeded, resetting quota backoff.");
         }
@@ -312,6 +312,29 @@ impl CodexAccountQuotaPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_success_does_not_clear_active_backoff() {
+        let quota = QuotaManager::new();
+        quota.report_quota_error(Duration::from_secs(60)).await;
+        quota.report_success().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), quota.wait_for_access())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn success_clears_expired_backoff() {
+        let quota = QuotaManager::new();
+        quota.report_quota_error(Duration::ZERO).await;
+        quota.report_success().await;
+
+        assert!(quota.blocked_until.lock().await.is_none());
+        assert_eq!(quota.wait_for_access().await, Duration::ZERO);
+    }
 
     fn ready() -> AccountQuotaState {
         AccountQuotaState {

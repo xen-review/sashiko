@@ -1007,6 +1007,10 @@ on paths without a deadline budget. Untyped Codex CLI errors currently fall back
 to Fatal classification. This is not durable reset-aware queue deferral, and
 subscription exhaustion is not guaranteed to avoid a Failed review today.
 
+A concurrent successful request no longer clears an unexpired shared backoff.
+Deterministic tests cover both active deadlines and expired-deadline cleanup.
+This does not add durable subscription deferral or enable a quota controller.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model
