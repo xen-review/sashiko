@@ -115,6 +115,28 @@ async fn cli_disables_native_tools_and_configuration_in_an_empty_directory() {
 }
 
 #[tokio::test]
+async fn cli_keeps_reply_when_usage_is_incomplete() {
+    let fixture = fake_cli(
+        r#"{"result":"OK","is_error":false,"usage":{"input_tokens":10,"output_tokens":3}}"#,
+        0,
+    );
+    let provider = ClaudeCliProvider {
+        model: "test-model".to_string(),
+        effort: None,
+    };
+    let response = provider
+        .generate_content_with_binary(
+            request(),
+            fixture.path().join("claude").as_os_str(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.content.as_deref(), Some("OK"));
+    assert!(response.usage.is_none());
+}
+
+#[tokio::test]
 async fn cli_removes_its_scratch_directory_after_an_error() {
     let fixture = fake_cli(r#"{"result":"test failure","is_error":true}"#, 1);
     let provider = ClaudeCliProvider {

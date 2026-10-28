@@ -32,6 +32,15 @@ fn cache_identity_excludes_unrestricted_responses() {
             ],
         );
         assert_ne!(provider.cache_identity(), legacy_restricted);
+        let legacy_usage = cache_identity_with(
+            model,
+            &[
+                ("effort", effort),
+                ("completion_profile", Some("restricted-v1")),
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+            ],
+        );
+        assert_ne!(provider.cache_identity(), legacy_usage);
     }
 }
 

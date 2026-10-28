@@ -62,8 +62,8 @@ cp docs/examples/Settings.claude.toml Settings.toml
 ## Claude Code CLI
 
 Uses a local [Claude Code](https://claude.com/claude-code) installation as
-the completion backend. This uses your Claude Code subscription -- no
-per-token charge, no API key.
+the completion backend. Billing and usage limits depend on the account and
+plan.
 
 **Prerequisites:** Install Claude Code and sign in. Verify with
 `claude --version`.
@@ -108,6 +108,9 @@ Context window sizes:
   still apply, and managed MCP configurations can cause strict MCP mode to
   reject startup.
 - Prompt caching handled automatically by Claude Code.
+- Usage is available only when input, output, cache-read, and cache-creation
+  counters are all present and valid. Incomplete counters leave usage unknown;
+  the agent harness stops rather than continuing without a measured total.
 - `effort` controls the model's thinking budget. Opus 4.7 uses adaptive
   thinking; Sonnet 4.6 and Haiku 4.5 use extended thinking. If you need
   to pick the mode explicitly or disable thinking, use `provider = "claude"`

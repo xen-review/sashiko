@@ -249,6 +249,7 @@ impl AiProvider for ClaudeCliProvider {
                 ("effort", self.effort.as_deref()),
                 ("completion_profile", Some("restricted-v1")),
                 ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ("usage_profile", Some("measured-v1")),
             ],
         )
     }
@@ -436,27 +437,20 @@ pub(crate) fn tool_instructions(tools: &[AiTool]) -> String {
 }
 
 fn parse_usage(outer: &Value) -> Option<AiUsage> {
-    let u = &outer["usage"];
-    if u.is_null() {
-        return None;
-    }
-    let input = u["input_tokens"].as_u64().unwrap_or(0) as usize;
-    let output = u["output_tokens"].as_u64().unwrap_or(0) as usize;
-    let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize;
-    let cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as usize;
+    let usage_value = &outer["usage"];
+    let input = usize::try_from(usage_value["input_tokens"].as_u64()?).ok()?;
+    let output = usize::try_from(usage_value["output_tokens"].as_u64()?).ok()?;
+    let cache_read = usize::try_from(usage_value["cache_read_input_tokens"].as_u64()?).ok()?;
+    let cache_write = usize::try_from(usage_value["cache_creation_input_tokens"].as_u64()?).ok()?;
     // input_tokens arrives without the cached prefix, so the two cache
     // counts fold back in here.  cached_tokens is a breakdown of
     // prompt_tokens, and a consumer subtracts it to get uncached input.
-    let total_input = input + cache_read + cache_write;
+    let total_input = input.checked_add(cache_read)?.checked_add(cache_write)?;
     Some(AiUsage {
         prompt_tokens: total_input,
         completion_tokens: output,
-        total_tokens: total_input + output,
-        cached_tokens: if cache_read > 0 {
-            Some(cache_read)
-        } else {
-            None
-        },
+        total_tokens: total_input.checked_add(output)?,
+        cached_tokens: Some(cache_read),
     })
 }
 
@@ -834,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_usage_without_a_cache_read_reports_no_cached_tokens() {
+    fn test_parse_usage_requires_cache_counters() {
         let outer = serde_json::json!({
             "usage": {
                 "input_tokens": 500,
@@ -842,10 +836,29 @@ mod tests {
             }
         });
 
-        let usage = parse_usage(&outer).unwrap();
+        assert!(parse_usage(&outer).is_none());
+    }
 
-        assert_eq!(usage.prompt_tokens, 500);
-        assert_eq!(usage.cached_tokens, None);
+    #[test]
+    fn test_parse_usage_rejects_invalid_or_overflowed_counters() {
+        for usage in [
+            json!({}),
+            json!({"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0}),
+            json!({"input_tokens": -1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}),
+            json!({"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": "unknown", "cache_creation_input_tokens": 0}),
+            json!({"input_tokens": u64::MAX, "output_tokens": 1, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0}),
+        ] {
+            assert!(parse_usage(&json!({"usage": usage})).is_none());
+        }
+        let measured_zero = parse_usage(&json!({"usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }}))
+        .unwrap();
+        assert_eq!(measured_zero.total_tokens, 0);
+        assert_eq!(measured_zero.cached_tokens, Some(0));
     }
 
     #[test]

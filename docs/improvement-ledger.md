@@ -87,6 +87,14 @@ input usage; workflow output can still retain the reply but cannot report even
 the partial output count through AiUsage. Parser and harness checks and the full
 `make check-pr` gate pass. No live Copilot call was made.
 
+The Claude CLI parser also defaulted missing or malformed input, output and
+cache counters to zero and used unchecked additions. It now reports usage only
+when all four components are measured and their sums fit, preserving an explicit
+zero cache-read count. Incomplete output can still retain a reply, but cannot
+authorize further harness calls. Older parser cache entries are separated. This
+passes focused tests and the full `make check-pr` gate, but is based on synthetic
+fixtures, not a live Claude CLI compatibility test.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for
