@@ -82,7 +82,7 @@ impl<'a> SequentialReviewSession<'a> {
             return Ok(None);
         }
         let patch_index = self.selected[self.completed];
-        let prompt = build_checkpoint_request(&self.request, patch_index)?;
+        let prompt = build_validated_checkpoint_request(&self.request, patch_index)?;
         let mut status = self
             .session
             .checkpoint(provider, tools, &prompt, cancellation)
@@ -324,6 +324,13 @@ pub fn build_sequential_context(request: &SeriesRequest<'_>) -> Result<String> {
 
 pub fn build_checkpoint_request(request: &SeriesRequest<'_>, patch_index: i64) -> Result<String> {
     build_sequential_context(request)?;
+    build_validated_checkpoint_request(request, patch_index)
+}
+
+fn build_validated_checkpoint_request(
+    request: &SeriesRequest<'_>,
+    patch_index: i64,
+) -> Result<String> {
     if !request.selected_indexes.contains(&patch_index) {
         bail!("harness checkpoint must name a selected patch");
     }
@@ -590,6 +597,22 @@ mod tests {
             cover_letter: None,
             max_bytes: 100000,
         };
+        for invalid in [
+            SeriesRequest {
+                max_bytes: 1,
+                ..request
+            },
+            SeriesRequest {
+                baseline: "HEAD",
+                ..request
+            },
+            SeriesRequest {
+                selected_indexes: &[2, 2],
+                ..request
+            },
+        ] {
+            assert!(SequentialReviewSession::new(&tools, &instructions, invalid, &limits).is_err());
+        }
         let provider = SequentialProvider {
             calls: AtomicUsize::new(0),
             corrupt_second: false,
@@ -650,6 +673,10 @@ mod tests {
             json!(input.patches[1].commit_id)
         );
         assert_eq!(checkpoint["message_id"], json!(input.patches[1].message_id));
+        assert_eq!(
+            build_validated_checkpoint_request(&request, 2).unwrap(),
+            build_checkpoint_request(&request, 2).unwrap()
+        );
         assert!(build_checkpoint_request(&request, 1).is_err());
         assert!(build_checkpoint_request(&request, 999).is_err());
         assert_eq!(build_sequential_context(&request).unwrap(), context);
@@ -676,6 +703,10 @@ mod tests {
         let checkpoint: serde_json::Value =
             serde_json::from_str(&build_checkpoint_request(&first, 1).unwrap()).unwrap();
         assert_eq!(checkpoint["parent_commit"], baseline);
+        assert_eq!(
+            build_validated_checkpoint_request(&first, 1).unwrap(),
+            build_checkpoint_request(&first, 1).unwrap()
+        );
         let oversized = SeriesRequest {
             max_bytes: 1,
             ..first

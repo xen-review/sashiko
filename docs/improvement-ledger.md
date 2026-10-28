@@ -452,6 +452,14 @@ repeated stage context, and growing tool history. Measure serialized prompt
 sections and actual cached/uncached usage. Prefer stable shared prefixes and
 removing demonstrably redundant material without dropping review evidence.
 
+The sequential runner now reuses its initial validation of the immutable series
+instead of serializing the complete series again before every checkpoint. The
+public checkpoint builder still validates independently, and focused tests
+confirm identical checkpoint requests, retained initial validation, stable
+prefixes, cancellation, and budget behavior; make check-pr passes. This reduces
+local serialization work only; it does not reduce prompt bytes or establish token
+savings.
+
 Done when: representative offline fixtures demonstrate reduced prompt volume
 without changing required evidence, request ordering, provenance, or cache
 identity. Report actual generation counts and cache hits rather than converting
