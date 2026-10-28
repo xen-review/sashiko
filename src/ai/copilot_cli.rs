@@ -123,7 +123,10 @@ impl AiProvider for CopilotCliProvider {
     fn cache_identity(&self) -> String {
         crate::ai::cache_identity_with(
             &self.model,
-            &[("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE))],
+            &[
+                ("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE)),
+                ("terminal_profile", Some("failed-result-v1")),
+            ],
         )
     }
 }
@@ -180,7 +183,7 @@ pub fn parse_jsonl_events(raw: &str) -> Result<AiResponse> {
                 if let Some(exit_code) = event["data"]["exitCode"].as_i64()
                     && exit_code != 0
                 {
-                    warn!("copilot-cli session exited with code {}", exit_code);
+                    anyhow::bail!("copilot-cli session exited with code {}", exit_code);
                 }
             }
             _ => {}
@@ -325,11 +328,47 @@ printf '%s\n' '{"type":"assistant.message","data":{"content":"{\"content\":\"OK\
     }
 
     #[test]
-    fn cache_identity_excludes_old_prompt_format() {
+    fn cache_identity_excludes_old_profiles() {
         let provider = CopilotCliProvider {
             model: "test-model".to_string(),
         };
         assert_ne!(provider.cache_identity(), provider.model);
+        assert_ne!(
+            provider.cache_identity(),
+            crate::ai::cache_identity_with(
+                &provider.model,
+                &[("prompt_format", Some(CLI_PROMPT_FORMAT_PROFILE))],
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_result_is_not_returned_as_success() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("copilot");
+        crate::test_support::write_executable_script(
+            &executable,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"assistant.message","data":{"content":"{\"content\":\"OK\"}"}}'
+printf '%s\n' '{"type":"result","data":{"exitCode":1}}'
+exit 0
+"#,
+        );
+        let provider = CopilotCliProvider {
+            model: "test-model".to_string(),
+        };
+        let error = provider
+            .generate_content_with_binary(
+                AiRequest::default(),
+                executable.as_os_str(),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("code 1"), "{error}");
     }
 
     #[test]
@@ -404,16 +443,20 @@ printf '%s\n' '{"type":"assistant.message","data":{"content":"{\"content\":\"OK\
 
     #[test]
     fn test_parse_non_zero_exit() {
-        let events = [json!({"type": "result", "data": {"exitCode": 1, "usage": {}}})];
-        let raw: String = events
-            .iter()
-            .map(|e| serde_json::to_string(e).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Should still parse without error (the warning is logged)
-        let resp = parse_jsonl_events(&raw).unwrap();
-        assert!(resp.content.is_none());
+        for message in [None, Some("earlier reply")] {
+            let mut events = Vec::new();
+            if let Some(content) = message {
+                events.push(json!({"type": "assistant.message", "data": {"content": content}}));
+            }
+            events.push(json!({"type": "result", "data": {"exitCode": 1, "usage": {}}}));
+            let raw = events
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = parse_jsonl_events(&raw).unwrap_err().to_string();
+            assert!(error.contains("code 1"), "{error}");
+        }
     }
 
     #[test]

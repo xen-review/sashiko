@@ -191,6 +191,14 @@ Fake-process checks cover both output streams, incomplete delivery, redacted
 early failure and timeout child cleanup; the full `make check-pr` gate passes.
 No authenticated Copilot call or live stall was used for this fix.
 
+An offline Copilot result-event regression also found that a nonzero
+`data.exitCode` was only logged, allowing an earlier assistant message to be
+returned as success. The parser now rejects that event and separates older
+cache entries. Synthetic and fake-process checks cover failures with and
+without a prior message, including a zero process exit; the full `make check-pr`
+gate passes. The event shape was not confirmed against a live failure, and no
+authenticated call was made.
+
 Update at 13:22 CET: the operator authorized raising Luna effort progressively
 and checking available GPT-5.6 Luna/Terra alternatives if needed. Authenticated
 model/list confirms gpt-6-luna, gpt-5.6-luna, and gpt-5.6-terra with medium,
