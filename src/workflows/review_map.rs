@@ -728,6 +728,7 @@ pub fn build_review_map(
                 "tokens_cached": r.tokens_cached,
                 "usage_coverage": r.usage_coverage,
                 "reported_retry_usage": r.reported_retry_usage,
+                "backoff_observations": r.backoff_observations,
                 "prompts_read": r.prompts_read,
                 "concerns_count": concerns_count,
                 "dismissed_count": dismissed_count,
@@ -924,7 +925,30 @@ mod tests {
                         cached_tokens: Some(0),
                     },
                 }],
-                backoff_observations: None,
+                backoff_observations: Some(crate::ai::session::SessionBackoffObservations {
+                    requests: vec![crate::ai::session::SessionBackoffRequest {
+                        request: 2,
+                        observations: crate::ai::BackoffRetryObservations {
+                            retries: vec![
+                                crate::ai::BackoffRetryObservation {
+                                    attempt: 1,
+                                    usage: None,
+                                },
+                                crate::ai::BackoffRetryObservation {
+                                    attempt: 2,
+                                    usage: Some(crate::ai::AiUsage {
+                                        prompt_tokens: 0,
+                                        completion_tokens: 0,
+                                        total_tokens: 0,
+                                        cached_tokens: Some(0),
+                                    }),
+                                },
+                            ],
+                            truncated: true,
+                        },
+                    }],
+                    truncated: false,
+                }),
                 prompts_read: vec!["subsystem/bpf.md".to_string()],
                 history_start: 2,
                 history_end: 6,
@@ -951,6 +975,16 @@ mod tests {
             map["stages"][1]["reported_retry_usage"][0]["usage"]["cached_tokens"],
             0
         );
+        assert!(map["stages"][0]["backoff_observations"].is_null());
+        let backoff = &map["stages"][1]["backoff_observations"];
+        assert_eq!(backoff["requests"][0]["request"], 2);
+        assert!(backoff["requests"][0]["observations"]["retries"][0]["usage"].is_null());
+        assert_eq!(
+            backoff["requests"][0]["observations"]["retries"][1]["usage"]["cached_tokens"],
+            0
+        );
+        assert_eq!(backoff["requests"][0]["observations"]["truncated"], true);
+        assert_eq!(backoff["truncated"], false);
         assert_eq!(map["stages"][0]["log_start"], 1);
         assert_eq!(map["stages"][0]["log_end"], 3);
         assert_eq!(map["stages"][0]["concerns_count"], 1);

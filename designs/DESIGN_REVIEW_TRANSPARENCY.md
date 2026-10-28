@@ -222,6 +222,13 @@ observations on a cache hit. A cache hit must never replay the original miss's
 retry evidence. Preserve existing cache identity, invalidation, and error
 behavior; this changes neither a budget decision nor response token totals.
 
+Successful review maps may persist a stage's bounded backoff observation
+records separately from session-visible retry usage and stage token totals.
+Keep absent records null, preserve request and inner-attempt identity, and
+retain both truncation flags and missing-versus-measured usage. This map field
+alone does not establish complete native or billed usage and does not change
+the UI or failed-review diagnostics.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

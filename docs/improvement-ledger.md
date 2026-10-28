@@ -191,7 +191,8 @@ on success and failure without adding them to response totals or session-visible
 retry usage. Missing request records remain unknown; empty records describe only
 the observed decorator. Workflow stage records now retain these observations on
 success and session failure, with legacy records and skipped stages still unknown.
-Review-map exposure and failed-review diagnostics remain pending.
+Successful review maps now retain these bounded records separately from stage
+totals and session-visible retries. Failed-review diagnostics remain pending.
 The optional turn logger now forwards per-call observations on success and error
 without treating unavailable data as empty or changing terminal classification.
 Daemon replies now carry bounded retry metadata by transaction through both stdio
