@@ -167,6 +167,11 @@ counters separately from successful responses, without changing its existing
 fatal classification or retry count. Fake-provider checks cover transient,
 rate-limit and feedback retries, absent counters, explicit zero, and preceding
 successful tool usage. Earlier internal attempts remain unaccounted for.
+The session now also retains reported counters for errors it actually retries,
+indexed by session request and separate from successful totals and the terminal
+error. Fake-provider checks cover eventual success, later fatal failure and
+exhaustion. These observations are not yet propagated to workflow diagnostics;
+retries hidden inside provider decorators and missing counters remain unknown.
 Synthetic Codex streams also show completed-turn counters can precede a failed
 turn or nonzero CLI exit. The last validated pre-failure counters are now retained
 with the error, including managed-profile rejections, without treating the call

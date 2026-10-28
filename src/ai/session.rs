@@ -85,6 +85,12 @@ impl SessionUsageCoverage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionRetryUsage {
+    pub request: usize,
+    pub usage: AiUsage,
+}
+
 /// The unified result of executing an [`LlmSession`].
 pub struct SessionResult<T> {
     /// The validated output of the session.
@@ -94,6 +100,7 @@ pub struct SessionResult<T> {
     /// Accumulated token usage statistics.
     pub usage: AiUsage,
     pub usage_coverage: SessionUsageCoverage,
+    pub reported_retry_usage: Vec<SessionRetryUsage>,
 }
 
 /// Error returned when an [`LlmSession`] fails, preserving partial conversation
@@ -104,6 +111,7 @@ pub struct SessionFailure {
     pub history: Vec<AiMessage>,
     pub usage: AiUsage,
     pub usage_coverage: SessionUsageCoverage,
+    pub reported_retry_usage: Vec<SessionRetryUsage>,
 }
 
 impl std::fmt::Display for SessionFailure {
@@ -121,6 +129,19 @@ fn retain_reported_failure_usage(
     match provider_error.downcast_ref::<crate::ai::ProviderFailureUsage>() {
         Some(reported) => crate::ai::ProviderFailureUsage::attach(failure, reported.usage.clone()),
         None => failure,
+    }
+}
+
+fn record_retry_usage(
+    observations: &mut Vec<SessionRetryUsage>,
+    request: usize,
+    error: &anyhow::Error,
+) {
+    if let Some(reported) = error.downcast_ref::<crate::ai::ProviderFailureUsage>() {
+        observations.push(SessionRetryUsage {
+            request,
+            usage: reported.usage.clone(),
+        });
     }
 }
 
@@ -324,13 +345,15 @@ impl<'a> SessionRunner<'a> {
         let mut total_completion_tokens = 0;
         let mut total_cached_tokens = 0;
         let mut usage_coverage = SessionUsageCoverage::default();
+        let mut reported_retry_usage = Vec::new();
 
         let make_failure = |message: String,
                             history: Vec<AiMessage>,
                             prompt_tokens: usize,
                             completion_tokens: usize,
                             cached_tokens: usize,
-                            usage_coverage: SessionUsageCoverage|
+                            usage_coverage: SessionUsageCoverage,
+                            reported_retry_usage: Vec<SessionRetryUsage>|
          -> anyhow::Error {
             anyhow::Error::new(SessionFailure {
                 message,
@@ -342,6 +365,7 @@ impl<'a> SessionRunner<'a> {
                     cached_tokens: Some(cached_tokens),
                 },
                 usage_coverage,
+                reported_retry_usage,
             })
         };
 
@@ -355,6 +379,7 @@ impl<'a> SessionRunner<'a> {
                     total_completion_tokens,
                     total_cached_tokens,
                     usage_coverage,
+                    reported_retry_usage,
                 ));
             }
             if let Some(ref cb) = self.on_turn {
@@ -411,10 +436,12 @@ impl<'a> SessionRunner<'a> {
                                     total_completion_tokens,
                                     total_cached_tokens,
                                     usage_coverage,
+                                    reported_retry_usage,
                                 ),
                                 &e,
                             ));
                         }
+                        record_retry_usage(&mut reported_retry_usage, usage_coverage.requests, &e);
                         tracing::warn!(
                             "API error ({}), pausing for {:?} before retry (attempt {}/{})...",
                             e,
@@ -442,10 +469,16 @@ impl<'a> SessionRunner<'a> {
                                             total_completion_tokens,
                                             total_cached_tokens,
                                             usage_coverage,
+                                            reported_retry_usage,
                                         ),
                                         &e,
                                     ));
                                 }
+                                record_retry_usage(
+                                    &mut reported_retry_usage,
+                                    usage_coverage.requests,
+                                    &e,
+                                );
                                 let msg = AiMessage {
                                     role: AiRole::User,
                                     content: Some(feedback.clone()),
@@ -472,6 +505,7 @@ impl<'a> SessionRunner<'a> {
                                         cached_tokens: Some(total_cached_tokens),
                                     },
                                     usage_coverage,
+                                    reported_retry_usage,
                                 }));
                             }
                         }
@@ -511,6 +545,7 @@ impl<'a> SessionRunner<'a> {
                     total_completion_tokens,
                     total_cached_tokens,
                     usage_coverage,
+                    reported_retry_usage,
                 ));
             }
 
@@ -549,6 +584,7 @@ impl<'a> SessionRunner<'a> {
                                     cached_tokens: Some(total_cached_tokens),
                                 },
                                 usage_coverage,
+                                reported_retry_usage,
                             }));
                         }
                     };
@@ -582,6 +618,7 @@ impl<'a> SessionRunner<'a> {
                         history: log_history,
                         usage,
                         usage_coverage,
+                        reported_retry_usage,
                     });
                 }
                 Result::Err(ValidationError::FormatViolation(violation)) => {
@@ -603,6 +640,7 @@ impl<'a> SessionRunner<'a> {
                             total_completion_tokens,
                             total_cached_tokens,
                             usage_coverage,
+                            reported_retry_usage,
                         ));
                     }
                     let feedback = session.format_validation_feedback(&violation);
@@ -626,6 +664,7 @@ impl<'a> SessionRunner<'a> {
                         total_completion_tokens,
                         total_cached_tokens,
                         usage_coverage,
+                        reported_retry_usage,
                     ));
                 }
             }
@@ -896,6 +935,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retried_provider_usage_survives_eventual_success() {
+        struct RetryProvider {
+            calls: std::sync::atomic::AtomicUsize,
+            class: AiErrorClass,
+            reported: Option<AiUsage>,
+            fail_after_retry: bool,
+        }
+
+        #[async_trait]
+        impl AiProvider for RetryProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    let mut payload = crate::ai::RemoteAiErrorPayload::new(
+                        if self.class == AiErrorClass::Fatal {
+                            "blocked".into()
+                        } else {
+                            "temporary".into()
+                        },
+                        self.class,
+                    );
+                    payload.reported_failure_usage = self.reported.clone();
+                    return Err(payload.into_error());
+                }
+                if self.fail_after_retry {
+                    let mut payload = crate::ai::RemoteAiErrorPayload::new(
+                        "permission denied".into(),
+                        AiErrorClass::Fatal,
+                    );
+                    payload.reported_failure_usage = Some(AiUsage {
+                        prompt_tokens: 8,
+                        completion_tokens: 1,
+                        total_tokens: 9,
+                        cached_tokens: None,
+                    });
+                    return Err(payload.into_error());
+                }
+                Ok(AiResponse {
+                    content: Some("success".into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: None,
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 4096,
+                }
+            }
+        }
+
+        for class in [
+            AiErrorClass::Transient {
+                retry_after: std::time::Duration::ZERO,
+            },
+            AiErrorClass::RateLimit {
+                retry_after: std::time::Duration::ZERO,
+            },
+            AiErrorClass::Fatal,
+        ] {
+            for cached in [None, Some(None), Some(Some(0))] {
+                for fail_after_retry in [false, true] {
+                    let provider = RetryProvider {
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                        class,
+                        reported: cached.map(|cached_tokens| AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens,
+                        }),
+                        fail_after_retry,
+                    };
+                    let result = SessionRunner::new(&provider)
+                        .with_max_transient_retries(1)
+                        .with_max_provider_error_retries(1)
+                        .run(&mut DummySession)
+                        .await;
+                    let observations = match result {
+                        Ok(result) => {
+                            assert!(!fail_after_retry);
+                            assert_eq!(result.output, "success");
+                            assert_eq!(result.usage.prompt_tokens, 7);
+                            assert_eq!(result.usage_coverage.requests, 2);
+                            assert!(!result.usage_coverage.is_complete());
+                            result.reported_retry_usage
+                        }
+                        Err(error) => {
+                            assert!(fail_after_retry);
+                            assert_eq!(classify_ai_error(&error), AiErrorClass::Fatal);
+                            let terminal = error
+                                .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                                .unwrap();
+                            assert_eq!(terminal.usage.prompt_tokens, 8);
+                            let failure = error.downcast_ref::<SessionFailure>().unwrap();
+                            assert_eq!(failure.usage.prompt_tokens, 0);
+                            assert_eq!(failure.usage_coverage.requests, 2);
+                            failure.reported_retry_usage.clone()
+                        }
+                    };
+                    assert_eq!(observations.len(), usize::from(cached.is_some()));
+                    if let Some(observation) = observations.first() {
+                        assert_eq!(observation.request, 1);
+                        assert_eq!(observation.usage.prompt_tokens, 12);
+                        assert_eq!(observation.usage.cached_tokens, cached.unwrap());
+                    }
+                    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn exhausted_provider_retries_retain_terminal_reported_usage() {
         struct FailingProvider {
             class: AiErrorClass,
@@ -983,6 +1144,15 @@ mod tests {
                 assert_eq!(failure.usage_coverage.requests, 3);
                 assert_eq!(failure.usage_coverage.responses_with_usage, 1);
                 assert!(!failure.usage_coverage.is_complete());
+                assert_eq!(
+                    failure.reported_retry_usage.len(),
+                    usize::from(report_usage)
+                );
+                if let Some(retry) = failure.reported_retry_usage.first() {
+                    assert_eq!(retry.request, 2);
+                    assert_eq!(retry.usage.prompt_tokens, 12);
+                    assert_eq!(retry.usage.cached_tokens, cached_tokens);
+                }
                 let reported = error.downcast_ref::<crate::ai::ProviderFailureUsage>();
                 assert_eq!(reported.is_some(), report_usage);
                 if let Some(reported) = reported {
