@@ -1035,6 +1035,13 @@ overlapping requests finish out of order. Waits that start after an expired
 active deadline cannot revive it. These cases are covered by clock-controlled
 tests; this change has not been deployed or tested with a live provider.
 
+Daemon workflow and in-process review calls also recheck shared backoff after
+acquiring a concurrency permit. If another request has opened a barrier, the
+permit is released and the call returns to the wait without consuming an
+attempt. In-process calls also recheck their retry budget when configured.
+Focused fake-provider tests cover this race; this is still in-memory backoff,
+not durable deferral.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model

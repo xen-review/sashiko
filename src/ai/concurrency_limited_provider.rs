@@ -29,7 +29,12 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
 use crate::ai::backoff_provider::RetryBudget;
+use crate::ai::quota::QuotaManager;
 use crate::ai::{AiProvider, AiRequest, AiResponse, CacheStats, ProviderCapabilities};
+
+#[derive(Debug, thiserror::Error)]
+#[error("quota backoff became active before provider admission")]
+pub(crate) struct QuotaAdmissionBlocked;
 
 /// How many concurrent model calls a review `concurrency` allows.
 ///
@@ -47,12 +52,16 @@ pub fn llm_permits(concurrency: usize) -> usize {
     if concurrency < 2 { 1 } else { concurrency * 3 }
 }
 
-/// Limits concurrent model calls to the permits of a shared semaphore. All
-/// other behaviour is delegated unchanged to the inner provider.
+/// Limits concurrent model calls to the permits of a shared semaphore.
 pub struct ConcurrencyLimitedProvider {
     inner: Arc<dyn AiProvider>,
     semaphore: Arc<Semaphore>,
-    retry_budget: Option<Arc<dyn RetryBudget>>,
+    backoff: Option<BackoffAdmission>,
+}
+
+struct BackoffAdmission {
+    budget: Option<Arc<dyn RetryBudget>>,
+    quota: Arc<QuotaManager>,
 }
 
 impl ConcurrencyLimitedProvider {
@@ -62,20 +71,23 @@ impl ConcurrencyLimitedProvider {
         Self {
             inner,
             semaphore,
-            retry_budget: None,
+            backoff: None,
         }
     }
 
-    #[cfg(feature = "server")]
-    pub(crate) fn with_retry_budget(
+    pub(crate) fn with_backoff(
         inner: Arc<dyn AiProvider>,
         semaphore: Arc<Semaphore>,
-        retry_budget: Arc<dyn RetryBudget>,
+        retry_budget: Option<Arc<dyn RetryBudget>>,
+        quota: Arc<QuotaManager>,
     ) -> Self {
         Self {
             inner,
             semaphore,
-            retry_budget: Some(retry_budget),
+            backoff: Some(BackoffAdmission {
+                budget: retry_budget,
+                quota,
+            }),
         }
     }
 }
@@ -88,8 +100,13 @@ impl AiProvider for ConcurrencyLimitedProvider {
             .acquire()
             .await
             .map_err(|e| anyhow::anyhow!("concurrency semaphore closed: {e}"))?;
-        if let Some(budget) = &self.retry_budget {
-            budget.check()?;
+        if let Some(backoff) = &self.backoff {
+            if backoff.quota.is_blocked().await {
+                return Err(QuotaAdmissionBlocked.into());
+            }
+            if let Some(budget) = &backoff.budget {
+                budget.check()?;
+            }
         }
         self.inner.generate_content(request).await
     }

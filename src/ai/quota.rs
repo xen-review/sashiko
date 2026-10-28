@@ -43,6 +43,13 @@ impl QuotaManager {
         self.wait_for_access_with(|| {}).await
     }
 
+    pub(crate) async fn is_blocked(&self) -> bool {
+        self.blocked_until
+            .lock()
+            .await
+            .is_some_and(|until| until > Instant::now())
+    }
+
     pub(crate) async fn wait_for_access_with<F>(&self, mut on_wait: F) -> Duration
     where
         F: FnMut(),
@@ -324,9 +331,11 @@ mod tests {
     #[tokio::test]
     async fn concurrent_success_does_not_clear_active_backoff() {
         let quota = QuotaManager::new();
+        assert!(!quota.is_blocked().await);
         quota.report_quota_error(Duration::from_secs(60)).await;
         quota.report_success().await;
 
+        assert!(quota.is_blocked().await);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), quota.wait_for_access())
                 .await
@@ -338,6 +347,7 @@ mod tests {
     async fn success_clears_expired_backoff() {
         let quota = QuotaManager::new();
         quota.report_quota_error(Duration::ZERO).await;
+        assert!(!quota.is_blocked().await);
         quota.report_success().await;
 
         assert!(quota.blocked_until.lock().await.is_none());

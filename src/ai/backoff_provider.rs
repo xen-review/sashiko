@@ -291,6 +291,9 @@ impl AiProvider for BackoffProvider {
                     return Ok(response);
                 }
                 Err(e) => {
+                    if e.is::<crate::ai::concurrency_limited_provider::QuotaAdmissionBlocked>() {
+                        continue;
+                    }
                     attempt += 1;
                     let classification = classify_ai_error(&e);
                     if let AiErrorClass::RateLimit { retry_after } = &classification {
@@ -360,6 +363,7 @@ mod tests {
         Transient,
         RateLimit,
         Fatal,
+        QuotaAdmissionBlocked,
     }
 
     struct MockProvider {
@@ -380,6 +384,11 @@ mod tests {
                     }
                     Behaviour::RateLimit => GeminiError::QuotaExceeded(self.rate_limit_after),
                     Behaviour::Fatal => GeminiError::PermissionDenied("nope".into()),
+                    Behaviour::QuotaAdmissionBlocked => {
+                        return Err(
+                            crate::ai::concurrency_limited_provider::QuotaAdmissionBlocked.into(),
+                        );
+                    }
                 };
                 return Err(err.into());
             }
@@ -510,7 +519,6 @@ mod tests {
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
-    #[cfg(feature = "server")]
     async fn queued_call_stops_after_budget_expires(message: &'static str) {
         struct SignalBudget {
             checked: tokio::sync::Notify,
@@ -531,20 +539,21 @@ mod tests {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore.acquire().await.unwrap();
         let inner = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let quota = Arc::new(QuotaManager::new());
         let budget = Arc::new(SignalBudget {
             checked: tokio::sync::Notify::new(),
             expired: std::sync::atomic::AtomicBool::new(false),
             message,
         });
         let limited = Arc::new(
-            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_retry_budget(
+            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_backoff(
                 inner.clone(),
                 semaphore.clone(),
-                budget.clone(),
+                Some(budget.clone()),
+                quota.clone(),
             ),
         );
-        let provider =
-            BackoffProvider::new(limited, Arc::new(QuotaManager::new()), Some(budget.clone()));
+        let provider = BackoffProvider::new(limited, quota, Some(budget.clone()));
         let call = tokio::spawn(async move { provider.generate_content(dummy_request()).await });
         tokio::time::timeout(Duration::from_secs(2), budget.checked.notified())
             .await
@@ -557,17 +566,102 @@ mod tests {
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn queued_call_does_not_start_after_wall_deadline() {
         queued_call_stops_after_budget_expires("Review tool timed out (wall time exceeded)").await;
     }
 
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn queued_call_does_not_start_after_active_deadline() {
         queued_call_stops_after_budget_expires("Review tool timed out (active time exceeded)")
             .await;
+    }
+
+    #[tokio::test]
+    async fn queued_call_waits_for_quota_barrier_started_before_permit() {
+        struct SignalBudget {
+            checked: tokio::sync::Notify,
+            waiting: tokio::sync::Notify,
+        }
+        impl RetryBudget for SignalBudget {
+            fn credit_wait(&self, _slept: Duration) {}
+            fn check(&self) -> Result<()> {
+                self.checked.notify_one();
+                Ok(())
+            }
+            fn wait_started(&self) {
+                self.waiting.notify_one();
+            }
+        }
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.acquire().await.unwrap();
+        let inner = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let quota = Arc::new(QuotaManager::new());
+        let budget = Arc::new(SignalBudget {
+            checked: tokio::sync::Notify::new(),
+            waiting: tokio::sync::Notify::new(),
+        });
+        let limited = Arc::new(
+            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_backoff(
+                inner.clone(),
+                semaphore.clone(),
+                Some(budget.clone()),
+                quota.clone(),
+            ),
+        );
+        let provider = BackoffProvider::new(limited, quota.clone(), Some(budget.clone()));
+        let mut call =
+            tokio::spawn(async move { provider.generate_content(dummy_request()).await });
+        tokio::time::timeout(Duration::from_secs(2), budget.checked.notified())
+            .await
+            .unwrap();
+        quota.report_quota_error(Duration::from_secs(60)).await;
+        drop(permit);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                _ = budget.waiting.notified() => {}
+                result = &mut call => panic!("provider completed during quota backoff: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(semaphore.available_permits(), 1);
+        call.abort();
+        let _ = call.await;
+    }
+
+    #[tokio::test]
+    async fn quota_admission_deferral_does_not_consume_an_attempt() {
+        let inner = mock(Behaviour::QuotaAdmissionBlocked, 1, Duration::ZERO);
+        let mut provider = fast(inner.clone());
+        provider.max_attempts = Some(1);
+
+        let response = provider.generate_content(dummy_request()).await.unwrap();
+        assert_eq!(response.content.as_deref(), Some("ok"));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn quota_admission_without_a_budget_releases_the_permit() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let inner = mock(Behaviour::Transient, 0, Duration::ZERO);
+        let quota = Arc::new(QuotaManager::new());
+        quota.report_quota_error(Duration::from_secs(60)).await;
+        let limited =
+            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_backoff(
+                inner.clone(),
+                semaphore.clone(),
+                None,
+                quota,
+            );
+
+        let error = limited.generate_content(dummy_request()).await.unwrap_err();
+        assert!(error.is::<crate::ai::concurrency_limited_provider::QuotaAdmissionBlocked>());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[tokio::test]

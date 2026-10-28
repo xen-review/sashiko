@@ -430,9 +430,11 @@ fn decorate_provider(
     }
 
     let provider: std::sync::Arc<dyn crate::ai::AiProvider> = std::sync::Arc::new(
-        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
+        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_backoff(
             provider,
             llm_semaphore.clone(),
+            retry_budget.clone(),
+            quota.clone(),
         ),
     );
 
@@ -2028,6 +2030,62 @@ mod tests {
         // The budget is consulted before the request goes out, so a review that
         // is already past its deadline stops rather than retrying through it.
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_decorate_provider_rechecks_quota_after_waiting_for_a_permit() -> Result<()> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        struct SignalBudget {
+            checked: tokio::sync::Notify,
+            waiting: tokio::sync::Notify,
+        }
+        impl crate::ai::backoff_provider::RetryBudget for SignalBudget {
+            fn credit_wait(&self, _slept: Duration) {}
+            fn check(&self) -> Result<()> {
+                self.checked.notify_one();
+                Ok(())
+            }
+            fn wait_started(&self) {
+                self.waiting.notify_one();
+            }
+        }
+
+        let mut settings = Settings::new()?;
+        settings.ai.log_turns = false;
+        settings.ai.provider = "claude-cli".to_string();
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = sem.acquire().await?;
+        let quota = Arc::new(crate::ai::quota::QuotaManager::new());
+        let budget = Arc::new(SignalBudget {
+            checked: tokio::sync::Notify::new(),
+            waiting: tokio::sync::Notify::new(),
+        });
+        let retry_budget: Option<Arc<dyn crate::ai::backoff_provider::RetryBudget>> =
+            Some(budget.clone());
+        let inner = Arc::new(RateLimitOnce {
+            calls: AtomicU32::new(0),
+        });
+        let decorated = decorate_provider(inner.clone(), &settings.ai, &sem, &quota, &retry_budget);
+        let mut call =
+            tokio::spawn(async move { decorated.generate_content(dummy_request()).await });
+        tokio::time::timeout(Duration::from_secs(2), budget.checked.notified()).await?;
+        quota.report_quota_error(Duration::from_secs(60)).await;
+        drop(permit);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                _ = budget.waiting.notified() => {}
+                result = &mut call => panic!("provider completed during quota backoff: {result:?}"),
+            }
+        })
+        .await?;
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(sem.available_permits(), 1);
+        call.abort();
+        let _ = call.await;
         Ok(())
     }
 

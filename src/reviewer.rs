@@ -3945,10 +3945,11 @@ async fn run_review_tool_with_cmd_and_overrides(
     // as the call returns, so a request that is backing off no longer occupies
     // a slot while it sleeps.
     let provider: Arc<dyn AiProvider> = Arc::new(
-        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_retry_budget(
+        crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::with_backoff(
             provider,
             llm_semaphore.clone(),
-            retry_budget.clone(),
+            Some(retry_budget.clone()),
+            quota_manager.clone(),
         ),
     );
     let provider: Arc<dyn AiProvider> =
