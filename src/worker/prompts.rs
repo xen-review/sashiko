@@ -26,6 +26,8 @@ pub enum ReviewError {
     /// A token budget was exceeded.  Retrying wastes tokens for no gain.
     #[error("Token budget exceeded: {0}")]
     BudgetExceeded(String),
+    #[error("Token usage unavailable; configured review budget cannot be enforced")]
+    UsageUnavailable,
     /// The AI produced output that failed format validation.  The retry
     /// should use an augmented prompt that reminds the model of the
     /// violated constraint rather than repeating the identical request.
@@ -44,6 +46,7 @@ impl ClassifyAiError for ReviewError {
         match self {
             ReviewError::LimitExceeded => AiErrorClass::Fatal,
             ReviewError::BudgetExceeded(_) => AiErrorClass::Fatal,
+            ReviewError::UsageUnavailable => AiErrorClass::Fatal,
             ReviewError::FormatRejection(_) => AiErrorClass::Fatal,
             ReviewError::OutputTruncated => AiErrorClass::Fatal,
             ReviewError::Cancelled => AiErrorClass::Fatal,
@@ -1166,6 +1169,7 @@ mod tests {
         for err in [
             ReviewError::LimitExceeded,
             ReviewError::BudgetExceeded("1000 tokens used (limit: 500)".to_string()),
+            ReviewError::UsageUnavailable,
             ReviewError::FormatRejection("contains markdown code blocks".to_string()),
         ] {
             assert_eq!(err.ai_error_class(), AiErrorClass::Fatal);

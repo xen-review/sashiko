@@ -152,7 +152,8 @@ cp docs/examples/Settings.copilot-cli.toml Settings.toml
 - The parsed event stream does not provide a verified input-token count.
   Usage is unavailable, including an output count reported on its own. The
   agent harness therefore stops rather than continuing without measured input
-  usage for its token budget.
+  usage for its token budget. Daemon workflow reviews also fail when either
+  review token budget is enabled; disabling both budgets removes that protection.
 
 **Note:** Each review may spawn many `copilot` processes. Lower
 `review.concurrency` if you hit subscription rate limits.

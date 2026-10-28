@@ -969,6 +969,8 @@ async fn run_benchmark_reviews(
         prompts: Some(options.prompts.clone()),
         settings_path: options.settings_path.clone(),
         report_preexisting,
+        #[cfg(test)]
+        test_program: None,
     };
     let reviewer = Arc::new(
         Reviewer::new(db.clone(), settings.clone())

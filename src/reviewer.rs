@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -686,6 +686,8 @@ pub struct WorkerSubprocessOverrides {
     pub prompts: Option<PathBuf>,
     pub settings_path: Option<PathBuf>,
     pub report_preexisting: bool,
+    #[cfg(test)]
+    pub(crate) test_program: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -3297,9 +3299,15 @@ impl Reviewer {
                         }
                         return Ok(PatchResult::Cancelled);
                     }
-                    let budget_exceeded = e
-                        .downcast_ref::<ReviewError>()
-                        .is_some_and(|re| matches!(re, ReviewError::BudgetExceeded(_)));
+                    let budget_blocked = e.downcast_ref::<ReviewError>().is_some_and(|re| {
+                        matches!(
+                            re,
+                            ReviewError::BudgetExceeded(_) | ReviewError::UsageUnavailable
+                        )
+                    });
+                    let retained_logs = e
+                        .downcast_ref::<UsageUnavailableOutput>()
+                        .and_then(UsageUnavailableOutput::logs);
                     error!("Review execution failed for {}: {}", patchset_id, e);
                     let _ = ctx
                         .db
@@ -3310,10 +3318,10 @@ impl Reviewer {
                             None,
                             None,
                             None,
-                            None,
+                            retained_logs.as_deref(),
                         )
                         .await;
-                    if !budget_exceeded && retries < max_retries {
+                    if !budget_blocked && retries < max_retries {
                         retries += 1;
                         continue;
                     }
@@ -3342,6 +3350,13 @@ async fn run_review_tool(
     progress_registry: ReviewProgressRegistry,
     worker_overrides: &WorkerSubprocessOverrides,
 ) -> Result<serde_json::Value> {
+    #[cfg(test)]
+    let cmd = if let Some(program) = &worker_overrides.test_program {
+        Command::new(program)
+    } else {
+        default_worker_command()?
+    };
+    #[cfg(not(test))]
     let cmd = default_worker_command()?;
     run_review_tool_with_cmd_and_overrides(
         cmd,
@@ -3390,6 +3405,162 @@ fn default_worker_command() -> Result<Command> {
     };
     c.arg("worker");
     Ok(c)
+}
+
+struct UsageRequiredProvider {
+    inner: Arc<dyn AiProvider>,
+    availability: Arc<UsageAvailability>,
+}
+
+#[derive(Default)]
+struct UsageAvailability {
+    unavailable: AtomicBool,
+    state: std::sync::Mutex<UsageAvailabilityState>,
+    active_finished: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct UsageAvailabilityState {
+    active: usize,
+    responses: Vec<crate::ai::AiResponse>,
+}
+
+struct ActiveUsageCall(Arc<UsageAvailability>);
+
+impl Drop for ActiveUsageCall {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active -= 1;
+        if state.active == 0 {
+            self.0.active_finished.notify_one();
+        }
+    }
+}
+
+impl UsageAvailability {
+    fn begin_call(self: &Arc<Self>) -> Result<ActiveUsageCall> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(ReviewError::UsageUnavailable.into());
+        }
+        state.active += 1;
+        Ok(ActiveUsageCall(self.clone()))
+    }
+
+    fn record_response(&self, response: &crate::ai::AiResponse) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if response.usage.is_none() {
+            self.unavailable.store(true, Ordering::SeqCst);
+        }
+        if self.unavailable.load(Ordering::SeqCst) {
+            state.responses.push(response.clone());
+        }
+    }
+
+    async fn wait_for_active(&self) {
+        loop {
+            let notified = self.active_finished.notified();
+            let active = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active;
+            if active == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn fallback_output(&self) -> Option<UsageUnavailableOutput> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (!state.responses.is_empty()).then(|| UsageUnavailableOutput(json!({})))
+    }
+
+    fn retain_responses(&self, output: &mut UsageUnavailableOutput) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.responses.is_empty()
+            && let Some(output) = output.0.as_object_mut()
+        {
+            output.insert(
+                "provider_responses_after_usage_unavailable".to_string(),
+                json!(&state.responses),
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UsageUnavailableOutput(Value);
+
+impl UsageUnavailableOutput {
+    fn logs(&self) -> Option<String> {
+        let mut output = self.0.clone();
+        crate::ai::scrub_thought_signatures(&mut output);
+        let mut history = output
+            .get("history")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if output.get("history").is_some_and(Value::is_array) {
+            output.as_object_mut()?.remove("history");
+        }
+        history.push(json!({
+            "role": "diagnostic",
+            "content": serde_json::to_string(&output).ok()?,
+        }));
+        serde_json::to_string(&history).ok()
+    }
+}
+
+impl std::fmt::Display for UsageUnavailableOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        ReviewError::UsageUnavailable.fmt(formatter)
+    }
+}
+
+impl std::error::Error for UsageUnavailableOutput {}
+
+#[async_trait::async_trait]
+impl AiProvider for UsageRequiredProvider {
+    async fn generate_content(&self, request: AiRequest) -> Result<crate::ai::AiResponse> {
+        let _active = self.availability.begin_call()?;
+        let response = self.inner.generate_content(request).await?;
+        self.availability.record_response(&response);
+        Ok(response)
+    }
+
+    fn get_capabilities(&self) -> crate::ai::ProviderCapabilities {
+        self.inner.get_capabilities()
+    }
+
+    fn cache_identity(&self) -> String {
+        self.inner.cache_identity()
+    }
+
+    fn cache_stats(&self) -> Option<crate::ai::CacheStats> {
+        self.inner.cache_stats()
+    }
+
+    async fn forget(&self, request: &AiRequest) {
+        self.inner.forget(request).await
+    }
 }
 
 #[cfg(test)]
@@ -3447,6 +3618,16 @@ async fn run_review_tool_with_cmd_and_overrides(
     progress_registry: ReviewProgressRegistry,
     worker_overrides: &WorkerSubprocessOverrides,
 ) -> Result<serde_json::Value> {
+    let usage_availability = Arc::new(UsageAvailability::default());
+    let provider: Arc<dyn AiProvider> =
+        if settings.review.max_total_tokens > 0 || settings.review.max_total_output_tokens > 0 {
+            Arc::new(UsageRequiredProvider {
+                inner: provider,
+                availability: usage_availability.clone(),
+            })
+        } else {
+            provider
+        };
     // Cap concurrent model calls with the shared limiter instead of taking the
     // semaphore by hand around each call. This also releases the permit as soon
     // as the call returns, so a request that is backing off no longer occupies
@@ -3916,12 +4097,83 @@ async fn run_review_tool_with_cmd_and_overrides(
 
             // Return result
             if let Some(res) = final_result {
-                Ok(res)
+                if usage_availability.unavailable.load(Ordering::SeqCst) {
+                    Err(anyhow::Error::new(ReviewError::UsageUnavailable)
+                        .context(UsageUnavailableOutput(res)))
+                } else {
+                    Ok(res)
+                }
+            } else if usage_availability.unavailable.load(Ordering::SeqCst) {
+                Err(ReviewError::UsageUnavailable.into())
             } else {
                 Err(anyhow::anyhow!("Review tool finished without valid result"))
             }
         }
         .await;
+
+    let mut interaction_result = match interaction_result {
+        Err(error)
+            if usage_availability.unavailable.load(Ordering::SeqCst)
+                && !error.downcast_ref::<ReviewError>().is_some_and(|error| {
+                    matches!(
+                        error,
+                        ReviewError::Cancelled | ReviewError::BudgetExceeded(_)
+                    )
+                }) =>
+        {
+            let error = if error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| matches!(error, ReviewError::UsageUnavailable))
+            {
+                error
+            } else {
+                error.context(ReviewError::UsageUnavailable)
+            };
+            if error.downcast_ref::<UsageUnavailableOutput>().is_some() {
+                Err(error)
+            } else if let Some(output) = usage_availability.fallback_output() {
+                Err(error.context(output))
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    };
+
+    if interaction_result.as_ref().err().is_some_and(|error| {
+        error
+            .downcast_ref::<ReviewError>()
+            .is_some_and(|error| matches!(error, ReviewError::UsageUnavailable))
+    }) {
+        let active_deadline = *deadline.lock().unwrap();
+        let drain = async {
+            let mut cancel_interval = tokio::time::interval(Duration::from_secs(2));
+            cancel_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_interval.tick() => {
+                        if let Ok(Some(status)) = db.get_patchset_status(patchset_id).await
+                            && status == ReviewStatus::Cancelled.as_str()
+                        {
+                            return Err(ReviewError::Cancelled);
+                        }
+                    }
+                    _ = usage_availability.wait_for_active() => return Ok(()),
+                }
+            }
+        };
+        match timeout_at(active_deadline, drain).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => interaction_result = Err(error.into()),
+            Err(_) => warn!("Parallel provider calls did not finish before the review deadline"),
+        }
+        if let Err(error) = &mut interaction_result
+            && let Some(output) = error.downcast_mut::<UsageUnavailableOutput>()
+        {
+            usage_availability.retain_responses(output);
+        }
+    }
 
     // Abort all spawned AI request tasks to drop their stdin clones
     for task in spawned_tasks {
@@ -3937,9 +4189,11 @@ async fn run_review_tool_with_cmd_and_overrides(
     drop(stdin_writer);
 
     let timed_out = match &interaction_result {
-        Err(e) => e
-            .to_string()
-            .contains("Review tool timed out (active time exceeded)"),
+        Err(e) => e.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("Review tool timed out (active time exceeded)")
+        }),
         Ok(_) => false,
     };
     let cancelled = match &interaction_result {
@@ -3952,6 +4206,12 @@ async fn run_review_tool_with_cmd_and_overrides(
         Err(e) => e
             .downcast_ref::<ReviewError>()
             .is_some_and(|re| matches!(re, ReviewError::BudgetExceeded(_))),
+        Ok(_) => false,
+    };
+    let usage_unavailable = match &interaction_result {
+        Err(e) => e
+            .downcast_ref::<ReviewError>()
+            .is_some_and(|re| matches!(re, ReviewError::UsageUnavailable)),
         Ok(_) => false,
     };
 
@@ -3976,6 +4236,11 @@ async fn run_review_tool_with_cmd_and_overrides(
         );
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(5), child.wait()).await;
+    } else if usage_unavailable {
+        if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            let _ = child.start_kill();
+            let _ = timeout(Duration::from_secs(5), child.wait()).await;
+        }
     } else {
         let _ = child.wait().await; // Reap zombie
     }
@@ -5337,7 +5602,12 @@ mod tests {
                 thought: None,
                 thought_signature: None,
                 tool_calls: None,
-                usage: None,
+                usage: Some(crate::ai::AiUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: Some(0),
+                }),
                 truncated: false,
             })
         }
@@ -5353,6 +5623,14 @@ mod tests {
     async fn run_single_ai_request_mock(
         mock_script: &str,
         provider: Arc<dyn AiProvider>,
+    ) -> Result<Value> {
+        run_single_ai_request_mock_with_state(mock_script, provider, None).await
+    }
+
+    async fn run_single_ai_request_mock_with_state(
+        mock_script: &str,
+        provider: Arc<dyn AiProvider>,
+        state_sender: Option<tokio::sync::oneshot::Sender<(Arc<Database>, i64)>>,
     ) -> Result<Value> {
         let temp_dir = tempdir()?;
         let bin_path = temp_dir.path().join("mock_review");
@@ -5395,6 +5673,9 @@ mod tests {
         let review_id = db
             .create_review(ps_id, Some(p_id), "mock", "mock", None, None)
             .await?;
+        if let Some(state_sender) = state_sender {
+            let _ = state_sender.send((db.clone(), ps_id));
+        }
 
         run_review_tool_with_cmd(
             Command::new(&bin_path),
@@ -6213,10 +6494,10 @@ fi
 read -r input || exit 1
 echo '{"type": "ai_request", "payload": {"messages": [{"role": "user", "content": "first"}], "temperature": 0.5}}'
 read -r ai_response || exit 1
-case "$ai_response" in *'"type":"error"'*) while read -r _; do :; done; exit 1 ;; esac
+case "$ai_response" in *'"content":"Mocked AI response"'*) ;; *) exit 1 ;; esac
 echo '{"type": "ai_request", "payload": {"messages": [{"role": "user", "content": "second"}], "temperature": 0.5}}'
 read -r ai_response || exit 1
-case "$ai_response" in *'"type":"error"'*) while read -r _; do :; done; exit 1 ;; esac
+case "$ai_response" in *'"type":"error"'*) echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}],"history":[{"role":"assistant","content":"Mocked AI response","thought_signature":"private-signature"}]}' ; exit 0 ;; esac
 echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
 "#;
         crate::test_support::write_executable_script(&bin_path, mock_script);
@@ -6271,6 +6552,428 @@ echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
         )
         .await
         .map(|_| ())
+    }
+
+    struct MockProviderWithoutUsage {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiProvider for MockProviderWithoutUsage {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AiResponse {
+                content: Some("Mocked AI response".to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: None,
+                truncated: false,
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_budgets_reject_unreported_usage() -> Result<()> {
+        for (total_budget, output_budget) in [(1000, 0), (0, 500), (1000, 500)] {
+            let mut settings = Settings::new()?;
+            settings.database.url = ":memory:".to_string();
+            settings.review.max_total_tokens = total_budget;
+            settings.review.max_total_output_tokens = output_budget;
+            let provider = Arc::new(MockProviderWithoutUsage {
+                calls: AtomicUsize::new(0),
+            });
+            let error = run_two_request_mock(settings, provider.clone())
+                .await
+                .expect_err("unreported usage must not bypass an enabled token budget");
+            assert!(error.to_string().contains("Token usage unavailable"));
+            assert!(
+                error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+            );
+            let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+            assert_eq!(retained.0["history"][0]["content"], "Mocked AI response");
+            let logs = retained.logs().unwrap();
+            assert!(logs.contains("Mocked AI response"));
+            assert!(!logs.contains("private-signature"));
+            let entries: Vec<Value> = serde_json::from_str(&logs)?;
+            assert_eq!(entries[0]["content"], "Mocked AI response");
+            assert_eq!(entries[1]["role"], "diagnostic");
+            assert!(
+                entries[1]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("patchset_id")
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        }
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.max_total_tokens = 0;
+        settings.review.max_total_output_tokens = 0;
+        let provider = Arc::new(MockProviderWithoutUsage {
+            calls: AtomicUsize::new(0),
+        });
+        run_two_request_mock(settings, provider.clone()).await?;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.max_total_tokens = 1;
+        settings.review.max_total_output_tokens = 1;
+        run_two_request_mock(
+            settings,
+            Arc::new(MockProviderWithUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unreported_usage_persists_failed_review_without_retry() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let bin_path = temp_dir.path().join("mock_review");
+        crate::test_support::write_executable_script(
+            &bin_path,
+            r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"first"}]}}'
+read -r response || exit 1
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"second"}]}}'
+read -r response || exit 1
+echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"retained history","thought_signature":"private-signature"}]}'
+"#,
+        );
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.max_retries = 2;
+        settings.review.timeout_seconds = 5;
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let provider = Arc::new(MockProviderWithoutUsage {
+            calls: AtomicUsize::new(0),
+        });
+        let ctx = ReviewContext {
+            semaphore: Arc::new(Semaphore::new(1)),
+            llm_semaphore: Arc::new(Semaphore::new(1)),
+            db: db.clone(),
+            settings,
+            baseline_registry: Arc::new(BaselineRegistry::new(Path::new("."), None)?),
+            quota_manager: Arc::new(QuotaManager::new()),
+            target_review_count: 1,
+            provider: provider.clone(),
+            worker_overrides: WorkerSubprocessOverrides {
+                test_program: Some(bin_path),
+                ..WorkerSubprocessOverrides::default()
+            },
+            progress_registry: ReviewProgressRegistry::default(),
+        };
+        let thread_id = db.create_thread("usage-msg", "Subject", 1000).await?;
+        db.create_message(
+            "usage-patch",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let patchset_id = db
+            .create_patchset(
+                thread_id,
+                None,
+                "usage-msg",
+                "Subject",
+                "Author",
+                1000,
+                1,
+                1,
+                "",
+                "",
+                None,
+                1,
+                None,
+                false,
+                None,
+                None,
+            )
+            .await?
+            .unwrap();
+        let diff = "diff --git a/foo.c b/foo.c\n+int x;";
+        let patch_id = db.create_patch(patchset_id, "usage-patch", 1, diff).await?;
+        let result = Reviewer::process_patch_review(
+            &ctx,
+            patchset_id,
+            patch_id,
+            1,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff,
+            None,
+        )
+        .await?;
+        assert!(matches!(result, PatchResult::ReviewFailed));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status, result_description, logs FROM reviews WHERE patch_id = ?",
+                libsql::params![patch_id],
+            )
+            .await?;
+        let row = rows.next().await?.unwrap();
+        let status: String = row.get(0)?;
+        let description: String = row.get(1)?;
+        let logs: String = row.get(2)?;
+        assert_eq!(status, "Failed");
+        assert!(description.contains("Token usage unavailable"));
+        assert!(logs.contains("retained history"));
+        assert!(logs.contains("Mocked AI response"));
+        assert!(!logs.contains("private-signature"));
+        let entries: Vec<Value> = serde_json::from_str(&logs)?;
+        assert_eq!(entries[0]["role"], "assistant");
+        assert_eq!(entries[1]["role"], "diagnostic");
+        assert!(rows.next().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unreported_usage_survives_worker_exit_and_timeout() -> Result<()> {
+        let prefix = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"first"}]}}'
+read -r response || exit 1
+"#;
+        for ending in [
+            "exit 1\n",
+            "read -r never_received\n",
+            "echo '{\"patchset_id\":1,\"patches\":[]}'\n",
+        ] {
+            let provider = Arc::new(MockProviderWithoutUsage {
+                calls: AtomicUsize::new(0),
+            });
+            let error = run_single_ai_request_mock(&format!("{prefix}{ending}"), provider.clone())
+                .await
+                .expect_err("unreported usage must remain non-retryable");
+            assert!(
+                error
+                    .downcast_ref::<ReviewError>()
+                    .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+            );
+            let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+            let logs = retained.logs().unwrap();
+            let entries: Vec<Value> = serde_json::from_str(&logs)?;
+            assert_eq!(entries.last().unwrap()["role"], "diagnostic");
+            assert!(logs.contains("Mocked AI response"));
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct ParallelUsageProvider {
+        started: AtomicUsize,
+        both_started: tokio::sync::Notify,
+        release_first: tokio::sync::Notify,
+        release_second: tokio::sync::Notify,
+        second_completed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AiProvider for ParallelUsageProvider {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            let first = request.messages[0].content.as_deref() == Some("first");
+            if self.started.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.both_started.notify_one();
+            }
+            if first {
+                self.release_first.notified().await;
+            } else {
+                self.release_second.notified().await;
+                self.second_completed.store(true, Ordering::SeqCst);
+            }
+            Ok(AiResponse {
+                content: Some(
+                    if first {
+                        "unreported"
+                    } else {
+                        "parallel response"
+                    }
+                    .to_string(),
+                ),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: (!first).then_some(crate::ai::AiUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: Some(0),
+                }),
+                truncated: false,
+            })
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unreported_usage_retains_parallel_in_flight_response() -> Result<()> {
+        let provider = Arc::new(ParallelUsageProvider::default());
+        let mock_script = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","tx_id":1,"payload":{"messages":[{"role":"user","content":"first"}]}}'
+echo '{"type":"ai_request","tx_id":2,"payload":{"messages":[{"role":"user","content":"second"}]}}'
+read -r response || exit 1
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let mut review = tokio::spawn({
+            let provider = provider.clone();
+            async move { run_single_ai_request_mock(mock_script, provider).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.both_started.notified()).await?;
+        provider.release_first.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut review)
+                .await
+                .is_err(),
+            "the already-running parallel call must not be dropped"
+        );
+        provider.release_second.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(2), review)
+            .await??
+            .expect_err("unreported usage must fail the review");
+        assert!(provider.second_completed.load(Ordering::SeqCst));
+        let retained = error.downcast_ref::<UsageUnavailableOutput>().unwrap();
+        let logs = retained.logs().unwrap();
+        assert!(logs.contains("unreported"));
+        assert!(logs.contains("parallel response"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unreported_usage_wait_honors_cancellation() -> Result<()> {
+        let provider = Arc::new(ParallelUsageProvider::default());
+        let mock_script = r#"#!/bin/bash
+read -r input || exit 1
+echo '{"type":"ai_request","tx_id":1,"payload":{"messages":[{"role":"user","content":"first"}]}}'
+echo '{"type":"ai_request","tx_id":2,"payload":{"messages":[{"role":"user","content":"second"}]}}'
+read -r response || exit 1
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let (state_sender, state_receiver) = tokio::sync::oneshot::channel();
+        let mut review = tokio::spawn({
+            let provider = provider.clone();
+            async move {
+                run_single_ai_request_mock_with_state(mock_script, provider, Some(state_sender))
+                    .await
+            }
+        });
+        let (db, patchset_id) = state_receiver.await?;
+        tokio::time::timeout(Duration::from_secs(2), provider.both_started.notified()).await?;
+        provider.release_first.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut review)
+                .await
+                .is_err()
+        );
+        db.update_patchset_status(patchset_id, ReviewStatus::Cancelled.as_str())
+            .await?;
+        let error = tokio::time::timeout(Duration::from_secs(3), review)
+            .await??
+            .expect_err("explicit cancellation must stop the review");
+        assert!(
+            error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| { matches!(error, ReviewError::Cancelled) })
+        );
+        assert!(!provider.second_completed.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    struct HeldProviderWithoutUsage {
+        inner: MockProviderWithoutUsage,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl AiProvider for HeldProviderWithoutUsage {
+        async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.inner.generate_content(request).await
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            self.inner.get_capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_usage_blocks_queued_provider_calls() -> Result<()> {
+        let inner = Arc::new(HeldProviderWithoutUsage {
+            inner: MockProviderWithoutUsage {
+                calls: AtomicUsize::new(0),
+            },
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let guarded = Arc::new(UsageRequiredProvider {
+            inner: inner.clone(),
+            availability: Arc::new(UsageAvailability::default()),
+        });
+        let provider = Arc::new(
+            crate::ai::concurrency_limited_provider::ConcurrencyLimitedProvider::new(
+                guarded,
+                Arc::new(Semaphore::new(1)),
+            ),
+        );
+        let first = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.generate_content(AiRequest::default()).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), inner.started.notified()).await?;
+        let mut queued = Box::pin(provider.generate_content(AiRequest::default()));
+        assert!(futures::poll!(&mut queued).is_pending());
+        inner.release.notify_one();
+        assert!(first.await??.usage.is_none());
+        let error = queued.await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| { matches!(error, ReviewError::UsageUnavailable) })
+        );
+        assert_eq!(inner.inner.calls.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 
     #[tokio::test]

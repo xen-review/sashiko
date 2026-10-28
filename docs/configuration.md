@@ -391,6 +391,16 @@ pass.
 | `max_total_output_tokens` | integer | `1000000` | Maximum cumulative output tokens (including thinking tokens) per review. Set to 0 to disable. |
 | `effort` | string | `"mid"` (Argon 4) | Reasoning effort mode for models that support configurable effort levels (currently Argon 4; ignored for other models). Options: `"low"` (uniform `Low` effort across all stages), `"mid"` (uniform `Medium` effort across all stages, default), `"high"` (`High` effort across screening, planning, analysis, and verification stages; `Medium` for report formatting), or `"dynamic"` (`Low` for screening/planning/summary, planned `Medium` or `High` per analysis stage, `High` for verification stages, `Medium` for report formatting). Can also be set via `--effort`. |
 
+For daemon workflow reviews, either enabled token budget requires provider
+responses to report usage. If usage is unavailable, the review fails without
+an automatic retry or another provider call. Calls already in progress may
+finish within the existing review deadline; available responses and worker
+history are retained in the failed review's diagnostic log. Cancellation and
+the deadline can interrupt in-progress calls. Setting both limits to zero allows
+workflow reviews to continue without usage, but disables both token budgets.
+These budgets are checked after responses arrive and can be overshot by calls
+already in progress; they are not hard per-generation limits.
+
 #### Agent Harness
 
 `[review] mode = "workflow"` remains the default. Local and daemon reviews can

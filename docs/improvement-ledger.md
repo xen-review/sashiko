@@ -114,6 +114,16 @@ identity separates earlier estimates. The agent harness stops without measured
 counts. Focused tests and the full `make check-pr` gate pass. No live Devin call
 was made.
 
+The daemon workflow budget guard now fails without retry when a provider reply
+lacks usage and either review token budget is enabled. It blocks new provider
+calls, retains the first reply and later already-running responses alongside
+available worker history, and respects cancellation and the existing deadline.
+Fake-worker tests cover the database row, missing and measured-zero usage,
+queued and parallel calls, worker exit, and timeout. Disabling both budgets
+preserves the prior workflow behavior but removes token-budget protection.
+Limits remain post-response thresholds, not hard per-generation caps. This
+change has not been deployed or tested with a live provider.
+
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker
 results, maps, and full/concise local JSON, including the nested result used for
