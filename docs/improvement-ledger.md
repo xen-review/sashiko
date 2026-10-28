@@ -896,6 +896,12 @@ regression covers missing responses, partial cached totals, and measured zero.
 The full `make check-pr` gate passes; the integrated browser remains unavailable
 for this increment.
 
+The same renderer now labels reported output as partial when any request lacks
+usage; an incomplete zero remains unknown. Complete output and cases with only
+cached-token coverage missing retain their measured output values. The existing
+Node regression exercises these cases, and the diff-aware `make check-pr` gate
+passes. No live model call or browser verification was performed.
+
 The next native progress foundation adds an optional session callback with
 series-scoped attempted-call and source-tool counts, in-flight state, and usage
 from reported calls only. Fake-provider checks cover missing usage, missing

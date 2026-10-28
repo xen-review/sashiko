@@ -4560,14 +4560,16 @@
             const positive = values.some(value => valid(value) && value > 0);
             if (hasCoverage && coverage.requests === 0 && !positive) return 'No provider requests recorded';
             const complete = hasCoverage && coverage.requests > 0 && coverage.responses_with_usage === coverage.requests && coverage.responses_without_usage === 0;
-            const cachedUnknown = hasCoverage && (coverage.responses_without_cached_usage > 0 || coverage.responses_with_usage < coverage.requests);
+            const usageIncomplete = hasCoverage && coverage.responses_with_usage < coverage.requests;
+            const cachedUnknown = hasCoverage && (coverage.responses_without_cached_usage > 0 || usageIncomplete);
             const status = hasCoverage ? `<br><span class="text-muted-sm">Requests with reported usage: ${coverage.responses_with_usage} / ${coverage.requests}${complete ? '' : ' (incomplete)'}${cachedUnknown ? '; cached usage incomplete' : ''}</span>` : session ? '' : '<br><span class="text-muted-sm">Usage coverage: Unknown</span>';
             const confirmedZero = session?.usage_complete === true && session.provider_calls_recorded > 0;
             if (!positive && !confirmedZero && !(hasCoverage && coverage.responses_with_usage > 0)) return `Unavailable (not recorded or unconfirmed)${status}`;
             const uncached = !cachedUnknown && valid(record?.tokens_in) && valid(record?.tokens_cached) && record.tokens_in >= record.tokens_cached ? record.tokens_in - record.tokens_cached : null;
             const format = value => valid(value) ? formatTokenCount(value) : 'Unknown';
             const cached = cachedUnknown ? valid(record?.tokens_cached) && record.tokens_cached > 0 ? `${format(record.tokens_cached)} (partial)` : 'Unknown' : format(record?.tokens_cached);
-            return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${format(record?.tokens_out)}${status}`;
+            const output = usageIncomplete ? valid(record?.tokens_out) && record.tokens_out > 0 ? `${format(record.tokens_out)} (partial)` : 'Unknown' : format(record?.tokens_out);
+            return `In: ${format(uncached)} &middot; Cached: ${cached} &middot; Out: ${output}${status}`;
         }
 
         function renderActiveHarnessUsage(snapshot, retained = false) {

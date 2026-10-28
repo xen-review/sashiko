@@ -28,6 +28,7 @@ for (const responsesWithoutUsage of [0, 1]) {
     });
     assert.match(result, /In: Unknown/);
     assert.match(result, /Cached: Unknown/);
+    assert.match(result, /Out: 4 \(partial\)/);
     assert.match(result, /incomplete/);
 }
 
@@ -37,6 +38,13 @@ const partial = render({ ...record, tokens_cached: 20 }, {
 });
 assert.match(partial, /In: Unknown/);
 assert.match(partial, /Cached: 20 \(partial\)/);
+assert.match(partial, /Out: 4 \(partial\)/);
+
+const incompleteZero = render({ ...record, tokens_out: 0 }, {
+    ...coverage,
+    responses_without_usage: 1,
+});
+assert.match(incompleteZero, /Out: Unknown/);
 
 const missingCache = render(record, {
     requests: 1,
@@ -46,6 +54,8 @@ const missingCache = render(record, {
 });
 assert.match(missingCache, /In: Unknown/);
 assert.match(missingCache, /Cached: Unknown/);
+assert.match(missingCache, /Out: 4/);
+assert.doesNotMatch(missingCache, /Out: 4 \(partial\)/);
 
 const complete = render(record, {
     requests: 1,
@@ -55,6 +65,8 @@ const complete = render(record, {
 });
 assert.match(complete, /In: 100/);
 assert.match(complete, /Cached: 0/);
+assert.match(complete, /Out: 4/);
+assert.doesNotMatch(complete, /Out: 4 \(partial\)/);
 
 const measuredZero = render({ tokens_in: 0, tokens_cached: 0, tokens_out: 0 }, {
     requests: 1,
@@ -64,5 +76,6 @@ const measuredZero = render({ tokens_in: 0, tokens_cached: 0, tokens_out: 0 }, {
 });
 assert.match(measuredZero, /In: 0/);
 assert.match(measuredZero, /Cached: 0/);
+assert.match(measuredZero, /Out: 0/);
 
 console.log('Review token rendering checks passed');
