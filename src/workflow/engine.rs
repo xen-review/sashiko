@@ -35,6 +35,8 @@ pub struct StageRunRecord {
     pub tokens_cached: u32,
     #[serde(default)]
     pub usage_coverage: Option<SessionUsageCoverage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reported_retry_usage: Vec<crate::ai::session::SessionRetryUsage>,
     pub prompts_read: Vec<String>,
     pub history_start: usize,
     pub history_end: usize,
@@ -78,6 +80,7 @@ fn stage_outcome_from_error(err: &anyhow::Error) -> StageOutcome {
             tokens_cached: u32::try_from(failure.usage.cached_tokens.unwrap_or(0))
                 .unwrap_or(u32::MAX),
             usage_coverage: Some(failure.usage_coverage),
+            reported_retry_usage: failure.reported_retry_usage.clone(),
             history: failure.history.clone(),
             skipped: false,
         }
@@ -122,6 +125,7 @@ fn record_stage_outcome(
         tokens_out: stage_outcome.tokens_out,
         tokens_cached: stage_outcome.tokens_cached,
         usage_coverage: stage_outcome.usage_coverage,
+        reported_retry_usage: stage_outcome.reported_retry_usage,
         prompts_read,
         history_start,
         history_end,
@@ -486,6 +490,150 @@ mod tests {
             ProviderCapabilities {
                 model_name: "mock".to_string(),
                 context_window_size: 1000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_retains_stage_retry_usage_after_success() {
+        struct RetryProvider {
+            calls: AtomicUsize,
+            fail_after_retry: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl AiProvider for RetryProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let mut payload = crate::ai::RemoteAiErrorPayload::new(
+                        "temporary".into(),
+                        crate::ai::AiErrorClass::Transient {
+                            retry_after: std::time::Duration::ZERO,
+                        },
+                    );
+                    payload.reported_failure_usage = Some(crate::ai::AiUsage {
+                        prompt_tokens: 12,
+                        completion_tokens: 3,
+                        total_tokens: 15,
+                        cached_tokens: Some(0),
+                    });
+                    return Err(payload.into_error());
+                }
+                if self.fail_after_retry {
+                    let mut payload = crate::ai::RemoteAiErrorPayload::new(
+                        "permission denied".into(),
+                        crate::ai::AiErrorClass::Fatal,
+                    );
+                    payload.reported_failure_usage = Some(crate::ai::AiUsage {
+                        prompt_tokens: 8,
+                        completion_tokens: 1,
+                        total_tokens: 9,
+                        cached_tokens: None,
+                    });
+                    return Err(payload.into_error());
+                }
+                Ok(AiResponse {
+                    content: Some(r#"{"items":[]}"#.into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        for fail_after_retry in [false, true] {
+            for parallel in [false, true] {
+                let provider = Arc::new(RetryProvider {
+                    calls: AtomicUsize::new(0),
+                    fail_after_retry,
+                });
+                let tmp = tempfile::tempdir().unwrap();
+                let env = WorkflowEnv {
+                    provider,
+                    tools: Arc::new(ToolBox::new(tmp.path().to_path_buf(), None)),
+                    base_dir: tmp.path(),
+                    context_tag: None,
+                };
+                let analysis = Stage::builder("analysis")
+                    .user_prompt(PromptTemplate::new("Analyze"))
+                    .output_format(OutputFormat::json())
+                    .reduce(|_: &mut DummyState, _: DummyConcernsOutput| {})
+                    .build();
+                let builder = Workflow::builder("retry_usage");
+                let workflow = if parallel {
+                    let skipped = Stage::builder("skipped")
+                        .user_prompt(PromptTemplate::new("Skip"))
+                        .output_format(OutputFormat::json())
+                        .skip_if(|_: &DummyState| true)
+                        .reduce(|_: &mut DummyState, _: DummyConcernsOutput| {})
+                        .build();
+                    builder.parallel(
+                        vec![Box::new(skipped), Box::new(analysis)],
+                        ParallelPolicy::FailFast,
+                    )
+                } else {
+                    builder.stage(analysis)
+                }
+                .build();
+                let result =
+                    WorkflowEngine::execute(&workflow, &env, &mut DummyState::default(), None)
+                        .await;
+                let outcome = match result {
+                    Ok(outcome) => {
+                        assert!(!fail_after_retry);
+                        assert_eq!(outcome.tokens_in, 7);
+                        assert_eq!(outcome.tokens_out, 2);
+                        outcome
+                    }
+                    Err(error) => {
+                        assert!(fail_after_retry);
+                        assert_eq!(
+                            error
+                                .downcast_ref::<crate::ai::ProviderFailureUsage>()
+                                .unwrap()
+                                .usage
+                                .prompt_tokens,
+                            8
+                        );
+                        let failure = error.downcast_ref::<WorkflowFailure>().unwrap();
+                        assert_eq!(failure.outcome.tokens_in, 0);
+                        failure.outcome.clone()
+                    }
+                };
+                assert!(!outcome.usage_coverage.unwrap().is_complete());
+                let stage = outcome
+                    .stage_runs
+                    .iter()
+                    .find(|stage| stage.name == "analysis")
+                    .unwrap();
+                let retry = &stage.reported_retry_usage;
+                assert_eq!(retry.len(), 1);
+                assert_eq!(retry[0].request, 1);
+                assert_eq!(retry[0].usage.prompt_tokens, 12);
+                assert_eq!(retry[0].usage.cached_tokens, Some(0));
+                let mut serialized = serde_json::to_value(stage).unwrap();
+                let restored: StageRunRecord = serde_json::from_value(serialized.clone()).unwrap();
+                assert_eq!(restored.reported_retry_usage, *retry);
+                serialized
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("reported_retry_usage");
+                let legacy: StageRunRecord = serde_json::from_value(serialized).unwrap();
+                assert!(legacy.reported_retry_usage.is_empty());
             }
         }
     }

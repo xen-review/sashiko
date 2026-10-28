@@ -145,9 +145,10 @@ number and those counters separately from successful-response totals. Preserve
 the observations on both session success and session failure; a terminal error
 continues to carry its existing separate observation and must not be duplicated.
 Do not change classification, retry limits, cache behavior, or budget decisions.
-The first session-level increment does not persist or display these observations;
-subsequent propagation must identify the stage and workflow attempt and keep
-partial observations separate from final totals. Missing counters, cancelled
+The stage increment records observations on successful and failed stage runs,
+and successful review maps carry them under the originating stage. Failed
+workflow diagnostics still need workflow-attempt attribution and persistence;
+keep partial observations separate from final totals. Missing counters, cancelled
 calls, retries hidden inside provider decorators, and native model generations
 remain unknown. Fake-provider tests cover eventual success, exhaustion, fatal
 errors, missing usage and explicit cached zero before any propagation work.

@@ -727,6 +727,7 @@ pub fn build_review_map(
                 "tokens_out": r.tokens_out,
                 "tokens_cached": r.tokens_cached,
                 "usage_coverage": r.usage_coverage,
+                "reported_retry_usage": r.reported_retry_usage,
                 "prompts_read": r.prompts_read,
                 "concerns_count": concerns_count,
                 "dismissed_count": dismissed_count,
@@ -896,6 +897,7 @@ mod tests {
                 tokens_out: 50,
                 tokens_cached: 0,
                 usage_coverage: None,
+                reported_retry_usage: Vec::new(),
                 prompts_read: vec![],
                 history_start: 0,
                 history_end: 2,
@@ -912,6 +914,15 @@ mod tests {
                     responses_with_usage: 2,
                     ..Default::default()
                 }),
+                reported_retry_usage: vec![crate::ai::session::SessionRetryUsage {
+                    request: 1,
+                    usage: crate::ai::AiUsage {
+                        prompt_tokens: 12,
+                        completion_tokens: 3,
+                        total_tokens: 15,
+                        cached_tokens: Some(0),
+                    },
+                }],
                 prompts_read: vec!["subsystem/bpf.md".to_string()],
                 history_start: 2,
                 history_end: 6,
@@ -923,6 +934,21 @@ mod tests {
         assert_eq!(map["project"], "linux");
         assert!(map["stages"][0]["usage_coverage"].is_null());
         assert_eq!(map["stages"][1]["usage_coverage"]["requests"], 2);
+        assert!(
+            map["stages"][0]["reported_retry_usage"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(map["stages"][1]["reported_retry_usage"][0]["request"], 1);
+        assert_eq!(
+            map["stages"][1]["reported_retry_usage"][0]["usage"]["prompt_tokens"],
+            12
+        );
+        assert_eq!(
+            map["stages"][1]["reported_retry_usage"][0]["usage"]["cached_tokens"],
+            0
+        );
         assert_eq!(map["stages"][0]["log_start"], 1);
         assert_eq!(map["stages"][0]["log_end"], 3);
         assert_eq!(map["stages"][0]["concerns_count"], 1);
