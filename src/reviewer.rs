@@ -3930,21 +3930,31 @@ async fn run_review_tool_with_cmd_and_overrides(
         .ai
         .review_timeout_seconds(1, settings.review.timeout_seconds)
         .map_err(anyhow::Error::msg)?;
-    let deadline = Arc::new(std::sync::Mutex::new(
-        TokioInstant::now() + Duration::from_secs(review_timeout_seconds),
-    ));
+    let review_timeout = Duration::from_secs(review_timeout_seconds);
+    let active_deadline = TokioInstant::now()
+        .checked_add(review_timeout)
+        .ok_or_else(|| anyhow::anyhow!("Review active deadline overflows"))?;
+    let wall_deadline = active_deadline
+        .checked_add(review_timeout)
+        .ok_or_else(|| anyhow::anyhow!("Review wall deadline overflows"))?;
+    let deadline = Arc::new(std::sync::Mutex::new(active_deadline));
 
     // Retry rate-limited and transient failures with the shared limiter rather
     // than an open-coded loop. A review is bounded by its activity deadline
     // rather than an attempt count, and time spent waiting out a rate limit is
     // credited back so it does not consume that budget.
+    let retry_budget = Arc::new(
+        crate::ai::backoff_provider::DeadlineBudget::with_wall_deadline(
+            deadline.clone(),
+            wall_deadline,
+        ),
+    );
+    let mut quota_wait_changes = retry_budget.subscribe_quota_waits();
     let provider: Arc<dyn AiProvider> =
         Arc::new(crate::ai::backoff_provider::BackoffProvider::new(
             provider,
             quota_manager.clone(),
-            Some(Arc::new(crate::ai::backoff_provider::DeadlineBudget::new(
-                deadline.clone(),
-            ))),
+            Some(retry_budget.clone()),
         ));
 
     let mut spawned_tasks = Vec::new();
@@ -3972,6 +3982,7 @@ async fn run_review_tool_with_cmd_and_overrides(
                     let d = deadline.lock().unwrap();
                     *d
                 };
+                let quota_wait_active = retry_budget.quota_wait_is_active();
 
                 tokio::select! {
                     biased;
@@ -3989,10 +4000,25 @@ async fn run_review_tool_with_cmd_and_overrides(
                             return Err(ReviewError::Cancelled.into());
                         }
                     }
-                    line_res = timeout_at(current_deadline, lines.next_line()) => {
+                    _ = tokio::time::sleep_until(wall_deadline) => {
+                        return Err(anyhow::anyhow!("Review tool timed out (wall time exceeded)"));
+                    }
+                    _ = quota_wait_changes.changed() => continue,
+                    line_res = async {
+                        if quota_wait_active {
+                            Ok(lines.next_line().await)
+                        } else {
+                            timeout_at(current_deadline, lines.next_line()).await
+                        }
+                    } => {
                         let line_result = match line_res {
                             Ok(res) => res,
                             Err(_) => {
+                                if retry_budget.quota_wait_is_active()
+                                    || TokioInstant::now() < *deadline.lock().unwrap()
+                                {
+                                    continue;
+                                }
                                 return Err(anyhow::anyhow!(
                                     "Review tool timed out (active time exceeded)"
                                 ));
@@ -4209,17 +4235,15 @@ async fn run_review_tool_with_cmd_and_overrides(
         })
     });
     let deadline_expired = interaction_result.as_ref().err().is_some_and(|error| {
-        error.chain().any(|cause| {
-            cause
-                .to_string()
-                .contains("Review tool timed out (active time exceeded)")
-        })
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("Review tool timed out ("))
     });
     if require_usage && !terminal_abort {
         usage_availability.close();
     }
     if require_usage && !terminal_abort && !deadline_expired {
-        let active_deadline = *deadline.lock().unwrap();
+        let active_deadline = (*deadline.lock().unwrap()).min(wall_deadline);
         let drain = async {
             let mut cancel_interval = tokio::time::interval(Duration::from_secs(2));
             cancel_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -4327,11 +4351,9 @@ async fn run_review_tool_with_cmd_and_overrides(
     drop(stdin_writer);
 
     let timed_out = match &interaction_result {
-        Err(e) => e.chain().any(|cause| {
-            cause
-                .to_string()
-                .contains("Review tool timed out (active time exceeded)")
-        }),
+        Err(e) => e
+            .chain()
+            .any(|cause| cause.to_string().contains("Review tool timed out (")),
         Ok(_) => false,
     };
     let cancelled = match &interaction_result {
@@ -4354,10 +4376,7 @@ async fn run_review_tool_with_cmd_and_overrides(
     };
 
     if timed_out {
-        error!(
-            "Review tool timed out after {} active seconds. Killing process.",
-            review_timeout_seconds
-        );
+        error!("Review tool timed out. Killing process.");
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(5), child.wait()).await;
     } else if cancelled {
@@ -5445,8 +5464,12 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct RateLimitThenSuccessProvider {
         calls: AtomicUsize,
+        retry_after: std::time::Duration,
+        recovery_delay: std::time::Duration,
+        rate_limited: tokio::sync::Notify,
     }
 
     #[tokio::test]
@@ -5729,12 +5752,14 @@ mod tests {
     impl AiProvider for RateLimitThenSuccessProvider {
         async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.rate_limited.notify_one();
                 return Err(crate::ai::openai::OpenAiCompatError::RateLimitExceeded(
-                    std::time::Duration::from_millis(1),
+                    self.retry_after,
                 )
                 .into());
             }
 
+            tokio::time::sleep(self.recovery_delay).await;
             Ok(AiResponse {
                 content: Some("Recovered after rate limit".to_string()),
                 thought: None,
@@ -5770,6 +5795,15 @@ mod tests {
         provider: Arc<dyn AiProvider>,
         state_sender: Option<tokio::sync::oneshot::Sender<(Arc<Database>, i64)>>,
     ) -> Result<Value> {
+        run_single_ai_request_mock_with_timeout(mock_script, provider, state_sender, 5).await
+    }
+
+    async fn run_single_ai_request_mock_with_timeout(
+        mock_script: &str,
+        provider: Arc<dyn AiProvider>,
+        state_sender: Option<tokio::sync::oneshot::Sender<(Arc<Database>, i64)>>,
+        timeout_seconds: u64,
+    ) -> Result<Value> {
         let temp_dir = tempdir()?;
         let bin_path = temp_dir.path().join("mock_review");
 
@@ -5777,7 +5811,7 @@ mod tests {
 
         let mut settings = Settings::new()?;
         settings.database.url = ":memory:".to_string();
-        settings.review.timeout_seconds = 5;
+        settings.review.timeout_seconds = timeout_seconds;
 
         let db = Arc::new(Database::new(&settings.database).await?);
         db.migrate().await?;
@@ -6121,7 +6155,8 @@ else
 fi
 "#;
         let provider = Arc::new(RateLimitThenSuccessProvider {
-            calls: AtomicUsize::new(0),
+            retry_after: std::time::Duration::from_millis(1),
+            ..Default::default()
         });
         let provider_for_tool: Arc<dyn AiProvider> = provider.clone();
 
@@ -6129,6 +6164,132 @@ fi
 
         assert_eq!(result["patches"][0]["status"], "applied");
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_excludes_quota_wait_from_active_timeout() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}]}'
+"#;
+        for (retry_after, recovery_delay) in [(750, 500), (1500, 100)] {
+            let provider = Arc::new(RateLimitThenSuccessProvider {
+                retry_after: std::time::Duration::from_millis(retry_after),
+                recovery_delay: std::time::Duration::from_millis(recovery_delay),
+                ..Default::default()
+            });
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+            )
+            .await??;
+            assert_eq!(result["patches"][0]["status"], "applied");
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_timeout_resumes_after_quota_wait() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let provider = Arc::new(RateLimitThenSuccessProvider {
+            retry_after: std::time::Duration::from_millis(750),
+            recovery_delay: std::time::Duration::from_millis(1500),
+            ..Default::default()
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+        )
+        .await?
+        .expect_err("active provider time must still count toward the deadline");
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("Review tool timed out"))
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_quota_wait_honors_cancellation() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let provider = Arc::new(RateLimitThenSuccessProvider {
+            retry_after: std::time::Duration::from_secs(60),
+            ..Default::default()
+        });
+        let (state_sender, state_receiver) = tokio::sync::oneshot::channel();
+        let mut review = tokio::spawn({
+            let provider = provider.clone();
+            async move {
+                run_single_ai_request_mock_with_timeout(
+                    mock_script,
+                    provider,
+                    Some(state_sender),
+                    2,
+                )
+                .await
+            }
+        });
+        let (db, patchset_id) = state_receiver.await?;
+        tokio::time::timeout(Duration::from_secs(2), provider.rate_limited.notified()).await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut review)
+                .await
+                .is_err()
+        );
+        db.update_patchset_status(patchset_id, ReviewStatus::Cancelled.as_str())
+            .await?;
+        let error = tokio::time::timeout(Duration::from_secs(3), review)
+            .await??
+            .expect_err("explicit cancellation must interrupt quota backoff");
+        assert!(
+            error
+                .downcast_ref::<ReviewError>()
+                .is_some_and(|error| matches!(error, ReviewError::Cancelled))
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_quota_wait_has_wall_time_limit() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+echo '{"patchset_id":1,"patches":[]}'
+"#;
+        let provider = Arc::new(RateLimitThenSuccessProvider {
+            retry_after: std::time::Duration::from_secs(60),
+            ..Default::default()
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_single_ai_request_mock_with_timeout(mock_script, provider.clone(), None, 1),
+        )
+        .await?
+        .expect_err("quota waits must have a wall-clock limit");
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("wall time exceeded"))
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

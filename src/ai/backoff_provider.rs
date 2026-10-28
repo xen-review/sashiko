@@ -62,6 +62,10 @@ pub trait RetryBudget: Send + Sync {
     fn credit_wait(&self, slept: Duration);
     /// Return an error to abandon further retries.
     fn check(&self) -> Result<()>;
+    fn wait_started(&self) {}
+    fn wait_finished(&self, slept: Duration) {
+        self.credit_wait(slept);
+    }
 }
 
 /// A [`RetryBudget`] backed by a wall-clock deadline shared with the caller.
@@ -70,15 +74,50 @@ pub trait RetryBudget: Send + Sync {
 /// limit does not consume the caller's budget.
 pub struct DeadlineBudget {
     deadline: Arc<std::sync::Mutex<tokio::time::Instant>>,
+    wall_deadline: Option<tokio::time::Instant>,
     last_credit_end: std::sync::Mutex<Option<tokio::time::Instant>>,
+    active_waits: std::sync::Mutex<ActiveQuotaWaits>,
+    wait_changes: tokio::sync::watch::Sender<()>,
+}
+
+#[derive(Default)]
+struct ActiveQuotaWaits {
+    count: usize,
+    started_at: Option<tokio::time::Instant>,
 }
 
 impl DeadlineBudget {
     pub fn new(deadline: Arc<std::sync::Mutex<tokio::time::Instant>>) -> Self {
+        let (wait_changes, _) = tokio::sync::watch::channel(());
         Self {
             deadline,
+            wall_deadline: None,
             last_credit_end: std::sync::Mutex::new(None),
+            active_waits: std::sync::Mutex::new(ActiveQuotaWaits::default()),
+            wait_changes,
         }
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn with_wall_deadline(
+        deadline: Arc<std::sync::Mutex<tokio::time::Instant>>,
+        wall_deadline: tokio::time::Instant,
+    ) -> Self {
+        let mut budget = Self::new(deadline);
+        budget.wall_deadline = Some(wall_deadline);
+        budget
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn subscribe_quota_waits(&self) -> tokio::sync::watch::Receiver<()> {
+        self.wait_changes.subscribe()
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn quota_wait_is_active(&self) -> bool {
+        let waits = self.active_waits.lock().unwrap();
+        let deadline = *self.deadline.lock().unwrap();
+        waits.started_at.is_some_and(|started| started < deadline)
     }
 
     fn credit_wait_at(&self, slept: Duration, now: tokio::time::Instant) {
@@ -111,12 +150,80 @@ impl RetryBudget for DeadlineBudget {
 
     fn check(&self) -> Result<()> {
         let current = { *self.deadline.lock().unwrap() };
-        if tokio::time::Instant::now() > current {
+        let now = tokio::time::Instant::now();
+        if self.wall_deadline.is_some_and(|deadline| now >= deadline) {
+            return Err(anyhow::anyhow!(
+                "Review tool timed out (wall time exceeded)"
+            ));
+        }
+        if now > current {
             return Err(anyhow::anyhow!(
                 "Review tool timed out (active time exceeded)"
             ));
         }
         Ok(())
+    }
+
+    fn wait_started(&self) {
+        let mut waits = self.active_waits.lock().unwrap();
+        if waits.count == 0 {
+            waits.started_at = Some(tokio::time::Instant::now());
+        }
+        waits.count += 1;
+        drop(waits);
+        self.wait_changes.send_replace(());
+    }
+
+    fn wait_finished(&self, slept: Duration) {
+        self.credit_wait(slept);
+        let mut waits = self.active_waits.lock().unwrap();
+        waits.count -= 1;
+        if waits.count == 0 {
+            waits.started_at = None;
+        }
+        drop(waits);
+        self.wait_changes.send_replace(());
+    }
+}
+
+struct BudgetWait<'a> {
+    budget: Option<&'a dyn RetryBudget>,
+    started_at: Option<tokio::time::Instant>,
+    slept: Option<Duration>,
+}
+
+impl<'a> BudgetWait<'a> {
+    fn new(budget: Option<&'a dyn RetryBudget>) -> Self {
+        Self {
+            budget,
+            started_at: None,
+            slept: None,
+        }
+    }
+
+    fn start(&mut self) {
+        if self.started_at.is_none()
+            && let Some(budget) = self.budget
+        {
+            self.started_at = Some(tokio::time::Instant::now());
+            budget.wait_started();
+        }
+    }
+
+    fn finish(mut self, slept: Duration) {
+        self.slept = Some(slept);
+    }
+}
+
+impl Drop for BudgetWait<'_> {
+    fn drop(&mut self) {
+        if let Some(budget) = self.budget {
+            if let Some(started_at) = self.started_at {
+                budget.wait_finished(self.slept.unwrap_or_else(|| started_at.elapsed()));
+            } else if let Some(slept) = self.slept {
+                budget.credit_wait(slept);
+            }
+        }
     }
 }
 
@@ -161,9 +268,10 @@ impl AiProvider for BackoffProvider {
         loop {
             // Honour any active global rate-limit window before trying. The
             // wait is reported so a caller can keep it off its own deadline.
-            let slept = self.quota.wait_for_access().await;
+            let mut wait = BudgetWait::new(self.budget.as_deref());
+            let slept = self.quota.wait_for_access_with(|| wait.start()).await;
+            wait.finish(slept);
             if let Some(budget) = &self.budget {
-                budget.credit_wait(slept);
                 budget.check()?;
             }
 
@@ -374,6 +482,24 @@ mod tests {
         assert_eq!(m.calls.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn expired_wall_deadline_stops_before_calling() {
+        let now = tokio::time::Instant::now();
+        let deadline = Arc::new(std::sync::Mutex::new(now + Duration::from_secs(60)));
+        let budget = Arc::new(DeadlineBudget::with_wall_deadline(deadline, now));
+        let inner = mock(Behaviour::Transient, u32::MAX, Duration::ZERO);
+        let provider =
+            BackoffProvider::new(inner.clone(), Arc::new(QuotaManager::new()), Some(budget));
+
+        let error = provider
+            .generate_content(dummy_request())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("wall time exceeded"));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn rate_limit_waits_then_succeeds() {
         // QuotaManager uses std::Instant, so use a tiny real delay here.
@@ -405,6 +531,38 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn budget_wait_guards_release_after_overlap_and_cancellation() {
+        let deadline = Arc::new(std::sync::Mutex::new(
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        ));
+        let budget = DeadlineBudget::new(deadline);
+        let changes = budget.wait_changes.subscribe();
+        let mut first = BudgetWait::new(Some(&budget));
+        let mut second = BudgetWait::new(Some(&budget));
+
+        first.start();
+        second.start();
+        assert_eq!(budget.active_waits.lock().unwrap().count, 2);
+        first.finish(Duration::from_millis(5));
+        assert_eq!(budget.active_waits.lock().unwrap().count, 1);
+        drop(second);
+        assert_eq!(budget.active_waits.lock().unwrap().count, 0);
+        assert!(budget.active_waits.lock().unwrap().started_at.is_none());
+        assert!(changes.has_changed().unwrap());
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn quota_wait_started_after_deadline_does_not_pause_it() {
+        let deadline = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let budget = DeadlineBudget::new(deadline);
+        let mut wait = BudgetWait::new(Some(&budget));
+
+        wait.start();
+        assert!(!budget.quota_wait_is_active());
     }
 
     #[tokio::test]

@@ -381,7 +381,7 @@ pass.
 |-----|------|---------|-------------|
 | `concurrency` | integer | -- | Number of concurrent reviews. |
 | `worktree_dir` | string | -- | Directory for git worktrees used during daemon reviews. The daemon empties it on startup, so it must hold nothing else. |
-| `timeout_seconds` | integer | `3600` | Maximum time per review (seconds). |
+| `timeout_seconds` | integer | `3600` | Review timeout in seconds; see daemon workflow details below. |
 | `max_retries` | integer | `3` | Retry count on transient failures. |
 | `max_lines_changed` | integer | `10000` | Skip patches with more changed lines than this. |
 | `max_files_touched` | integer | `200` | Skip patches touching more files than this. |
@@ -390,6 +390,13 @@ pass.
 | `max_total_tokens` | integer | `10000000` | Maximum cumulative uncached tokens (input + output, including thinking tokens) per review. Cached tokens are excluded. Set to 0 to disable. |
 | `max_total_output_tokens` | integer | `1000000` | Maximum cumulative output tokens (including thinking tokens) per review. Set to 0 to disable. |
 | `effort` | string | `"mid"` (Argon 4) | Reasoning effort mode for models that support configurable effort levels (currently Argon 4; ignored for other models). Options: `"low"` (uniform `Low` effort across all stages), `"mid"` (uniform `Medium` effort across all stages, default), `"high"` (`High` effort across screening, planning, analysis, and verification stages; `Medium` for report formatting), or `"dynamic"` (`Low` for screening/planning/summary, planned `Medium` or `High` per analysis stage, `High` for verification stages, `Medium` for report formatting). Can also be set via `--effort`. |
+
+For daemon workflow jobs, the resolved review timeout limits active worker time;
+shared quota backoff is excluded. A separate wall-clock limit of twice that
+timeout stops the worker and prevents new provider calls even during backoff.
+Process cleanup can take additional time. A matching Codex timeout profile sets
+the active timeout used for both limits. Local and agent-harness deadlines retain
+their existing behavior.
 
 For daemon workflow reviews, either enabled token budget requires provider
 responses to report usage. If usage is unavailable, or the worker exits while

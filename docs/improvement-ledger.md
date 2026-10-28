@@ -1019,6 +1019,13 @@ The wait-credit regression now uses explicit instants after a real-clock
 assertion failed under scheduler delay. It covers duplicate, overlapping and
 separate waits without changing runtime clock behavior.
 
+Fake-worker tests reproduced quota backoff consuming the daemon workflow's
+active timeout. Active waits now pause that timer, completed credits refresh
+it, and cancellation remains effective. A wall limit of twice the resolved
+active timeout bounds the worker and blocks new provider calls; cleanup can take
+longer. The existing bounded drain after worker exit remains unchanged. This
+change has not been deployed or tested with a live provider.
+
 Goal: classify authenticated subscription exhaustion explicitly, retain completed
 stages/checkpoints and diagnostic artifacts, and park affected unfinished review
 work until the account's reported reset instead of repeatedly calling the model

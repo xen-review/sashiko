@@ -40,6 +40,13 @@ impl QuotaManager {
     }
 
     pub async fn wait_for_access(&self) -> Duration {
+        self.wait_for_access_with(|| {}).await
+    }
+
+    pub(crate) async fn wait_for_access_with<F>(&self, mut on_wait: F) -> Duration
+    where
+        F: FnMut(),
+    {
         let mut total_slept = Duration::ZERO;
         loop {
             let sleep_duration = {
@@ -53,6 +60,7 @@ impl QuotaManager {
             };
 
             if let Some(duration) = sleep_duration {
+                on_wait();
                 info!(
                     "{}Global AI rate limit/quota active. Waiting for {:.2}s...",
                     crate::ai::get_log_prefix(),
