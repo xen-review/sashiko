@@ -205,6 +205,9 @@ worker providers. Invalid metadata becomes unknown without dropping the response
 budgeted provider errors still fail closed. An outer response cache now forwards
 current miss or failure observations but never replays them on hits. Cancellation
 or backend-internal work remains unknown.
+A real worker subprocess with fake IPC replies verifies propagation through stdio,
+the response cache and turn logger into its stage review map without adding retry
+usage to response totals. This is not a live provider or deployment test.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, including backoff retry records and preserving
 measured zero versus unknown cache counts. Standalone renderer checks cover

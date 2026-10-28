@@ -130,6 +130,165 @@ fn test_review_reads_the_file_sashiko_config_names() {
     );
 }
 
+#[cfg(all(unix, feature = "cache"))]
+#[tokio::test]
+async fn test_worker_retains_backoff_observations_through_stdio_and_cache() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = sashiko::git_cmd::in_dir(&repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    git(&["init"]);
+    for index in 0..2 {
+        std::fs::write(repo.join("source.txt"), format!("revision {index}\n")).unwrap();
+        git(&["add", "source.txt"]);
+        git(&["commit", "-m", &format!("Revision {index}")]);
+    }
+    let commit = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    let settings = temp.path().join("Settings.toml");
+    std::fs::write(
+        &settings,
+        "[ai]\nprovider = 'codex-cli'\nmodel = 'fake'\nlog_turns = true\nresponse_cache = true\n[review]\nconcurrency = 1\nmode = 'workflow'\n",
+    )
+    .unwrap();
+    let prompts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projects/xen/prompts");
+    let mut worker = tokio::process::Command::new(get_bin_path())
+        .current_dir(&repo)
+        .env("SASHIKO_CONFIG", &settings)
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .args([
+            "--project",
+            "xen",
+            "worker",
+            "--json",
+            "--baseline",
+            "HEAD~1",
+            "--ai-provider",
+            "stdio-claude",
+            "--review-patch-index",
+            "1",
+            "--review-commit",
+            commit.trim(),
+            "--stages",
+            "implementation",
+            "--repo",
+        ])
+        .arg(&repo)
+        .arg("--reuse-worktree")
+        .arg(&repo)
+        .arg("--prompts")
+        .arg(&prompts)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut writer = worker.stdin.take().unwrap();
+    let mut lines = BufReader::new(worker.stdout.take().unwrap()).lines();
+    let mut stderr = worker.stderr.take().unwrap();
+    let stderr_task = tokio::spawn(async move {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).await.unwrap();
+        output
+    });
+    let input = serde_json::json!({
+        "id": 1, "subject": "Series", "patches": [{
+            "index": 1, "diff": "diff --git a/source.txt b/source.txt\n+revision 1\n",
+            "subject": "Revision 1", "author": null, "date": null, "commit_id": commit.trim()
+        }]
+    });
+    writer
+        .write_all(input.to_string().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    let interaction = async {
+        let mut calls = 0;
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("worker exited before its result");
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if value["type"] == "ai_request" {
+                calls += 1;
+                let reply = serde_json::json!({
+                    "type": "ai_response", "tx_id": value["tx_id"],
+                    "payload": {
+                        "content": "{\"concerns\":[],\"dismissed_concerns\":[]}",
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9, "cached_tokens": 0}
+                    },
+                    "backoff_retries": {"retries": [{"attempt": 1, "usage": {
+                        "prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15, "cached_tokens": 0
+                    }}], "truncated": false}
+                });
+                writer
+                    .write_all(reply.to_string().as_bytes())
+                    .await
+                    .unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.flush().await.unwrap();
+            } else if value.get("patchset_id").is_some() {
+                break (value, calls);
+            }
+        }
+    };
+    let (result, calls) = tokio::time::timeout(std::time::Duration::from_secs(30), interaction)
+        .await
+        .expect("worker interaction timed out");
+    drop(writer);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), worker.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let stderr = stderr_task.await.unwrap();
+    assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(calls, 1);
+    let stages = result["review"]["review_map"]["stages"].as_array().unwrap();
+    let stage = stages
+        .iter()
+        .find(|stage| stage["name"] == "implementation")
+        .unwrap();
+    assert_eq!(stage["tokens_in"], 7);
+    let request = &stage["backoff_observations"]["requests"][0];
+    assert_eq!(request["request"], 1);
+    assert_eq!(
+        request["observations"]["retries"][0]["usage"]["prompt_tokens"],
+        12
+    );
+    assert_eq!(
+        request["observations"]["retries"][0]["usage"]["cached_tokens"],
+        0
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_agent_harness_reviews_series_without_workflow_fallback() {
