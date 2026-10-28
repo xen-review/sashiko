@@ -243,6 +243,13 @@ Do not duplicate them into session-visible retry usage, terminal provider
 usage, or successful totals. Skipped and unavailable stages remain unknown.
 Post-processing failures without stage records remain outside this increment.
 
+If location resolution fails after a workflow has completed, retain that
+workflow outcome on the error, including history, usage coverage, and bounded
+stage observations. Do not turn the failed review into a success or retry a
+provider call from this helper. A deterministic panicking blocking task must
+prove the error still exposes the completed outcome to the existing failure
+diagnostic path. This does not address every possible post-processing failure.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

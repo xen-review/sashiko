@@ -195,6 +195,9 @@ Successful review maps now retain these bounded records separately from stage
 totals and session-visible retries. Failed workflow-engine attempts now retain
 bounded stage records separately in diagnostics with patch, attempt and stage-run
 identity. Post-processing failures without stage records remain unaccounted for.
+Location-resolution task failures now preserve the completed workflow outcome
+and its stage diagnostics on the error. A deterministic task panic covers this
+path; missing-inline post-processing has not been reproduced in a real workflow.
 The optional turn logger now forwards per-call observations on success and error
 without treating unavailable data as empty or changing terminal classification.
 Daemon replies now carry bounded retry metadata by transaction through both stdio

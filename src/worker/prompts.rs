@@ -147,6 +147,17 @@ pub struct WorkerResult {
     pub usage_coverage: Option<crate::ai::SessionUsageCoverage>,
 }
 
+fn location_resolution_error(
+    error: tokio::task::JoinError,
+    outcome: &crate::workflow::WorkflowOutcome,
+) -> anyhow::Error {
+    let message = format!("spawn_blocking failed for location resolution: {}", error);
+    anyhow::Error::new(error).context(crate::workflow::WorkflowFailure {
+        message,
+        outcome: outcome.clone(),
+    })
+}
+
 pub struct PromptRegistry {
     pub base_dir: PathBuf,
 }
@@ -550,7 +561,7 @@ impl Worker {
                 state
             })
             .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking failed for location resolution: {}", e))?;
+            .map_err(|error| location_resolution_error(error, &outcome))?;
         }
 
         let review_map = crate::workflows::review_map::build_review_map(
@@ -1090,6 +1101,76 @@ mod tests {
                 context_window_size: 1000,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn location_resolution_failure_retains_completed_workflow_outcome() {
+        let outcome = crate::workflow::WorkflowOutcome {
+            tokens_in: 7,
+            tokens_out: 2,
+            usage_coverage: Some(crate::ai::SessionUsageCoverage {
+                requests: 1,
+                responses_with_usage: 1,
+                ..Default::default()
+            }),
+            history: vec![crate::ai::AiMessage {
+                role: crate::ai::AiRole::Assistant,
+                content: Some("completed work".into()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stage_runs: vec![crate::workflow::StageRunRecord {
+                name: "analysis".into(),
+                backoff_observations: Some(crate::ai::session::SessionBackoffObservations {
+                    requests: vec![crate::ai::session::SessionBackoffRequest {
+                        request: 1,
+                        observations: crate::ai::BackoffRetryObservations {
+                            retries: vec![crate::ai::BackoffRetryObservation {
+                                attempt: 1,
+                                usage: None,
+                            }],
+                            truncated: false,
+                        },
+                    }],
+                    truncated: false,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let join_error = tokio::task::spawn_blocking(|| panic!("simulated location failure"))
+            .await
+            .unwrap_err();
+        let error = location_resolution_error(join_error, &outcome);
+        assert!(
+            error
+                .to_string()
+                .contains("spawn_blocking failed for location resolution")
+        );
+        let failure = error
+            .downcast_ref::<crate::workflow::WorkflowFailure>()
+            .unwrap();
+        assert_eq!(failure.outcome.tokens_in, 7);
+        assert_eq!(failure.outcome.tokens_out, 2);
+        assert!(failure.outcome.usage_coverage.unwrap().is_complete());
+        assert_eq!(
+            failure.outcome.history[0].content.as_deref(),
+            Some("completed work")
+        );
+        assert!(error.downcast_ref::<tokio::task::JoinError>().is_some());
+        let observations = failure.outcome.stage_runs[0]
+            .backoff_observations
+            .as_ref()
+            .unwrap();
+        assert_eq!(observations.requests[0].request, 1);
+        assert_eq!(observations.requests[0].observations.retries[0].attempt, 1);
+        assert!(
+            observations.requests[0].observations.retries[0]
+                .usage
+                .is_none()
+        );
     }
 
     #[tokio::test]
