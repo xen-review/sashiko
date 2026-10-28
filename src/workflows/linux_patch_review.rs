@@ -3916,6 +3916,7 @@ mod tests {
             tokens_cached: 0,
             usage_coverage: None,
             reported_retry_usage: Vec::new(),
+            backoff_observations: None,
             history: vec![
                 crate::ai::AiMessage {
                     role: crate::ai::AiRole::Assistant,

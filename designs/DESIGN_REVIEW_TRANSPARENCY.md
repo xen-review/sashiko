@@ -193,6 +193,13 @@ these records separate from session-visible error retries, terminal failure
 usage, and successful response totals. This step does not yet persist stage or
 worker results.
 
+Stage outcomes and workflow records may carry the bounded session records as
+an optional field. Missing legacy records and stages with no available
+observations remain unknown; skipped stages do not invent observations. Keep
+the records attached to their originating stage across sequential and parallel
+execution, including session failures. This does not yet expose them in review
+maps, failed-review diagnostics, or the daemon worker protocol.
+
 ## Acceptance Checks
 
 - An isolated fixture reproduces this page/map combination and the final

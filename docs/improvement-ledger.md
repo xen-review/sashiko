@@ -189,7 +189,9 @@ orders and prevent old retry observations from being replayed on a cache hit.
 In-process sessions now retain bounded, request-scoped decorator observations
 on success and failure without adding them to response totals or session-visible
 retry usage. Missing request records remain unknown; empty records describe only
-the observed decorator. Stage persistence and worker transport remain pending.
+the observed decorator. Workflow stage records now retain these observations on
+success and session failure, with legacy records and skipped stages still unknown.
+Review-map exposure, failed-review diagnostics and worker transport remain pending.
 The review-map stage table now displays bounded, validated retry observations
 separately from stage totals, preserving measured zero versus unknown cache
 counts. Standalone renderer checks cover malformed and hostile values; the

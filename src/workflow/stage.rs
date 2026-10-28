@@ -39,6 +39,7 @@ pub struct StageOutcome {
     pub tokens_cached: u32,
     pub usage_coverage: Option<SessionUsageCoverage>,
     pub reported_retry_usage: Vec<crate::ai::session::SessionRetryUsage>,
+    pub backoff_observations: Option<crate::ai::session::SessionBackoffObservations>,
     pub history: Vec<AiMessage>,
     pub skipped: bool,
 }
@@ -521,6 +522,7 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
                     tokens_cached: 0,
                     usage_coverage: None,
                     reported_retry_usage: Vec::new(),
+                    backoff_observations: None,
                     skipped: true,
                 },
                 Box::new(|_| {}),
@@ -625,6 +627,7 @@ impl<S: Send + Sync + 'static, T: DeserializeOwned + Send + 'static> ExecutableS
             tokens_cached,
             usage_coverage: Some(result.usage_coverage),
             reported_retry_usage: result.reported_retry_usage,
+            backoff_observations: result.backoff_observations.into_option(),
             history: result.history,
             skipped: false,
         };

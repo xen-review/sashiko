@@ -107,6 +107,10 @@ pub struct SessionBackoffObservations {
 }
 
 impl SessionBackoffObservations {
+    pub(crate) fn into_option(self) -> Option<Self> {
+        (!self.requests.is_empty() || self.truncated).then_some(self)
+    }
+
     fn record(&mut self, request: usize, observations: Option<BackoffRetryObservations>) {
         let Some(mut observations) = observations else {
             return;

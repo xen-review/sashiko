@@ -37,6 +37,8 @@ pub struct StageRunRecord {
     pub usage_coverage: Option<SessionUsageCoverage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reported_retry_usage: Vec<crate::ai::session::SessionRetryUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_observations: Option<crate::ai::session::SessionBackoffObservations>,
     pub prompts_read: Vec<String>,
     pub history_start: usize,
     pub history_end: usize,
@@ -81,6 +83,7 @@ fn stage_outcome_from_error(err: &anyhow::Error) -> StageOutcome {
                 .unwrap_or(u32::MAX),
             usage_coverage: Some(failure.usage_coverage),
             reported_retry_usage: failure.reported_retry_usage.clone(),
+            backoff_observations: failure.backoff_observations.clone().into_option(),
             history: failure.history.clone(),
             skipped: false,
         }
@@ -126,6 +129,7 @@ fn record_stage_outcome(
         tokens_cached: stage_outcome.tokens_cached,
         usage_coverage: stage_outcome.usage_coverage,
         reported_retry_usage: stage_outcome.reported_retry_usage,
+        backoff_observations: stage_outcome.backoff_observations,
         prompts_read,
         history_start,
         history_end,
@@ -547,6 +551,22 @@ mod tests {
                 })
             }
 
+            async fn generate_content_with_observations(
+                &self,
+                request: AiRequest,
+            ) -> crate::ai::ObservedProviderCall {
+                crate::ai::ObservedProviderCall {
+                    result: self.generate_content(request).await,
+                    backoff_retries: Some(crate::ai::BackoffRetryObservations {
+                        retries: vec![crate::ai::BackoffRetryObservation {
+                            attempt: 1,
+                            usage: None,
+                        }],
+                        truncated: false,
+                    }),
+                }
+            }
+
             fn get_capabilities(&self) -> ProviderCapabilities {
                 ProviderCapabilities {
                     model_name: "mock".into(),
@@ -620,21 +640,144 @@ mod tests {
                     .iter()
                     .find(|stage| stage.name == "analysis")
                     .unwrap();
+                if let Some(skipped) = outcome
+                    .stage_runs
+                    .iter()
+                    .find(|stage| stage.name == "skipped")
+                {
+                    assert!(skipped.skipped);
+                    assert!(skipped.backoff_observations.is_none());
+                }
                 let retry = &stage.reported_retry_usage;
                 assert_eq!(retry.len(), 1);
                 assert_eq!(retry[0].request, 1);
                 assert_eq!(retry[0].usage.prompt_tokens, 12);
                 assert_eq!(retry[0].usage.cached_tokens, Some(0));
+                let backoff = stage.backoff_observations.as_ref().unwrap();
+                assert_eq!(backoff.requests.len(), 2);
+                assert_eq!(backoff.requests[0].request, 1);
+                assert_eq!(backoff.requests[1].request, 2);
+                assert!(backoff.requests[0].observations.retries[0].usage.is_none());
                 let mut serialized = serde_json::to_value(stage).unwrap();
                 let restored: StageRunRecord = serde_json::from_value(serialized.clone()).unwrap();
                 assert_eq!(restored.reported_retry_usage, *retry);
+                assert_eq!(restored.backoff_observations.as_ref(), Some(backoff));
                 serialized
                     .as_object_mut()
                     .unwrap()
                     .remove("reported_retry_usage");
+                serialized
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("backoff_observations");
                 let legacy: StageRunRecord = serde_json::from_value(serialized).unwrap();
                 assert!(legacy.reported_retry_usage.is_empty());
+                assert!(legacy.backoff_observations.is_none());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_retains_real_backoff_observations_on_success_and_failure() {
+        struct RateLimitedProvider {
+            calls: AtomicUsize,
+            fail_after_retry: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl AiProvider for RateLimitedProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let error =
+                        crate::ai::gemini::GeminiError::QuotaExceeded(std::time::Duration::ZERO)
+                            .into();
+                    return Err(crate::ai::ProviderFailureUsage::attach(
+                        error,
+                        crate::ai::AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens: Some(0),
+                        },
+                    ));
+                }
+                if self.fail_after_retry {
+                    anyhow::bail!("terminal provider error");
+                }
+                Ok(AiResponse {
+                    content: Some(r#"{"items":[]}"#.into()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: Some(crate::ai::AiUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 2,
+                        total_tokens: 9,
+                        cached_tokens: Some(0),
+                    }),
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "mock".into(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        for fail_after_retry in [false, true] {
+            let inner = Arc::new(RateLimitedProvider {
+                calls: AtomicUsize::new(0),
+                fail_after_retry,
+            });
+            let provider = Arc::new(crate::ai::backoff_provider::BackoffProvider::new(
+                inner.clone(),
+                Arc::new(crate::ai::quota::QuotaManager::new()),
+                None,
+            ));
+            let tmp = tempfile::tempdir().unwrap();
+            let env = WorkflowEnv {
+                provider,
+                tools: Arc::new(ToolBox::new(tmp.path().to_path_buf(), None)),
+                base_dir: tmp.path(),
+                context_tag: None,
+            };
+            let stage = Stage::builder("analysis")
+                .user_prompt(PromptTemplate::new("Analyze"))
+                .output_format(OutputFormat::json())
+                .reduce(|_: &mut DummyState, _: DummyConcernsOutput| {})
+                .build();
+            let workflow = Workflow::builder("backoff_usage").stage(stage).build();
+            let result =
+                WorkflowEngine::execute(&workflow, &env, &mut DummyState::default(), None).await;
+            let outcome = match result {
+                Ok(outcome) => {
+                    assert!(!fail_after_retry);
+                    assert_eq!(outcome.tokens_in, 7);
+                    outcome
+                }
+                Err(error) => {
+                    assert!(fail_after_retry);
+                    error
+                        .downcast_ref::<WorkflowFailure>()
+                        .unwrap()
+                        .outcome
+                        .clone()
+                }
+            };
+            assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+            let stage = &outcome.stage_runs[0];
+            assert!(stage.reported_retry_usage.is_empty());
+            let backoff = stage.backoff_observations.as_ref().unwrap();
+            assert_eq!(backoff.requests.len(), 1);
+            assert_eq!(backoff.requests[0].request, 1);
+            let retry = &backoff.requests[0].observations.retries[0];
+            assert_eq!(retry.attempt, 1);
+            let usage = retry.usage.as_ref().unwrap();
+            assert_eq!(usage.prompt_tokens, 12);
+            assert_eq!(usage.cached_tokens, Some(0));
         }
     }
 
