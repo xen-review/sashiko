@@ -145,9 +145,13 @@ records a reported rate limit in the shared backoff for other reviews.
 Unbudgeted retries are unchanged.
 Fake-provider and worker checks pass; this is not durable quota deferral and has
 not been deployed or tested with a live model.
-Codex may report usage in a completed turn with no answer, but the provider
-error does not yet carry those counters to the guard; that accounting remains
-unavailable rather than being estimated.
+Codex may report usage in a completed turn with no answer. Its error now carries
+those observed counters, which the budgeted workflow guard retains in failure
+diagnostics without treating total usage as complete. Local and daemon harness
+failure traces retain them separately from successful-call totals, including
+after a sequential checkpoint. They are not yet added to durable usage totals
+or retained by the unbudgeted workflow error path; hidden calls and missing
+counters remain unknown.
 
 The adjacent availability-persistence slice now carries typed provider-response
 coverage through success/failure sessions, stage/workflow aggregation, worker

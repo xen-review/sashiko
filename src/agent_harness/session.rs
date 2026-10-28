@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_harness::InstructionSnapshot;
-use crate::ai::{AiMessage, AiProvider, AiRequest, AiRole, AiTool, AiUsage};
+use crate::ai::{AiMessage, AiProvider, AiRequest, AiRole, AiTool, AiUsage, ProviderFailureUsage};
 use crate::settings::AgentHarnessSettings;
 use crate::toolbox::ToolBox;
 
@@ -34,6 +34,8 @@ pub struct HarnessTrace {
     pub usage: AiUsage,
     #[serde(default)]
     pub call_usage: Vec<HarnessCallUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_failed_call_usage: Option<HarnessFailedCallUsage>,
     pub provider_calls: usize,
     pub tool_calls: usize,
     pub input_token_overshoot: usize,
@@ -93,6 +95,12 @@ impl HarnessTrace {
 pub struct HarnessCallUsage {
     pub provider_call: usize,
     pub response_history_end: usize,
+    pub usage: AiUsage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HarnessFailedCallUsage {
+    pub provider_call: usize,
     pub usage: AiUsage,
 }
 
@@ -325,13 +333,25 @@ async fn run_session(
         }
         trace.provider_calls += 1;
         report_progress(trace, true);
-        let response = provider
+        let response = match provider
             .generate_content(AiRequest {
                 system: Some(session.system.clone()),
                 messages: trace.history.clone(),
                 ..Default::default()
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(reported) = error.downcast_ref::<ProviderFailureUsage>() {
+                    trace.reported_failed_call_usage = Some(HarnessFailedCallUsage {
+                        provider_call: trace.provider_calls,
+                        usage: reported.usage.clone(),
+                    });
+                }
+                return Err(error);
+            }
+        };
         let mut assistant = message(AiRole::Assistant, response.content.clone(), None);
         assistant.tool_calls = response.tool_calls.clone();
         assistant.thought = response.thought;
@@ -769,6 +789,87 @@ mod tests {
         let outcome = execute(vec![reply], 100, 5).await;
         assert!(matches!(outcome.status, HarnessStatus::Failed { .. }));
         assert_eq!(outcome.trace.provider_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn reported_failure_usage_stays_separate_from_completed_calls() {
+        struct FailingProvider {
+            calls: AtomicUsize,
+            report_usage: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl AiProvider for FailingProvider {
+            async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let error = anyhow::anyhow!("no agent message");
+                Err(if self.report_usage {
+                    ProviderFailureUsage::attach(
+                        error,
+                        AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens: Some(0),
+                        },
+                    )
+                } else {
+                    error
+                })
+            }
+
+            fn get_capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    model_name: "fake".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent.md"), "Review source.").unwrap();
+        let instructions = InstructionSnapshot::load(
+            &directory.path().join("Settings.toml"),
+            &["agent.md".into()],
+            1000,
+        )
+        .unwrap();
+        let tools = ToolBox::new(directory.path().to_path_buf(), None);
+        let limits = AgentHarnessSettings {
+            strategy: Default::default(),
+            instruction_files: vec!["agent.md".into()],
+            max_generations: 2,
+            max_tool_calls: 1,
+            max_input_tokens: 100,
+            max_output_tokens: 100,
+            timeout_seconds: 10,
+        };
+        for report_usage in [false, true] {
+            let provider = FailingProvider {
+                calls: AtomicUsize::new(0),
+                report_usage,
+            };
+            let outcome = run(&provider, &tools, &instructions, "Review this.", &limits).await;
+            assert!(matches!(outcome.status, HarnessStatus::Failed { .. }));
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(outcome.trace.provider_calls, 1);
+            assert!(outcome.trace.call_usage.is_empty());
+            assert_eq!(outcome.trace.usage.prompt_tokens, 0);
+            let serialized = serde_json::to_value(&outcome.trace).unwrap();
+            if report_usage {
+                let failure = outcome.trace.reported_failed_call_usage.as_ref().unwrap();
+                assert_eq!(failure.provider_call, 1);
+                assert_eq!(failure.usage.prompt_tokens, 12);
+                assert_eq!(failure.usage.completion_tokens, 3);
+                assert_eq!(failure.usage.cached_tokens, Some(0));
+                assert_eq!(serialized["reported_failed_call_usage"]["provider_call"], 1);
+            } else {
+                assert!(outcome.trace.reported_failed_call_usage.is_none());
+                assert!(serialized.get("reported_failed_call_usage").is_none());
+            }
+            let restored: HarnessTrace = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored.reported_failed_call_usage.is_some(), report_usage);
+        }
     }
 
     #[tokio::test]

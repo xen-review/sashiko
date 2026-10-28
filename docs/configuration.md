@@ -407,12 +407,14 @@ provider call. Calls already in progress may finish within the existing review
 deadline; available responses and worker history are retained in the failed
 review's diagnostic log. Nonterminal provider errors without usage, including
 rate-limit errors, also stop a budgeted review; the first redacted provider
-error is kept in its diagnostic log. A reported rate limit still starts shared
-backoff for other reviews. Cancellation and the deadline can interrupt
-in-progress calls. Setting both limits to zero allows workflow reviews to
-continue without usage and retry transient and rate-limit errors, but disables
-both token budgets. These budgets are checked after responses arrive and can be
-overshot by calls already in progress; they are not hard per-generation limits.
+error and any observed failed-call usage are kept in its diagnostic log. These
+counters do not establish complete usage for the failed call. A reported rate
+limit still starts shared backoff for other reviews. Cancellation and the
+deadline can interrupt in-progress calls. Setting both limits to zero allows
+workflow reviews to continue without usage and retry transient and rate-limit
+errors, but disables both token budgets. These budgets are checked after
+responses arrive and can be overshot by calls already in progress; they are not
+hard per-generation limits.
 
 #### Agent Harness
 
@@ -484,6 +486,9 @@ Reviewer notes and per-patch plain-text reply drafts remain separate. Drafts are
 not sent and proposed source fixes are not applied. `--no-ai` still makes zero
 provider calls. Custom prompts, selected workflow stages, and pre-existing bug
 reports are rejected rather than silently ignored in harness execution.
+A failed Codex turn may include observed usage in the full harness trace. These
+counters stay separate from successful-call totals and do not establish complete
+usage for the failed call.
 
 For a daemon, add the usual database, repository, worktree, and delivery-policy
 settings. The complete series is context, with replies limited to patches that

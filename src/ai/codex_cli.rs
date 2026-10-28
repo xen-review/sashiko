@@ -31,7 +31,8 @@ use super::claude_cli::{
     parse_inner_response,
 };
 use crate::ai::{
-    AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, cache_identity_with,
+    AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities, ProviderFailureUsage,
+    cache_identity_with,
 };
 use crate::utils::redact_secret;
 
@@ -215,7 +216,11 @@ impl CodexCliProvider {
         let response_text = text_parts.join("\n");
         if response_text.trim().is_empty() {
             if saw_event || raw.trim().is_empty() {
-                anyhow::bail!("codex CLI produced no agent message");
+                let error = anyhow::anyhow!("codex CLI produced no agent message");
+                return Err(match usage {
+                    Some(usage) => ProviderFailureUsage::attach(error, usage),
+                    None => error,
+                });
             }
             // Fall back to raw output if no events parsed
             warn!("codex-cli: no item.completed events found, using raw output");
@@ -1335,7 +1340,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             r#"#!/bin/sh
 cat >/dev/null
 printf '%s\n' '{"type":"item.completed","item":{"type":"reasoning","text":"internal reasoning"}}'
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3,"cached_input_tokens":0}}'
 "#,
         );
         let provider = CodexCliProvider {
@@ -1355,7 +1360,12 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
         let result = provider
             .generate_content_with_binary(request.clone(), executable.as_os_str())
             .await;
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.to_string(), "codex CLI produced no agent message");
+        let usage = &error.downcast_ref::<ProviderFailureUsage>().unwrap().usage;
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.cached_tokens, Some(0));
 
         for script in [
             "#!/bin/sh\ncat >/dev/null\n",
@@ -1365,7 +1375,8 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_token
             let result = provider
                 .generate_content_with_binary(request.clone(), executable.as_os_str())
                 .await;
-            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert!(error.downcast_ref::<ProviderFailureUsage>().is_none());
         }
 
         crate::test_support::write_executable_script(

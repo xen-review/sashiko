@@ -3491,6 +3491,7 @@ struct UsageAvailabilityState {
     closed: bool,
     responses: Vec<crate::ai::AiResponse>,
     first_provider_error: Option<String>,
+    reported_failed_provider_usage: Vec<crate::ai::AiUsage>,
 }
 
 struct ActiveUsageCall(Arc<UsageAvailability>);
@@ -3560,6 +3561,11 @@ impl UsageAvailability {
         state
             .first_provider_error
             .get_or_insert_with(|| crate::utils::redact_secret(&error.to_string()));
+        if let Some(reported) = error.downcast_ref::<crate::ai::ProviderFailureUsage>() {
+            state
+                .reported_failed_provider_usage
+                .push(reported.usage.clone());
+        }
     }
 
     async fn wait_for_active(&self) {
@@ -3603,6 +3609,14 @@ impl UsageAvailability {
             && let Some(output) = output.as_object_mut()
         {
             output.insert("first_provider_error".to_string(), json!(error));
+        }
+        if !state.reported_failed_provider_usage.is_empty()
+            && let Some(output) = output.as_object_mut()
+        {
+            output.insert(
+                "reported_failed_provider_usage".to_string(),
+                json!(&state.reported_failed_provider_usage),
+            );
         }
     }
 }
@@ -7194,13 +7208,18 @@ echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"re
 
         struct ErrorProvider {
             calls: AtomicUsize,
+            usage: Option<crate::ai::AiUsage>,
         }
 
         #[async_trait]
         impl AiProvider for ErrorProvider {
             async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::anyhow!("provider failure token=tok-456"))
+                let error = anyhow::anyhow!("provider failure token=tok-456");
+                Err(match &self.usage {
+                    Some(usage) => crate::ai::ProviderFailureUsage::attach(error, usage.clone()),
+                    None => error,
+                })
             }
 
             fn get_capabilities(&self) -> ProviderCapabilities {
@@ -7211,59 +7230,82 @@ echo '{"patchset_id":1,"patches":[],"history":[{"role":"assistant","content":"re
             }
         }
 
-        db.create_message(
-            "error-patch",
-            thread_id,
-            None,
-            "Author",
-            "Subject",
-            1000,
-            "Body",
-            "",
-            "",
-            None,
-            None,
-        )
-        .await?;
-        let error_patch_id = db.create_patch(patchset_id, "error-patch", 3, diff).await?;
-        let error_provider = Arc::new(ErrorProvider {
-            calls: AtomicUsize::new(0),
-        });
-        let mut error_ctx = ctx.clone();
-        error_ctx.provider = error_provider.clone();
-        let result = Reviewer::process_patch_review(
-            &error_ctx,
-            patchset_id,
-            error_patch_id,
-            3,
-            "HEAD",
-            None,
-            &json!({}),
-            None,
-            None,
-            None,
-            diff,
-            None,
-        )
-        .await?;
-        assert!(matches!(result, PatchResult::ReviewFailed));
-        assert_eq!(error_provider.calls.load(Ordering::SeqCst), 1);
-        let mut rows = db
-            .conn
-            .query(
-                "SELECT status, result_description, logs FROM reviews WHERE patch_id = ?",
-                libsql::params![error_patch_id],
+        for (message_id, patch_number, usage) in [
+            ("error-patch", 3, None),
+            (
+                "measured-error-patch",
+                4,
+                Some(crate::ai::AiUsage {
+                    prompt_tokens: 12,
+                    completion_tokens: 3,
+                    total_tokens: 15,
+                    cached_tokens: Some(0),
+                }),
+            ),
+        ] {
+            db.create_message(
+                message_id, thread_id, None, "Author", "Subject", 1000, "Body", "", "", None, None,
             )
             .await?;
-        let row = rows.next().await?.unwrap();
-        let status: String = row.get(0)?;
-        let description: String = row.get(1)?;
-        let logs: String = row.get(2)?;
-        assert_eq!(status, "Failed");
-        assert!(description.contains("Token usage unavailable"));
-        assert!(logs.contains("provider failure"));
-        assert!(!logs.contains("tok-456"));
-        assert!(rows.next().await?.is_none());
+            let error_patch_id = db
+                .create_patch(patchset_id, message_id, patch_number, diff)
+                .await?;
+            let error_provider = Arc::new(ErrorProvider {
+                calls: AtomicUsize::new(0),
+                usage,
+            });
+            let mut error_ctx = ctx.clone();
+            error_ctx.provider = error_provider.clone();
+            let result = Reviewer::process_patch_review(
+                &error_ctx,
+                patchset_id,
+                error_patch_id,
+                i64::from(patch_number),
+                "HEAD",
+                None,
+                &json!({}),
+                None,
+                None,
+                None,
+                diff,
+                None,
+            )
+            .await?;
+            assert!(matches!(result, PatchResult::ReviewFailed));
+            assert_eq!(error_provider.calls.load(Ordering::SeqCst), 1);
+            let mut rows = db
+                .conn
+                .query(
+                    "SELECT status, result_description, logs FROM reviews WHERE patch_id = ?",
+                    libsql::params![error_patch_id],
+                )
+                .await?;
+            let row = rows.next().await?.unwrap();
+            let status: String = row.get(0)?;
+            let description: String = row.get(1)?;
+            let logs: String = row.get(2)?;
+            assert_eq!(status, "Failed");
+            assert!(description.contains("Token usage unavailable"));
+            assert!(logs.contains("provider failure"));
+            assert!(!logs.contains("tok-456"));
+            let entries: Vec<Value> = serde_json::from_str(&logs)?;
+            let diagnostic: Value =
+                serde_json::from_str(entries.last().unwrap()["content"].as_str().unwrap())?;
+            if patch_number == 3 {
+                assert!(diagnostic.get("reported_failed_provider_usage").is_none());
+            } else {
+                assert_eq!(
+                    diagnostic["reported_failed_provider_usage"],
+                    json!([{
+                        "prompt_tokens": 12,
+                        "completion_tokens": 3,
+                        "total_tokens": 15,
+                        "cached_tokens": 0,
+                    }])
+                );
+            }
+            assert!(rows.next().await?.is_none());
+        }
         Ok(())
     }
 

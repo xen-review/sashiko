@@ -13712,7 +13712,10 @@ mod tests {
     async fn checkpoint_terminal_completion_preserves_partial_results_and_usage() -> Result<()> {
         use crate::agent_harness::{
             series::{ReplyDraft, ReviewArtifacts},
-            session::{HarnessCallUsage, HarnessOutcome, HarnessStatus, HarnessTrace},
+            session::{
+                HarnessCallUsage, HarnessFailedCallUsage, HarnessOutcome, HarnessStatus,
+                HarnessTrace,
+            },
         };
         use crate::ai::{AiMessage, AiRole, AiUsage};
         #[derive(PartialEq, Eq)]
@@ -13729,13 +13732,14 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         };
-        for (terminal, timed_out, final_progress) in [
-            (ReviewStatus::Reviewed, false, FinalProgress::Valid),
-            (ReviewStatus::Failed, false, FinalProgress::Valid),
-            (ReviewStatus::Failed, true, FinalProgress::Valid),
-            (ReviewStatus::Cancelled, false, FinalProgress::Valid),
-            (ReviewStatus::Failed, true, FinalProgress::Missing),
-            (ReviewStatus::Failed, true, FinalProgress::Invalid),
+        for (terminal, timed_out, final_progress, observed_failure) in [
+            (ReviewStatus::Reviewed, false, FinalProgress::Valid, false),
+            (ReviewStatus::Failed, false, FinalProgress::Valid, false),
+            (ReviewStatus::Failed, true, FinalProgress::Valid, false),
+            (ReviewStatus::Cancelled, false, FinalProgress::Valid, false),
+            (ReviewStatus::Failed, true, FinalProgress::Missing, false),
+            (ReviewStatus::Failed, true, FinalProgress::Invalid, false),
+            (ReviewStatus::Failed, false, FinalProgress::Valid, true),
         ] {
             let db = setup_db().await;
             let patchset_id = insert_stored_prerequisite_series(&db).await?;
@@ -13769,6 +13773,18 @@ mod tests {
             for position in 0..2 {
                 trace.provider_calls += 1;
                 trace.history.push(message(AiRole::User));
+                if position == 1 && observed_failure {
+                    trace.reported_failed_call_usage = Some(HarnessFailedCallUsage {
+                        provider_call: trace.provider_calls,
+                        usage: AiUsage {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            total_tokens: 15,
+                            cached_tokens: Some(0),
+                        },
+                    });
+                    break;
+                }
                 if position == 1 && (terminal == ReviewStatus::Cancelled || timed_out) {
                     break;
                 }
@@ -13911,11 +13927,12 @@ mod tests {
             assert!(db.finish_checkpoint_session(finish()).await.is_err());
             let mut rows = db.conn.query("SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cached), COUNT(tokens_cached) FROM ai_interactions", ()).await?;
             let row = rows.next().await?.unwrap();
-            let known_calls = if terminal == ReviewStatus::Cancelled || timed_out {
-                1
-            } else {
-                2
-            };
+            let known_calls =
+                if terminal == ReviewStatus::Cancelled || timed_out || observed_failure {
+                    1
+                } else {
+                    2
+                };
             assert_eq!(row.get::<i64>(0)?, known_calls);
             assert_eq!(row.get::<i64>(1)?, known_calls * 10);
             assert_eq!(row.get::<i64>(2)?, known_calls * 2);
@@ -13942,6 +13959,22 @@ mod tests {
             let raw: serde_json::Value =
                 serde_json::from_str(&crate::compression::get_compressed_string(&row, 1)?)?;
             assert_eq!(raw["trace"]["provider_calls"], 2);
+            if observed_failure {
+                assert_eq!(
+                    raw["trace"]["reported_failed_call_usage"]["provider_call"],
+                    2
+                );
+                assert_eq!(
+                    raw["trace"]["reported_failed_call_usage"]["usage"]["prompt_tokens"],
+                    12
+                );
+                assert_eq!(
+                    raw["trace"]["reported_failed_call_usage"]["usage"]["cached_tokens"],
+                    0
+                );
+            } else {
+                assert!(raw["trace"].get("reported_failed_call_usage").is_none());
+            }
             if timed_out {
                 assert_eq!(raw["status"]["status"], "timed_out");
             }
@@ -13979,13 +14012,14 @@ mod tests {
                 saved_progress["provider_calls_with_usage"],
                 if retained_checkpoint { 1 } else { known_calls }
             );
-            let expected_cached = if terminal == ReviewStatus::Failed && !timed_out {
-                serde_json::Value::Null
-            } else if terminal == ReviewStatus::Reviewed {
-                serde_json::json!(0)
-            } else {
-                serde_json::json!(3)
-            };
+            let expected_cached =
+                if terminal == ReviewStatus::Failed && !timed_out && !observed_failure {
+                    serde_json::Value::Null
+                } else if terminal == ReviewStatus::Reviewed {
+                    serde_json::json!(0)
+                } else {
+                    serde_json::json!(3)
+                };
             assert_eq!(
                 saved_progress["reported_usage"]["cached_tokens"],
                 expected_cached
@@ -14011,7 +14045,7 @@ mod tests {
             assert_eq!(checkpoints["provider_calls_attempted"], 2);
             assert_eq!(
                 checkpoints["usage_complete"],
-                terminal != ReviewStatus::Cancelled && !timed_out
+                terminal != ReviewStatus::Cancelled && !timed_out && !observed_failure
             );
             assert_eq!(
                 checkpoints["checkpoints"][0]["reviewer_notes"],
@@ -14644,7 +14678,10 @@ mod tests {
     async fn harness_completion_is_atomic_scoped_and_cancellation_safe() -> Result<()> {
         use crate::agent_harness::{
             series::{ReplyDraft, ReviewArtifacts, SeriesOutcome},
-            session::{HarnessCallUsage, HarnessOutcome, HarnessStatus, HarnessTrace},
+            session::{
+                HarnessCallUsage, HarnessFailedCallUsage, HarnessOutcome, HarnessStatus,
+                HarnessTrace,
+            },
         };
         use crate::ai::{AiMessage, AiRole};
         let db = setup_db().await;
@@ -14846,6 +14883,16 @@ mod tests {
         outcome.artifacts = None;
         outcome.execution.trace.usage.cached_tokens = None;
         outcome.execution.trace.call_usage[0].usage.cached_tokens = None;
+        outcome.execution.trace.provider_calls = 2;
+        outcome.execution.trace.reported_failed_call_usage = Some(HarnessFailedCallUsage {
+            provider_call: 2,
+            usage: crate::ai::AiUsage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+                total_tokens: 15,
+                cached_tokens: Some(0),
+            },
+        });
         outcome.execution.status = HarnessStatus::Failed {
             reason: "Invalid final artifact".to_string(),
         };
@@ -14885,6 +14932,10 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_str(failed["output"].as_str().unwrap())?;
         assert_eq!(persisted["execution"]["status"]["status"], "failed");
+        assert_eq!(
+            persisted["execution"]["trace"]["reported_failed_call_usage"]["usage"]["prompt_tokens"],
+            12
+        );
         assert_eq!(
             persisted["execution"]["trace"]["usage"]["prompt_tokens"],
             60

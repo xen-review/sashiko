@@ -445,6 +445,25 @@ pub struct AiUsage {
     pub cached_tokens: Option<usize>,
 }
 
+#[derive(Debug)]
+pub struct ProviderFailureUsage {
+    pub usage: AiUsage,
+    message: String,
+}
+
+impl ProviderFailureUsage {
+    pub fn attach(error: anyhow::Error, usage: AiUsage) -> anyhow::Error {
+        let message = error.to_string();
+        error.context(Self { usage, message })
+    }
+}
+
+impl std::fmt::Display for ProviderFailureUsage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 impl AiUsage {
     pub fn accumulate(&mut self, other: &AiUsage) {
         self.prompt_tokens += other.prompt_tokens;
@@ -1422,6 +1441,15 @@ mod tests {
                 },
                 class,
             );
+            let original: anyhow::Error = RemoteAiError {
+                message: msg.to_string(),
+                class,
+            }
+            .into();
+            let message = original.to_string();
+            let error = ProviderFailureUsage::attach(original, AiUsage::default());
+            assert_eq!(error.to_string(), message);
+            assert_ai_error_class(error, class);
         }
 
         assert_ai_error_class(
